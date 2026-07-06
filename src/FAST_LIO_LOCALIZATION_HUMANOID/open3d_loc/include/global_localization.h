@@ -119,6 +119,7 @@ private:
 
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_map_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_scan_base_link_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_scan_map_;
     rclcpp::TimerBase::SharedPtr map_publish_timer_;
     sensor_msgs::msg::PointCloud2 map_msg_;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pub_localization_3d_;

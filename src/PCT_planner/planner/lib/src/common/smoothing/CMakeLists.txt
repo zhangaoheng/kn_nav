@@ -1,4 +1,4 @@
-set(osqp_DIR ${OSQP_ROOT}/lib/cmake/osqp)
+set(osqp_DIR ${PROJECT_SOURCE_DIR}/3rdparty/osqp/install/lib/cmake/osqp)
 
 find_package(osqp REQUIRED)
 
@@ -21,7 +21,7 @@ add_library(common_smoothing SHARED
     utils/math.cc
 )
 target_include_directories(common_smoothing PUBLIC
-  ${OSQP_ROOT}/include
+  ${PROJECT_SOURCE_DIR}/3rdparty/osqp/install/include
 )
 target_link_libraries(common_smoothing
   osqp::osqpstatic

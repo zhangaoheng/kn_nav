@@ -12,6 +12,7 @@
 #include "art_planner/map/processors/probability_distribution.h"
 #include "art_planner/map/processors/sample_density.h"
 #include "art_planner/objectives/path_length_objective.h"
+#include "art_planner/planners/grid_astar.h"
 #include "art_planner/planners/lazy_prm_star_min_update.h"
 #include "art_planner/planners/prm_motion_cost.h"
 #include "art_planner/sampler.h"
@@ -101,6 +102,10 @@ Planner::Planner(const ParamsConstPtr& params)
     planner.reset(new LazyPRMStarMinUpdate(si));
   } else if (params_->planner.name == "prm_motion_cost") {
     planner.reset(new PRMMotionCost(si));
+  } else if (params_->planner.name == "astar") {
+    // Grid A-star owns planning, but SimpleSetup still needs a planner for
+    // shared setup/visualization calls used by the ROS wrapper.
+    planner.reset(new og::RRTstar(si));
   } else {
     throw std::runtime_error("Unknown planner requested: " + params_->planner.name);
   }
@@ -193,6 +198,8 @@ void Planner::setStartAndGoal(const ob::ScopedState<>& start,
 PlannerStatus Planner::plan(const ob::ScopedState<>& start,
                             const ob::ScopedState<>& goal) {
   std::lock_guard<std::mutex> lock(map_mutex_);
+  solved_ = false;
+  astar_solution_path_.reset();
 
   if (!checker_->hasMap()) {
     std::cout << "Planner does not have the elevation map set, yet." << std::endl;
@@ -236,6 +243,18 @@ PlannerStatus Planner::plan(const ob::ScopedState<>& start,
 
   }
 
+  if (params_->planner.name == "astar") {
+    astar_solution_path_.reset(
+        new og::PathGeometric(ss_->getSpaceInformation()));
+    GridAStarPlanner astar(params_, map_, space_);
+    const auto result = astar.plan(start, goal_clipped, astar_solution_path_.get());
+    solved_ = result == PlannerStatus::SOLVED;
+    if (!solved_) {
+      astar_solution_path_.reset();
+    }
+    return result;
+  }
+
   // Reset planner and start planning.
   ss_->getPlanner()->clearQuery();
   setStartAndGoal(start, goal_clipped);
@@ -264,10 +283,17 @@ PlannerStatus Planner::plan(const ob::ScopedState<>& start,
 
 
 og::PathGeometric Planner::getSolutionPath(const bool& simplify) const {
-  auto path = ss_->getSolutionPath();
   if (!solved_) {
     throw ompl::Exception("Requested failed solution path.");
   }
+  if (params_->planner.name == "astar") {
+    if (!astar_solution_path_) {
+      throw ompl::Exception("Requested missing A-star solution path.");
+    }
+    return *astar_solution_path_;
+  }
+
+  auto path = ss_->getSolutionPath();
   if (simplify) {
     ss_->simplifySolution();
     const auto path_simple = ss_->getSolutionPath();

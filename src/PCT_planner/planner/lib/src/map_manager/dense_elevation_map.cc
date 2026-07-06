@@ -86,7 +86,8 @@ double DenseElevationMap::GetRealCost(int layer, double x, double y,
 double DenseElevationMap::GetRealCostSafe(int layer, double x, double y,
                                           const double height_hint) {
   int real_layer = UpdateLayerSafe(layer, x, y, height_hint);
-  return planning_cost_(index_y_safe(y) + real_layer * max_y_, index_x_safe(x));
+  return planning_cost_(index_y_safe(y) + real_layer * max_y_,
+                        index_x_safe(x));
 }
 
 int DenseElevationMap::UpdateLayer(const int layer, const double x,

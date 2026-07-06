@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Coordinate a PCT global path with rolling ART local plans."""
 
+from copy import deepcopy
 import math
 from typing import Optional, Sequence
 
@@ -21,7 +22,10 @@ from pct_art_local_navigation.coordinator_logic import (
     Point2,
     closest_progress_index,
     distance,
+    local_goal_z_slope_rejection_reason,
+    point_inside_map,
     select_local_goal,
+    select_local_goal_without_map,
     tangent_yaw,
     validate_local_path,
 )
@@ -86,14 +90,18 @@ class PctArtCoordinator(Node):
 
         self._global_path_msg: Optional[Path] = None
         self._global_points = []
+        self._global_zs = []
         self._progress_index: Optional[int] = None
         self._map_geometry: Optional[MapGeometry] = None
         self._map_receive_time = None
         self._robot_point: Optional[Point2] = None
+        self._robot_z: Optional[float] = None
         self._robot_yaw = 0.0
         self._local_goal_msg: Optional[PoseStamped] = None
         self._local_goal_index: Optional[int] = None
         self._last_art_path_time = None
+        self._last_local_path_msg: Optional[Path] = None
+        self._last_local_path_publish_time = None
         self._motion_path_active = False
         self._final_approach_active: Optional[bool] = None
 
@@ -108,6 +116,7 @@ class PctArtCoordinator(Node):
         self._set_state(CoordinatorState.WAIT_GLOBAL_PATH, 'waiting for /pct_path')
         self._publish_final_approach(False)
         self.create_timer(1.0 / self.update_rate, self._update)
+        self.create_timer(1.0 / self.local_path_republish_rate, self._republish_local_path)
 
         self.get_logger().info(
             'PCT→ART coordinator ready: '
@@ -127,14 +136,18 @@ class PctArtCoordinator(Node):
             'status_topic', '/pct_art_local_navigation/status'
         )
         self.declare_parameter('art_action_name', '/art_planner/plan_to_goal')
+        self.declare_parameter('require_map_for_goal_selection', True)
         self.declare_parameter('update_rate', 2.0)
         self.declare_parameter('lookahead_distance', 3.5)
         self.declare_parameter('minimum_goal_distance', 0.8)
         self.declare_parameter('maximum_goal_distance', 4.0)
+        self.declare_parameter('maximum_local_goal_z_delta', 0.8)
+        self.declare_parameter('maximum_local_goal_slope', 0.35)
         self.declare_parameter('map_edge_margin', 0.8)
         self.declare_parameter('advance_distance', 1.5)
         self.declare_parameter('goal_update_distance', 0.8)
         self.declare_parameter('goal_update_min_period', 0.5)
+        self.declare_parameter('empty_art_path_grace_period', 0.75)
         self.declare_parameter('goal_reached_distance', 0.35)
         self.declare_parameter('goal_yaw_tolerance', 0.175)
         self.declare_parameter('progress_backtrack_points', 10)
@@ -145,6 +158,8 @@ class PctArtCoordinator(Node):
         self.declare_parameter('map_timeout', 1.0)
         self.declare_parameter('localization_timeout', 0.5)
         self.declare_parameter('art_path_timeout', 2.0)
+        self.declare_parameter('local_path_republish_rate', 10.0)
+        self.declare_parameter('local_path_reuse_timeout', 0.8)
         self.declare_parameter('tf_timeout', 0.1)
         self.declare_parameter('enable_path_smoothing', True)
         self.declare_parameter('path_min_point_spacing', 0.10)
@@ -168,14 +183,18 @@ class PctArtCoordinator(Node):
         self.local_goal_topic = get('local_goal_topic')
         self.status_topic = get('status_topic')
         self.art_action_name = get('art_action_name')
+        self.require_map_for_goal_selection = bool(get('require_map_for_goal_selection'))
         self.update_rate = float(get('update_rate'))
         self.lookahead_distance = float(get('lookahead_distance'))
         self.minimum_goal_distance = float(get('minimum_goal_distance'))
         self.maximum_goal_distance = float(get('maximum_goal_distance'))
+        self.maximum_local_goal_z_delta = float(get('maximum_local_goal_z_delta'))
+        self.maximum_local_goal_slope = float(get('maximum_local_goal_slope'))
         self.map_edge_margin = float(get('map_edge_margin'))
         self.advance_distance = float(get('advance_distance'))
         self.goal_update_distance = float(get('goal_update_distance'))
         self.goal_update_min_period = float(get('goal_update_min_period'))
+        self.empty_art_path_grace_period = float(get('empty_art_path_grace_period'))
         self.goal_reached_distance = float(get('goal_reached_distance'))
         self.goal_yaw_tolerance = float(get('goal_yaw_tolerance'))
         self.progress_backtrack_points = int(get('progress_backtrack_points'))
@@ -188,6 +207,8 @@ class PctArtCoordinator(Node):
         self.map_timeout = float(get('map_timeout'))
         self.localization_timeout = float(get('localization_timeout'))
         self.art_path_timeout = float(get('art_path_timeout'))
+        self.local_path_republish_rate = float(get('local_path_republish_rate'))
+        self.local_path_reuse_timeout = float(get('local_path_reuse_timeout'))
         self.tf_timeout = float(get('tf_timeout'))
         self.enable_path_smoothing = bool(get('enable_path_smoothing'))
         self.path_min_point_spacing = float(get('path_min_point_spacing'))
@@ -219,11 +240,14 @@ class PctArtCoordinator(Node):
             'advance_distance': self.advance_distance,
             'goal_update_distance': self.goal_update_distance,
             'goal_update_min_period': self.goal_update_min_period,
+            'empty_art_path_grace_period': self.empty_art_path_grace_period,
             'goal_reached_distance': self.goal_reached_distance,
             'goal_yaw_tolerance': self.goal_yaw_tolerance,
             'map_timeout': self.map_timeout,
             'localization_timeout': self.localization_timeout,
             'art_path_timeout': self.art_path_timeout,
+            'local_path_republish_rate': self.local_path_republish_rate,
+            'local_path_reuse_timeout': self.local_path_reuse_timeout,
             'tf_timeout': self.tf_timeout,
             'final_maximum_path_goal_distance': self.final_maximum_path_goal_distance,
             'path_min_point_spacing': self.path_min_point_spacing,
@@ -239,6 +263,16 @@ class PctArtCoordinator(Node):
             <= self.maximum_goal_distance
         ):
             raise ValueError('goal distances must satisfy minimum <= lookahead <= maximum')
+        if (
+            not math.isfinite(self.maximum_local_goal_z_delta)
+            or self.maximum_local_goal_z_delta < 0.0
+        ):
+            raise ValueError('maximum_local_goal_z_delta must be finite and non-negative')
+        if (
+            not math.isfinite(self.maximum_local_goal_slope)
+            or self.maximum_local_goal_slope < 0.0
+        ):
+            raise ValueError('maximum_local_goal_slope must be finite and non-negative')
         if self.goal_yaw_tolerance > math.pi:
             raise ValueError('goal_yaw_tolerance must not exceed pi radians')
         if not (
@@ -260,8 +294,11 @@ class PctArtCoordinator(Node):
         if not message.poses:
             self._global_path_msg = None
             self._global_points = []
+            self._global_zs = []
             self._progress_index = None
             self._local_goal_msg = None
+            self._last_local_path_msg = None
+            self._last_local_path_publish_time = None
             self._publish_final_approach(False)
             self._stop(CoordinatorState.WAIT_GLOBAL_PATH, 'received empty global path')
             self._cancel_active_goal()
@@ -274,8 +311,12 @@ class PctArtCoordinator(Node):
             return
 
         points = [Point2(p.pose.position.x, p.pose.position.y) for p in message.poses]
+        z_values = [p.pose.position.z for p in message.poses]
         if any(not math.isfinite(p.x) or not math.isfinite(p.y) for p in points):
             self._stop(CoordinatorState.BLOCKED, 'global path contains non-finite points')
+            return
+        if any(not math.isfinite(z) for z in z_values):
+            self._stop(CoordinatorState.BLOCKED, 'global path contains non-finite z')
             return
 
         if self._motion_path_active:
@@ -284,10 +325,13 @@ class PctArtCoordinator(Node):
             self._publish_final_approach(False)
         self._global_path_msg = message
         self._global_points = points
+        self._global_zs = z_values
         self._progress_index = None
         self._local_goal_msg = None
         self._local_goal_index = None
         self._last_art_path_time = None
+        self._last_local_path_msg = None
+        self._last_local_path_publish_time = None
         self._cancel_active_goal()
         self._set_state(CoordinatorState.PLANNING, 'new global path received')
 
@@ -322,6 +366,13 @@ class PctArtCoordinator(Node):
             return
 
         points = [Point2(p.pose.position.x, p.pose.position.y) for p in message.poses]
+        if len(points) < 2 and self._local_goal_transition_active():
+            self.get_logger().info(
+                'Ignoring empty ART path while local goal is being updated',
+                throttle_duration_sec=1.0,
+            )
+            return
+
         local_goal = Point2(
             self._local_goal_msg.pose.position.x,
             self._local_goal_msg.pose.position.y,
@@ -344,9 +395,9 @@ class PctArtCoordinator(Node):
             return
 
         output_points = points
-        path_kind = 'ART'
+        path_kind = 'local planner'
         if self.enable_path_smoothing:
-            if self._map_geometry is None:
+            if self.require_map_for_goal_selection and self._map_geometry is None:
                 self._stop(CoordinatorState.WAIT_MAP, 'cannot smooth path without GridMap')
                 return
             output_points = smooth_local_path(points, self.path_smoothing_config)
@@ -360,17 +411,18 @@ class PctArtCoordinator(Node):
             if not valid:
                 self._stop(CoordinatorState.BLOCKED, f'smoothed path invalid: {reason}')
                 return
-            valid, reason = validate_smoothed_path(
-                output_points,
-                points,
-                self._map_geometry,
-                self.map_edge_margin,
-                self.path_max_deviation,
-            )
-            if not valid:
-                self._stop(CoordinatorState.BLOCKED, reason)
-                return
-            path_kind = 'smoothed ART'
+            if self._map_geometry is not None:
+                valid, reason = validate_smoothed_path(
+                    output_points,
+                    points,
+                    self._map_geometry,
+                    self.map_edge_margin,
+                    self.path_max_deviation,
+                )
+                if not valid:
+                    self._stop(CoordinatorState.BLOCKED, reason)
+                    return
+            path_kind = 'smoothed local planner'
 
         if self.enable_path_smoothing:
             output_message = self._make_local_path_message(message, output_points)
@@ -380,6 +432,8 @@ class PctArtCoordinator(Node):
         self._publish_final_approach(final_goal)
         self._local_path_pub.publish(output_message)
         self._last_art_path_time = self.get_clock().now()
+        self._last_local_path_msg = output_message
+        self._last_local_path_publish_time = self._last_art_path_time
         self._motion_path_active = True
         self._set_state(
             CoordinatorState.TRACKING,
@@ -448,6 +502,100 @@ class PctArtCoordinator(Node):
                 best_z = z0 + ratio * (z1 - z0)
         return best_z
 
+    def _local_goal_failure_reason(self, require_map: bool, robot: Point2) -> str:
+        if not self._global_points or self._progress_index is None:
+            return 'planner range'
+
+        saw_range_candidate = False
+        saw_map_candidate = not require_map
+        saw_z_rejection = False
+        saw_slope_rejection = False
+        arc_distance = 0.0
+        for index in range(self._progress_index + 1, len(self._global_points)):
+            arc_distance += distance(
+                self._global_points[index - 1], self._global_points[index]
+            )
+            if arc_distance > self.maximum_goal_distance:
+                break
+            if arc_distance < self.minimum_goal_distance:
+                continue
+            saw_range_candidate = True
+            if require_map and not self._point_is_inside_current_map(
+                self._global_points[index]
+            ):
+                continue
+            saw_map_candidate = True
+            xy_distance = distance(robot, self._global_points[index])
+            rejection = local_goal_z_slope_rejection_reason(
+                self._global_zs,
+                index,
+                self._robot_z,
+                self.maximum_local_goal_z_delta,
+                xy_distance,
+                self.maximum_local_goal_slope,
+            )
+            if rejection is None:
+                continue
+            saw_z_rejection = saw_z_rejection or rejection == 'z window'
+            saw_slope_rejection = saw_slope_rejection or rejection == 'slope window'
+
+        if not saw_range_candidate:
+            return 'planner range'
+        if require_map and not saw_map_candidate:
+            return 'GridMap'
+        if saw_slope_rejection:
+            return 'slope window'
+        if saw_z_rejection:
+            return 'z window'
+        return 'planner range'
+
+    def _point_is_inside_current_map(self, point: Point2) -> bool:
+        if self._map_geometry is None:
+            return False
+        return point_inside_map(point, self._map_geometry, self.map_edge_margin)
+
+    def _republish_local_path(self):
+        if (
+            not self._motion_path_active
+            or self._last_local_path_msg is None
+            or self._last_local_path_publish_time is None
+        ):
+            return
+        now = self.get_clock().now()
+        age = (now - self._last_local_path_publish_time).nanoseconds * 1e-9
+        if age < 0.0 or age > self.local_path_reuse_timeout:
+            return
+
+        message = self._crop_path_for_robot(self._last_local_path_msg)
+        message.header.stamp = now.to_msg()
+        for pose in message.poses:
+            pose.header.stamp = message.header.stamp
+        self._local_path_pub.publish(message)
+
+    def _crop_path_for_robot(self, source: Path) -> Path:
+        message = Path()
+        message.header.frame_id = source.header.frame_id
+        message.header.stamp = self.get_clock().now().to_msg()
+        if not source.poses:
+            return message
+        if self._robot_point is None or len(source.poses) <= 2:
+            message.poses = [deepcopy(pose) for pose in source.poses]
+            return message
+
+        nearest_index = min(
+            range(len(source.poses)),
+            key=lambda index: distance(
+                self._robot_point,
+                Point2(
+                    source.poses[index].pose.position.x,
+                    source.poses[index].pose.position.y,
+                ),
+            ),
+        )
+        start_index = min(nearest_index, max(0, len(source.poses) - 2))
+        message.poses = [deepcopy(pose) for pose in source.poses[start_index:]]
+        return message
+
     def _update(self):
         if not self._global_points:
             if self._state == CoordinatorState.GOAL_REACHED:
@@ -456,12 +604,13 @@ class PctArtCoordinator(Node):
             return
 
         now = self.get_clock().now()
-        if self._map_geometry is None or self._map_receive_time is None:
-            self._stop(CoordinatorState.WAIT_MAP, 'waiting for traversability map')
-            return
-        if (now - self._map_receive_time).nanoseconds * 1e-9 > self.map_timeout:
-            self._stop(CoordinatorState.WAIT_MAP, 'traversability map timed out')
-            return
+        if self.require_map_for_goal_selection:
+            if self._map_geometry is None or self._map_receive_time is None:
+                self._stop(CoordinatorState.WAIT_MAP, 'waiting for traversability map')
+                return
+            if (now - self._map_receive_time).nanoseconds * 1e-9 > self.map_timeout:
+                self._stop(CoordinatorState.WAIT_MAP, 'traversability map timed out')
+                return
 
         robot = self._lookup_robot_point(now)
         if robot is None:
@@ -525,17 +674,44 @@ class PctArtCoordinator(Node):
             self.progress_backtrack_points,
             self.progress_forward_search_points,
         )
-        selection = select_local_goal(
-            self._global_points,
-            self._progress_index,
-            self._map_geometry,
-            self.map_edge_margin,
-            self.lookahead_distance,
-            self.minimum_goal_distance,
-            self.maximum_goal_distance,
-        )
+        if self.require_map_for_goal_selection:
+            selection = select_local_goal(
+                self._global_points,
+                self._progress_index,
+                self._map_geometry,
+                self.map_edge_margin,
+                self.lookahead_distance,
+                self.minimum_goal_distance,
+                self.maximum_goal_distance,
+                self._global_zs,
+                self._robot_z,
+                self.maximum_local_goal_z_delta,
+                robot,
+                self.maximum_local_goal_slope,
+            )
+            no_selection_reason = (
+                'no valid PCT local goal inside '
+                f'{self._local_goal_failure_reason(True, robot)}'
+            )
+        else:
+            selection = select_local_goal_without_map(
+                self._global_points,
+                self._progress_index,
+                robot,
+                self.lookahead_distance,
+                self.minimum_goal_distance,
+                self.maximum_goal_distance,
+                self._global_zs,
+                self._robot_z,
+                self.maximum_local_goal_z_delta,
+                self.maximum_local_goal_slope,
+            )
+            no_selection_reason = (
+                'no valid PCT local goal inside '
+                f'{self._local_goal_failure_reason(False, robot)}'
+            )
         if selection is None:
-            self._stop(CoordinatorState.BLOCKED, 'no valid PCT local goal inside GridMap')
+            self._stop(CoordinatorState.BLOCKED, no_selection_reason)
             return
 
         candidate = self._make_local_goal(selection.index)
@@ -593,6 +769,7 @@ class PctArtCoordinator(Node):
             if age < 0.0 or age > self.localization_timeout:
                 return None
         self._robot_yaw = quaternion_to_yaw(transform.transform.rotation)
+        self._robot_z = transform.transform.translation.z
         return Point2(
             transform.transform.translation.x,
             transform.transform.translation.y,
@@ -622,10 +799,13 @@ class PctArtCoordinator(Node):
         self._cancel_active_goal()
         self._global_path_msg = None
         self._global_points = []
+        self._global_zs = []
         self._progress_index = None
         self._local_goal_msg = None
         self._local_goal_index = None
         self._last_art_path_time = None
+        self._last_local_path_msg = None
+        self._last_local_path_publish_time = None
         self._last_goal_request_time = None
         self._set_state(
             CoordinatorState.GOAL_REACHED,
@@ -640,6 +820,20 @@ class PctArtCoordinator(Node):
             (now - self._last_goal_request_time).nanoseconds * 1e-9
             >= self.goal_update_min_period
         )
+
+    def _local_goal_transition_active(self) -> bool:
+        if (
+            self._pending_goal is not None
+            or self._send_future is not None
+            or self._cancel_future is not None
+        ):
+            return True
+        if self._last_goal_request_time is None:
+            return False
+        elapsed = (
+            self.get_clock().now() - self._last_goal_request_time
+        ).nanoseconds * 1e-9
+        return 0.0 <= elapsed <= self.empty_art_path_grace_period
 
     def _request_art_goal(self, goal: PoseStamped):
         self._pending_goal = goal
@@ -709,12 +903,12 @@ class PctArtCoordinator(Node):
     def _art_feedback_cb(self, feedback_message):
         status = feedback_message.feedback.status
         failures = {
-            PlanToGoal.Feedback.INVALID_START: 'ART reports invalid start',
-            PlanToGoal.Feedback.INVALID_GOAL: 'ART reports invalid local goal',
-            PlanToGoal.Feedback.NO_SOLUTION: 'ART found no local path',
-            PlanToGoal.Feedback.NO_GOAL_TF: 'ART cannot transform local goal',
-            PlanToGoal.Feedback.NO_MAP: 'ART has no map',
-            PlanToGoal.Feedback.NO_ROBOT_TF: 'ART cannot obtain robot TF',
+            PlanToGoal.Feedback.INVALID_START: 'local planner reports invalid start',
+            PlanToGoal.Feedback.INVALID_GOAL: 'local planner reports invalid local goal',
+            PlanToGoal.Feedback.NO_SOLUTION: 'local planner found no local path',
+            PlanToGoal.Feedback.NO_GOAL_TF: 'local planner cannot transform local goal',
+            PlanToGoal.Feedback.NO_MAP: 'local planner has no map',
+            PlanToGoal.Feedback.NO_ROBOT_TF: 'local planner cannot obtain robot TF',
         }
         if status in failures:
             self._stop(CoordinatorState.BLOCKED, failures[status])
@@ -742,6 +936,8 @@ class PctArtCoordinator(Node):
         self._local_path_pub.publish(message)
         self._motion_path_active = False
         self._last_art_path_time = None
+        self._last_local_path_msg = None
+        self._last_local_path_publish_time = None
         self._publish_final_approach(False)
 
     def _is_final_local_goal(self) -> bool:

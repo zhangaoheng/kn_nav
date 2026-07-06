@@ -25,6 +25,7 @@ void Astar::Init(const double cost_threshold, const int num_layers,
                  const Eigen::MatrixXd& ele_map) {
   auto t0 = std::chrono::high_resolution_clock::now();
   cost_threshold_ = cost_threshold;
+  resolution_ = resolution;
   step_cost_weight_ = step_cost_weight;
 
   max_x_ = cost_map.cols();
@@ -164,6 +165,9 @@ bool Astar::Search(const Eigen::Vector3i& start, const Eigen::Vector3i& goal) {
       // }
 
       auto diff = neighbor_node->idx - current_node->idx;
+      // Preserve the continuous traversability cost for every reachable cell.
+      // The previous `step_cost < 5` dead zone zeroed every allowed cost with
+      // the configured threshold/weight, reducing the search to pure distance.
       const double step_cost =
           step_cost_weight_ * std::max(0.0, neighbor_node->search_cost);
       tentative_g =

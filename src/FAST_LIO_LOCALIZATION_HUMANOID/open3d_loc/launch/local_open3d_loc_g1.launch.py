@@ -63,7 +63,7 @@ def generate_launch_description():
         description='Use simulation time'
     )
     # 配置文件路径
-    config_file = os.path.join(open3d_loc_share, 'config', 'loc_param_g1_unitree.yaml')
+    config_file = os.path.join(open3d_loc_share, 'config', 'loc_param_g1_local.yaml')
 
     # 全局定位节点
     global_localization_node = Node(

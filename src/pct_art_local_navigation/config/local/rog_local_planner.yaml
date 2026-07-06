@@ -1,0 +1,107 @@
+rog_local_planner:
+  ros__parameters:
+    global_frame: map
+    robot_frame: base_link
+    action_name: /art_planner/plan_to_goal
+    path_topic: /art_planner/path
+
+    planner:
+      replan_rate: 5.0
+      planning_timeout: 0.25
+      search_resolution: 0.2
+      search_margin: 3.0
+      output_spacing: 0.15
+      unknown_as_occupied: false
+      require_map_ready: true
+      allow_diagonal: true
+      enable_path_smoothing: true
+      path_smoothing_iterations: 20
+      path_smoothing_data_weight: 0.35
+      path_smoothing_smooth_weight: 0.20
+      path_smoothing_max_deviation: 0.20
+
+    cost:
+      height_weight: 1.0
+      unknown_penalty: 1.0
+      obstacle_weight: 4.0
+      inflation_weight: 2.0
+      cost_sample_radius: 0.35
+      cost_sample_step: 0.10
+      turn_weight: 0.2
+
+    projection:
+      enable: true
+      radius: 0.45
+      step: 0.10
+
+    smoothing:
+      min_point_spacing: 0.10
+      collinear_angle_threshold: 0.08
+      max_deviation: 0.20
+      max_segment_slope: 0.40
+      max_turn_angle: 1.20
+
+    visualization:
+      enable_footprint_markers: true
+      footprint_marker_topic: /rog_local_planner/footprint_markers
+      footprint_marker_stride: 2
+      footprint_marker_alpha: 0.28
+
+    robot:
+      cylinder_radius: 0.28
+      cylinder_offset: 0.23
+      clearance_up: 0.10
+      clearance_down: 0.05
+      vertical_step: 0.15
+      radial_samples: 8
+      enable_pitch_footprint: true
+      max_footprint_pitch: 0.70
+      footprint_z_offset: 0.06
+
+    rog_map:
+      resolution: 0.1
+      inflation_resolution: 0.1
+      inflation_step: 1
+      unk_inflation_en: false
+      unk_inflation_step: 1
+      map_size: [20.0, 20.0, 8.0]
+      fix_map_origin: [0.0, 0.0, 0.0]
+      map_sliding:
+        enable: true
+        threshold: 1.0
+      raycasting:
+        enable: true
+        batch_update_size: 1
+        unk_thresh: 0.70
+        p_hit: 0.70
+        p_miss: 0.35
+        p_min: 0.12
+        p_max: 0.97
+        p_occ: 0.80
+        p_free: 0.30
+        ray_range: [0.3, 10.0]
+        local_update_box: [12.0, 12.0, 5.0]
+      point_filt_num: 2
+      intensity_thresh: -1
+      virtual_ground_height: -6.0
+      virtual_ceil_height: 6.0
+      frontier_extraction_en: false
+      esdf:
+        enable: false
+        resolution: 0.2
+        local_update_box: [10.0, 10.0, 4.0]
+      load_pcd_en: false
+      pcd_name: map.pcd
+      ros_callback:
+        enable: true
+        cloud_topic: /scan_map
+        odom_topic: /Odometry_open3d
+        odom_timeout: 0.3
+      visualization:
+        enable: true
+        pub_unknown_map_en: false
+        use_body_center: true
+        frame_id: map
+        time_rate: 2.0
+        frame_rate: 1
+        range: [10.0, 10.0, 6.0]

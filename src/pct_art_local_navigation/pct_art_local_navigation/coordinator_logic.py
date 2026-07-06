@@ -26,6 +26,78 @@ class LocalGoalSelection:
     arc_distance: float
 
 
+def z_delta_ok(
+    path_z: Optional[Sequence[float]],
+    index: int,
+    robot_z: Optional[float],
+    maximum_z_delta: Optional[float],
+) -> bool:
+    if path_z is None or robot_z is None or maximum_z_delta is None:
+        return True
+    if maximum_z_delta <= 0.0:
+        return True
+    if not 0 <= index < len(path_z):
+        return False
+    goal_z = path_z[index]
+    return (
+        math.isfinite(goal_z)
+        and math.isfinite(robot_z)
+        and abs(goal_z - robot_z) <= maximum_z_delta
+    )
+
+
+def z_slope_ok(
+    path_z: Optional[Sequence[float]],
+    index: int,
+    robot_z: Optional[float],
+    maximum_z_delta: Optional[float],
+    xy_distance: Optional[float],
+    maximum_slope: Optional[float],
+) -> bool:
+    if not z_delta_ok(path_z, index, robot_z, maximum_z_delta):
+        return False
+    if (
+        path_z is None
+        or robot_z is None
+        or maximum_slope is None
+        or maximum_slope <= 0.0
+    ):
+        return True
+    if not 0 <= index < len(path_z):
+        return False
+    goal_z = path_z[index]
+    if not math.isfinite(goal_z) or not math.isfinite(robot_z):
+        return False
+    dz = abs(goal_z - robot_z)
+    if dz <= 0.0:
+        return True
+    if xy_distance is None or not math.isfinite(xy_distance) or xy_distance <= 1e-6:
+        return False
+    return dz / xy_distance <= maximum_slope
+
+
+def local_goal_z_slope_rejection_reason(
+    path_z: Optional[Sequence[float]],
+    index: int,
+    robot_z: Optional[float],
+    maximum_z_delta: Optional[float],
+    xy_distance: Optional[float],
+    maximum_slope: Optional[float],
+) -> Optional[str]:
+    if z_slope_ok(
+        path_z,
+        index,
+        robot_z,
+        maximum_z_delta,
+        xy_distance,
+        maximum_slope,
+    ):
+        return None
+    if not z_delta_ok(path_z, index, robot_z, maximum_z_delta):
+        return 'z window'
+    return 'slope window'
+
+
 def distance(a: Point2, b: Point2) -> float:
     return math.hypot(a.x - b.x, a.y - b.y)
 
@@ -75,6 +147,11 @@ def select_local_goal(
     desired_distance: float,
     minimum_distance: float,
     maximum_distance: float,
+    path_z: Optional[Sequence[float]] = None,
+    robot_z: Optional[float] = None,
+    maximum_z_delta: Optional[float] = None,
+    robot: Optional[Point2] = None,
+    maximum_slope: Optional[float] = None,
 ) -> Optional[LocalGoalSelection]:
     """Select an in-map path point closest to the desired arc lookahead."""
     if not path or not 0 <= progress_index < len(path):
@@ -88,8 +165,16 @@ def select_local_goal(
         arc_distance += distance(path[index - 1], path[index])
         if arc_distance > maximum_distance:
             break
+        xy_distance = distance(robot, path[index]) if robot is not None else arc_distance
         if arc_distance >= minimum_distance and point_inside_map(
             path[index], geometry, edge_margin
+        ) and z_slope_ok(
+            path_z,
+            index,
+            robot_z,
+            maximum_z_delta,
+            xy_distance,
+            maximum_slope,
         ):
             candidates.append(LocalGoalSelection(index, arc_distance))
 
@@ -102,7 +187,70 @@ def select_local_goal(
     )
     if final_candidate is not None:
         return final_candidate
-    return min(candidates, key=lambda candidate: abs(candidate.arc_distance - desired_distance))
+    return min(
+        candidates,
+        key=lambda candidate: (
+            abs(candidate.arc_distance - desired_distance),
+            -candidate.arc_distance,
+        ),
+    )
+
+
+def select_local_goal_without_map(
+    path: Sequence[Point2],
+    progress_index: int,
+    robot: Point2,
+    desired_distance: float,
+    minimum_distance: float,
+    maximum_distance: float,
+    path_z: Optional[Sequence[float]] = None,
+    robot_z: Optional[float] = None,
+    maximum_z_delta: Optional[float] = None,
+    maximum_slope: Optional[float] = None,
+) -> Optional[LocalGoalSelection]:
+    """Select a local goal by path progress and robot distance only."""
+    if not path or not 0 <= progress_index < len(path):
+        return None
+    if not 0.0 <= minimum_distance <= desired_distance <= maximum_distance:
+        raise ValueError('lookahead distances must be non-negative and ordered')
+
+    candidates = []
+    arc_distance = 0.0
+    for index in range(progress_index + 1, len(path)):
+        arc_distance += distance(path[index - 1], path[index])
+        if arc_distance > maximum_distance:
+            break
+        robot_distance = distance(robot, path[index])
+        if (
+            arc_distance >= minimum_distance
+            and robot_distance <= maximum_distance
+            and z_slope_ok(
+                path_z,
+                index,
+                robot_z,
+                maximum_z_delta,
+                robot_distance,
+                maximum_slope,
+            )
+        ):
+            candidates.append(LocalGoalSelection(index, arc_distance))
+
+    if not candidates:
+        return None
+
+    final_candidate = next(
+        (candidate for candidate in candidates if candidate.index == len(path) - 1),
+        None,
+    )
+    if final_candidate is not None:
+        return final_candidate
+    return min(
+        candidates,
+        key=lambda candidate: (
+            abs(candidate.arc_distance - desired_distance),
+            -candidate.arc_distance,
+        ),
+    )
 
 
 def tangent_yaw(path: Sequence[Point2], index: int) -> float:

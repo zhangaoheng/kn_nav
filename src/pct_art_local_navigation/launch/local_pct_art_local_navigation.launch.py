@@ -1,6 +1,13 @@
-"""Local test launch entry for PCT ART navigation."""
+"""Local test launch entry for PCT and ROG local navigation."""
+
+import datetime
+import os
+from pathlib import Path
+import shutil
+import socket
 
 from launch import LaunchDescription
+import launch.logging
 from launch.actions import (
     DeclareLaunchArgument,
     LogInfo,
@@ -19,6 +26,44 @@ from launch_ros.substitutions import FindPackageShare
 
 
 CONFIG_NAME = 'local'
+MAX_LOG_SESSIONS = 50
+
+
+def _source_package_dir():
+    launch_file = Path(__file__).resolve()
+    if launch_file.parents[1].name == 'pct_art_local_navigation':
+        return launch_file.parents[1]
+
+    parts = launch_file.parts
+    if 'install' in parts:
+        install_index = parts.index('install')
+        workspace = Path(*parts[:install_index])
+        source_dir = workspace / 'src' / 'pct_art_local_navigation'
+        if source_dir.exists():
+            return source_dir
+
+    cwd_source_dir = Path.cwd() / 'src' / 'pct_art_local_navigation'
+    if cwd_source_dir.exists():
+        return cwd_source_dir
+
+    return launch_file.parents[1]
+
+
+def _prepare_log_dir():
+    log_root = _source_package_dir() / 'log'
+    log_root.mkdir(parents=True, exist_ok=True)
+
+    sessions = [path for path in log_root.iterdir() if path.is_dir()]
+    sessions.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    for old_session in sessions[MAX_LOG_SESSIONS - 1:]:
+        shutil.rmtree(old_session, ignore_errors=True)
+
+    timestamp = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S-%f')
+    session_dir = log_root / f'{timestamp}-{socket.gethostname()}-{os.getpid()}'
+    session_dir.mkdir(parents=True, exist_ok=False)
+    launch.logging.launch_config.log_dir = str(session_dir)
+    os.environ['ROS_LOG_DIR'] = str(session_dir)
+    return str(session_dir)
 
 
 def log_process_start(node, label):
@@ -31,6 +76,7 @@ def log_process_start(node, label):
 
 
 def generate_launch_description():
+    log_dir = _prepare_log_dir()
     use_sim_time = LaunchConfiguration('use_sim_time')
     start_open3d_loc = LaunchConfiguration('start_open3d_loc')
     start_pct_planner = LaunchConfiguration('start_pct_planner')
@@ -42,15 +88,10 @@ def generate_launch_description():
     def config_file(filename):
         return PathJoinSubstitution([package_share, 'config', CONFIG_NAME, filename])
 
+    fast_lio_params = config_file('fast_lio.yaml')
     open3d_loc_params = config_file('open3d_loc.yaml')
-    fastdem_params = config_file('fastdem_local_mapping.yaml')
-    traversability_robot_params = config_file('traversability_robot.yaml')
-    traversability_footprint_params = config_file(
-        'traversability_robot_footprint.yaml'
-    )
-    traversability_filter_params = config_file('traversability_robot_filter.yaml')
     coordinator_params = config_file('coordinator.yaml')
-    art_params = config_file('art_local.yaml')
+    rog_local_planner_params = config_file('rog_local_planner.yaml')
     pursuit_params = config_file('pure_pursuit_local.yaml')
     bridge_params = config_file('go2_bridge_local.yaml')
 
@@ -61,6 +102,17 @@ def generate_launch_description():
             ':',
             EnvironmentVariable('LD_LIBRARY_PATH', default_value=''),
         ],
+    )
+    ros_log_environment = SetEnvironmentVariable('ROS_LOG_DIR', log_dir)
+
+    fast_lio = Node(
+        package='fast_lio',
+        executable='fastlio_mapping',
+        name='fastlio_mapping',
+        output='both',
+        parameters=[fast_lio_params, {'use_sim_time': use_sim_time}],
+        condition=IfCondition(start_open3d_loc),
+        emulate_tty=True,
     )
 
     open3d_global_localization = Node(
@@ -85,54 +137,24 @@ def generate_launch_description():
         package='pct_planner',
         executable='run_ros2_global_planner',
         name='pct_global_planner',
-        output='screen',
+        output='both',
         parameters=[pct_params_file, {'use_sim_time': use_sim_time}],
         condition=IfCondition(start_pct_planner),
     )
 
-    fastdem = Node(
-        package='fastdem_ros2',
-        executable='fastdem_node',
-        name='fastdem',
-        output='screen',
-        parameters=[
-            {
-                'config_file': fastdem_params,
-                'base_frame': 'base_link',
-                'map_frame': 'map',
-                'use_sim_time': use_sim_time,
-                'input_scan': '/scan_base_link',
-            }
-        ],
-    )
-
-    traversability = Node(
-        package='traversability_estimation',
-        executable='traversability_estimation_node',
-        name='traversability_estimation',
-        output='screen',
-        parameters=[
-            traversability_robot_params,
-            traversability_footprint_params,
-            traversability_filter_params,
-            {'use_sim_time': use_sim_time},
-        ],
-    )
-
-    art_planner = Node(
-        package='art_planner_ros',
-        executable='art_planner_ros_node',
-        name='art_planner',
-        output='screen',
-        parameters=[art_params, {'use_sim_time': use_sim_time}],
-        remappings=[('~/elevation_map', '/traversability_map')],
+    rog_local_planner = Node(
+        package='rog_local_planner',
+        executable='rog_local_planner_node',
+        name='rog_local_planner',
+        output='both',
+        parameters=[rog_local_planner_params, {'use_sim_time': use_sim_time}],
     )
 
     coordinator = Node(
         package='pct_art_local_navigation',
         executable='pct_art_coordinator',
         name='pct_art_coordinator',
-        output='screen',
+        output='both',
         parameters=[coordinator_params, {'use_sim_time': use_sim_time}],
     )
 
@@ -140,7 +162,7 @@ def generate_launch_description():
         package='pure_pursuit_planner',
         executable='pure_pursuit_planner',
         name='pure_pursuit_node',
-        output='screen',
+        output='both',
         parameters=[pursuit_params, {'use_sim_time': use_sim_time}],
         remappings=[('/pct_path', '/local_path')],
     )
@@ -149,7 +171,7 @@ def generate_launch_description():
         package='pure_pursuit_planner',
         executable='go2_cmd_vel_bridge',
         name='go2_cmd_vel_bridge',
-        output='screen',
+        output='both',
         parameters=[
             bridge_params,
             {'network_interface': network_interface, 'use_sim_time': use_sim_time},
@@ -159,10 +181,12 @@ def generate_launch_description():
 
     startup_summary = LogInfo(
         msg=[
-            '[pct_art bringup] launching PCT -> FastDEM -> Traversability -> '
-            'ART -> Coordinator -> Pure Pursuit with config/',
+            '[pct_art bringup] launching PCT -> Coordinator -> '
+            'ROG Local Planner -> Pure Pursuit with config/',
             CONFIG_NAME,
-            '. Open3D localization start=',
+            '. Logs=',
+            log_dir,
+            '. FAST-LIO + Open3D localization start=',
             start_open3d_loc,
             ', Go2 bridge start=',
             start_go2_bridge,
@@ -184,22 +208,22 @@ def generate_launch_description():
             'pct_params_file',
             default_value=config_file('pct_global_planner.yaml'),
         ),
+        ros_log_environment,
         unitree_runtime_environment,
         startup_summary,
+        log_process_start(
+            fast_lio,
+            'fast_lio (/Odometry_loc, /cloud_registered_body_1)',
+        ),
         log_process_start(
             open3d_global_localization,
             'open3d global localization (/Odometry_open3d)',
         ),
         log_process_start(open3d_localization_service, 'open3d localization service'),
         log_process_start(pct_planner, 'pct_global_planner (/pct_path)'),
-        log_process_start(fastdem, 'fastdem (/fastdem/mapping/gridmap)'),
         log_process_start(
-            traversability,
-            'traversability_estimation (/traversability_map)',
-        ),
-        log_process_start(
-            art_planner,
-            'art_planner (/art_planner/path, /art_planner/plan_to_goal)',
+            rog_local_planner,
+            'rog_local_planner (/art_planner/path, /art_planner/plan_to_goal)',
         ),
         log_process_start(
             coordinator,
@@ -210,12 +234,11 @@ def generate_launch_description():
             go2_bridge,
             'go2_cmd_vel_bridge (/go2_cmd_vel_bridge/enable)',
         ),
+        fast_lio,
         open3d_global_localization,
         open3d_localization_service,
         pct_planner,
-        fastdem,
-        traversability,
-        art_planner,
+        rog_local_planner,
         coordinator,
         pure_pursuit,
         # go2_bridge,

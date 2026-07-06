@@ -5,6 +5,7 @@ from geometry_msgs.msg import PoseStamped
 from grid_map_msgs.msg import GridMap
 from nav_msgs.msg import Path
 import rclpy
+from rclpy.duration import Duration
 
 from pct_art_local_navigation.coordinator_logic import Point2
 from pct_art_local_navigation.coordinator_node import (
@@ -38,6 +39,12 @@ def make_xy_path(points, final_yaw=0.0):
         message.poses.append(pose)
     message.poses[-1].pose.orientation.z = math.sin(0.5 * final_yaw)
     message.poses[-1].pose.orientation.w = math.cos(0.5 * final_yaw)
+    return message
+
+
+def make_empty_path():
+    message = Path()
+    message.header.frame_id = 'map'
     return message
 
 
@@ -95,6 +102,30 @@ def test_node_selects_goal_and_forwards_only_valid_art_path():
         rclpy.shutdown()
 
 
+def test_node_selects_goal_without_traversability_map():
+    os.environ['ROS_LOG_DIR'] = '/tmp/pct_art_local_navigation_test_logs'
+    rclpy.init()
+    node = PctArtCoordinator()
+    try:
+        requested_goals = []
+        local_goals = PublisherRecorder()
+        node.require_map_for_goal_selection = False
+        node._request_art_goal = requested_goals.append
+        node._local_goal_pub = local_goals
+        node._lookup_robot_point = lambda now: Point2(0.0, 0.0)
+
+        node._global_path_cb(make_path([0.0, 1.0, 2.0, 3.0, 4.0]))
+        node._update()
+
+        assert len(requested_goals) == 1
+        assert len(local_goals.messages) == 1
+        assert requested_goals[0].pose.position.x == 4.0
+        assert node._state == CoordinatorState.PLANNING
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
 def test_smoothing_can_be_disabled_to_forward_original_art_path():
     os.environ['ROS_LOG_DIR'] = '/tmp/pct_art_local_navigation_test_logs'
     rclpy.init()
@@ -117,6 +148,79 @@ def test_smoothing_can_be_disabled_to_forward_original_art_path():
             quaternion_to_yaw(local_paths.messages[-1].poses[-1].pose.orientation),
             math.pi / 2.0,
         )
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_empty_art_path_is_ignored_while_goal_is_updating():
+    os.environ['ROS_LOG_DIR'] = '/tmp/pct_art_local_navigation_test_logs'
+    rclpy.init()
+    node = PctArtCoordinator()
+    try:
+        local_paths = PublisherRecorder()
+        node._local_path_pub = local_paths
+        node._local_goal_msg = PoseStamped()
+        node._local_goal_msg.pose.position.x = 1.0
+        node._robot_point = Point2(0.0, 0.0)
+        node._last_goal_request_time = node.get_clock().now()
+        node._state = CoordinatorState.TRACKING
+
+        node._art_path_cb(make_empty_path())
+
+        assert not local_paths.messages
+        assert node._state == CoordinatorState.TRACKING
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_empty_art_path_blocks_when_not_switching_goal():
+    os.environ['ROS_LOG_DIR'] = '/tmp/pct_art_local_navigation_test_logs'
+    rclpy.init()
+    node = PctArtCoordinator()
+    try:
+        local_paths = PublisherRecorder()
+        node._local_path_pub = local_paths
+        node._local_goal_msg = PoseStamped()
+        node._local_goal_msg.pose.position.x = 1.0
+        node._robot_point = Point2(0.0, 0.0)
+        node._state = CoordinatorState.TRACKING
+
+        node._art_path_cb(make_empty_path())
+
+        assert node._state == CoordinatorState.BLOCKED
+        assert 'fewer than two poses' in node._state_reason
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_republishes_recent_local_path_cropped_to_robot():
+    os.environ['ROS_LOG_DIR'] = '/tmp/pct_art_local_navigation_test_logs'
+    rclpy.init()
+    node = PctArtCoordinator()
+    try:
+        local_paths = PublisherRecorder()
+        node._local_path_pub = local_paths
+        node._motion_path_active = True
+        node._robot_point = Point2(1.1, 0.0)
+        node._last_local_path_msg = make_path([0.0, 1.0, 2.0, 3.0])
+        node._last_local_path_publish_time = node.get_clock().now()
+
+        node._republish_local_path()
+
+        assert len(local_paths.messages) == 1
+        assert len(local_paths.messages[-1].poses) == 3
+        assert math.isclose(local_paths.messages[-1].poses[0].pose.position.x, 1.0)
+        assert math.isclose(local_paths.messages[-1].poses[-1].pose.position.x, 3.0)
+
+        node._last_local_path_publish_time = (
+            node.get_clock().now()
+            - Duration(seconds=node.local_path_reuse_timeout + 0.1)
+        )
+        node._republish_local_path()
+        assert len(local_paths.messages) == 1
     finally:
         node.destroy_node()
         rclpy.shutdown()

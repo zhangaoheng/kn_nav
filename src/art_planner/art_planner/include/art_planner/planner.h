@@ -42,6 +42,7 @@ protected:
 
   std::shared_ptr<og::SimpleSetup> ss_;
   bool solved_{false};
+  std::shared_ptr<og::PathGeometric> astar_solution_path_;
   std::shared_ptr<StateSpace> space_;
   std::shared_ptr<StateValidityChecker> checker_;
 

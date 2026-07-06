@@ -2,9 +2,59 @@
 #include "open3d_conversions/open3d_conversions.h"
 #include "global_localization.h"
 
+#include <sensor_msgs/point_cloud2_iterator.hpp>
+
 #include <fstream>
 #include <functional>
 #include <sstream>
+#include <stdexcept>
+
+namespace
+{
+bool TransformFloat3Fields(sensor_msgs::msg::PointCloud2 &cloud,
+                           const Eigen::Matrix3d &rotation,
+                           const Eigen::Vector3d &translation,
+                           const std::string &x_name,
+                           const std::string &y_name,
+                           const std::string &z_name,
+                           bool translate)
+{
+    bool has_x = false;
+    bool has_y = false;
+    bool has_z = false;
+    for (const auto &field : cloud.fields)
+    {
+        if (field.datatype != sensor_msgs::msg::PointField::FLOAT32)
+        {
+            continue;
+        }
+        has_x = has_x || field.name == x_name;
+        has_y = has_y || field.name == y_name;
+        has_z = has_z || field.name == z_name;
+    }
+    if (!has_x || !has_y || !has_z)
+    {
+        return false;
+    }
+
+    sensor_msgs::PointCloud2Iterator<float> x(cloud, x_name);
+    sensor_msgs::PointCloud2Iterator<float> y(cloud, y_name);
+    sensor_msgs::PointCloud2Iterator<float> z(cloud, z_name);
+    for (; x != x.end(); ++x, ++y, ++z)
+    {
+        Eigen::Vector3d point(*x, *y, *z);
+        point = rotation * point;
+        if (translate)
+        {
+            point += translation;
+        }
+        *x = static_cast<float>(point.x());
+        *y = static_cast<float>(point.y());
+        *z = static_cast<float>(point.z());
+    }
+    return true;
+}
+} // namespace
 
 GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
 {
@@ -32,6 +82,7 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
     scan_base_link_qos.reliable();
     scan_base_link_qos.durability_volatile();
     pub_scan_base_link_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/scan_base_link", scan_base_link_qos);
+    pub_scan_map_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/scan_map", scan_base_link_qos);
     pub_localization_3d_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/localization_3d", 1);
     pub_localization_3d_confidence_ = this->create_publisher<std_msgs::msg::Float32>("/localization_3d_confidence", 1);
     pub_localization_3d_delay_ms_ = this->create_publisher<std_msgs::msg::Float32>("/localization_3d_delay_ms", 1);
@@ -528,9 +579,42 @@ void GloabalLocalization::CallbackScanBody(
     }
 
     Eigen::Matrix4d mat_baselink2odom_snapshot = Eigen::Matrix4d::Identity();
+    Eigen::Matrix4d mat_odom2map_snapshot = Eigen::Matrix4d::Identity();
     {
         std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
         mat_baselink2odom_snapshot = mat_baselink2odom_;
+        mat_odom2map_snapshot = mat_odom2map_;
+    }
+
+    if (pub_scan_map_->get_subscription_count() > 0)
+    {
+        sensor_msgs::msg::PointCloud2 scan_map = *scan_in_imu_link;
+        scan_map.header.frame_id = "map";
+        scan_map.header.stamp = latest_odom_stamp;
+
+        const Eigen::Matrix4d mat_imulink2map =
+            mat_odom2map_snapshot * mat_baselink2odom_snapshot * mat_imulink2baselink_;
+        const Eigen::Matrix3d rotation = mat_imulink2map.block<3, 3>(0, 0);
+        const Eigen::Vector3d translation = mat_imulink2map.block<3, 1>(0, 3);
+        try
+        {
+            if (!TransformFloat3Fields(scan_map, rotation, translation, "x", "y", "z", true))
+            {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                     "skip /scan_map publish: /cloud_registered_body_1 has no float32 x/y/z fields");
+            }
+            else
+            {
+                TransformFloat3Fields(scan_map, rotation, Eigen::Vector3d::Zero(),
+                                      "normal_x", "normal_y", "normal_z", false);
+                pub_scan_map_->publish(scan_map);
+            }
+        }
+        catch (const std::runtime_error &error)
+        {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                 "skip /scan_map publish: %s", error.what());
+        }
     }
 
     auto pcd_received = std::make_shared<open3d::geometry::PointCloud>(*pcd_base_link);

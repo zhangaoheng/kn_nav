@@ -62,6 +62,19 @@ struct Params {
 
     } prm_motion_cost;
 
+    struct {
+      double       allow_unknown_start_radius{0.9};
+      double       unknown_penalty{1.0};
+      double       traversability_weight{2.0};
+      double       turn_weight{0.35};
+      double       line_bias_weight{0.15};
+      unsigned int max_expansions{100000u};
+      bool         shortcut_path{true};
+      double       shortcut_max_step{0.10};
+      double       min_point_spacing{0.10};
+      double       max_segment_length{0.25};
+    } astar;
+
   } planner;
 
   struct {

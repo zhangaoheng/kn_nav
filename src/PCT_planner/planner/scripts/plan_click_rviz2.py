@@ -262,22 +262,19 @@ class ClickPlannerNode(Node):
 
     def plan_from_clicks(self):
         start_xyz, goal_xyz = self.clicks[0], self.clicks[1]
-        start_xy = start_xyz[:2].astype(np.float32)
-        goal_xy = goal_xyz[:2].astype(np.float32)
 
-        self.planner.start_idx[0] = self.find_slice(start_xyz)
-        self.planner.end_idx[0] = self.find_slice(goal_xyz)
+        start_layer = self.find_slice(start_xyz)
+        goal_layer = self.find_slice(goal_xyz)
         self.get_logger().info(
-            f'Planning: start_slice={self.planner.start_idx[0]}, '
-            f'goal_slice={self.planner.end_idx[0]}'
+            f'Planning: start_slice={start_layer}, goal_slice={goal_layer}'
         )
 
-        traj = self.planner.plan(start_xy, goal_xy)
+        traj = self.planner.plan(start_xyz, goal_xyz)
         if traj is None:
             self.get_logger().warn('No path found. Click another start/goal pair.')
             return
 
-        astar_path = self.planner.getLastAstarPath()
+        astar_path = self.get_astar_path()
         if astar_path is not None and len(astar_path) > 0:
             self.astar_path_pub.publish(traj_to_path(self, astar_path, self.frame_id))
             self.marker_pub.publish(
@@ -300,6 +297,11 @@ class ClickPlannerNode(Node):
         np.save(out, traj)
         self.get_logger().info(f'Path published: {traj.shape[0]} waypoints, saved to {out}')
 
+    def get_astar_path(self):
+        if hasattr(self.planner, 'getLastAstarPath'):
+            return self.planner.getLastAstarPath()
+        return getattr(self.planner, 'last_astar_traj', None)
+
     def find_slice(self, xyz):
         elevation = self.tomo_data['data'][3]
         resolution = self.tomo_data['resolution']
@@ -310,24 +312,27 @@ class ClickPlannerNode(Node):
 
         ix = int(round((float(xyz[0]) - float(center[0])) / resolution)) + offset_x
         iy = int(round((float(xyz[1]) - float(center[1])) / resolution)) + offset_y
-        ix = int(np.clip(ix, 0, dim_x - 1))
-        iy = int(np.clip(iy, 0, dim_y - 1))
+        if ix < 0 or ix >= dim_x or iy < 0 or iy >= dim_y:
+            return self.z_to_slice_layer(float(xyz[2]))
 
-        heights = elevation[:, ix, iy]
-        valid = np.isfinite(heights)
-        if not np.any(valid):
-            return 0
+        search_radius = 2
+        x0 = max(0, ix - search_radius)
+        x1 = min(dim_x, ix + search_radius + 1)
+        y0 = max(0, iy - search_radius)
+        y1 = min(dim_y, iy + search_radius + 1)
 
-        valid_indices = np.where(valid)[0]
-        valid_heights = heights[valid]
-        below_or_near = valid_heights <= float(xyz[2]) + 0.3
-        if np.any(below_or_near):
-            candidates = valid_indices[below_or_near]
-            diffs = np.abs(valid_heights[below_or_near] - float(xyz[2]))
-            return int(candidates[int(np.argmin(diffs))])
+        local_elev = elevation[:, x0:x1, y0:y1]
+        finite = np.isfinite(local_elev)
+        if not np.any(finite):
+            return self.z_to_slice_layer(float(xyz[2]))
 
-        diffs = np.abs(valid_heights - float(xyz[2]))
-        return int(valid_indices[int(np.argmin(diffs))])
+        scores = np.abs(local_elev - float(xyz[2]))
+        scores[~finite] = np.inf
+        return int(np.unravel_index(np.argmin(scores), scores.shape)[0])
+
+    def z_to_slice_layer(self, z):
+        layer = int(round((z - float(self.tomo_data['slice_h0'])) / float(self.tomo_data['slice_dh'])))
+        return int(np.clip(layer, 0, self.tomo_data['data'][3].shape[0] - 1))
 
 
 def launch_rviz(rviz_config):

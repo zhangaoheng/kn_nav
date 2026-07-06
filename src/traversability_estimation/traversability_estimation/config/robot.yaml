@@ -1,16 +1,30 @@
 traversability_estimation:
   ros__parameters:
-    submap_service: "/get_raw_submap" # unused when min_update_rate is 0 and FastDEM GridMap topic is used
-    map_frame_id: "map"  # Must be the same as the input elevation submap.
+    # 通过 service 拉取 elevation submap 时使用；min_update_rate=0 且启用 GridMap topic 时不会用到。
+    submap_service: "/get_raw_submap"
+    # traversability map 的坐标系，必须和输入 elevation/GridMap 的 frame_id 一致。
+    map_frame_id: "map"
+    # 机器人本体坐标系，用于基于 TF 请求局部地图中心或检查机器人姿态。
     robot_frame_id: "base_link"
-    min_update_rate: 0.0 # FastDEM pushes GridMap updates by topic; do not call a submap service.
+    # service 拉图模式下的最低更新频率 [Hz]；0 表示不启动定时 service 拉图。
+    # 当前 FastDEM 会主动发布 GridMap，所以这里保持 0，避免重复拉图。
+    min_update_rate: 0.0
+    # service 拉图模式下请求地图中心相对 map_frame_id 的 x/y [m]。
+    # topic 推图模式下主要由输入 GridMap 自己决定地图中心。
     map_center_x: 0.0
     map_center_y: 0.0
+    # service 拉图模式下请求地图尺寸 [m]。
+    # topic 推图模式下主要由 FastDEM 的 map.width/map.height 决定。
     map_length_x: 10.0
     map_length_y: 10.0
+    # footprint 可视化/检查时使用的第二个朝向 [rad]，0.7854rad 约等于 45 度。
     footprint_yaw: 0.7854
+    # footprint 检查允许跨过的小空洞宽度 [m]；小于该宽度的未知/缺失区域可被忽略。
     max_gap_width: 0.2
     grid_map_to_initialize_traversability_map:
+      # 是否直接订阅 GridMap topic 来刷新 traversability map。
       enable: true
+      # 输入 GridMap topic。这里接 FastDEM 原始 elevation map。
       grid_map_topic_name: /fastdem/mapping/gridmap
-      max_update_rate: 5.0
+      # 从输入 topic 接收并计算 traversability 的最大频率 [Hz]，用于限频防止滤波积压。
+      max_update_rate: 10.0

@@ -1,7 +1,7 @@
 art_planner:
   ros__parameters:
     planner:
-      name: rrt_star
+      name: astar
       elevation_layer: elevation
       traversability_layer: traversability
       plan_time: 0.5
@@ -22,6 +22,17 @@ art_planner:
         start_radius: 0.20
         goal_radius: 0.50
         n_iter: 1000
+      astar:
+        allow_unknown_start_radius: 0.90
+        unknown_penalty: 1.0
+        traversability_weight: 2.0
+        turn_weight: 0.35
+        line_bias_weight: 0.15
+        max_expansions: 100000
+        shortcut_path: true
+        shortcut_max_step: 0.10
+        min_point_spacing: 0.10
+        max_segment_length: 0.25
       lazy_prm_star_min_update:
         invalidate_updated_graph_components: true
         height_change_for_update: 0.05

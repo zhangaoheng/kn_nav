@@ -1,0 +1,49 @@
+rog_map_node:
+  ros__parameters:
+    rog_map:
+      resolution: 0.1
+      inflation_resolution: 0.2
+      inflation_step: 1
+      unk_inflation_en: false
+      unk_inflation_step: 1
+      map_size: [20.0, 20.0, 8.0]
+      fix_map_origin: [0.0, 0.0, 0.0]
+      map_sliding:
+        enable: true
+        threshold: 2.0
+      raycasting:
+        enable: true
+        batch_update_size: 1
+        unk_thresh: 0.70
+        p_hit: 0.70
+        p_miss: 0.35
+        p_min: 0.12
+        p_max: 0.97
+        p_occ: 0.80
+        p_free: 0.30
+        ray_range: [0.3, 10.0]
+        local_update_box: [12.0, 12.0, 4.0]
+      point_filt_num: 2
+      intensity_thresh: -1
+      virtual_ground_height: -6.0
+      virtual_ceil_height: 4.0
+      frontier_extraction_en: false
+      esdf:
+        enable: false
+        resolution: 0.2
+        local_update_box: [10.0, 10.0, 3.0]
+      load_pcd_en: false
+      pcd_name: "map.pcd"
+      ros_callback:
+        enable: true
+        cloud_topic: "/scan_map"
+        odom_topic: "/Odometry_open3d"
+        odom_timeout: 0.2
+      visualization:
+        enable: true
+        pub_unknown_map_en: false
+        use_body_center: true
+        frame_id: "map"
+        time_rate: 2.0
+        frame_rate: 1
+        range: [10.0, 10.0, 6.0]

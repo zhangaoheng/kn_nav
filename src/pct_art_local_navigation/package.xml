@@ -3,7 +3,7 @@
 <package format="3">
   <name>pct_art_local_navigation</name>
   <version>0.1.0</version>
-  <description>PCT global path to ART local planning coordinator and Go2 bringup.</description>
+  <description>PCT global path to ROG local planning coordinator and Go2 bringup.</description>
   <maintainer email="xuqiang656@example.com">xuqiang656</maintainer>
   <license>Apache-2.0</license>
 
@@ -11,8 +11,6 @@
 
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>art_planner_msgs</exec_depend>
-  <exec_depend>art_planner_ros</exec_depend>
-  <exec_depend>fastdem_ros2</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>grid_map_msgs</exec_depend>
   <exec_depend>launch</exec_depend>
@@ -21,9 +19,9 @@
   <exec_depend>pct_planner</exec_depend>
   <exec_depend>pure_pursuit_planner</exec_depend>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>rog_local_planner</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
-  <exec_depend>traversability_estimation</exec_depend>
 
   <test_depend>ament_pytest</test_depend>
   <test_depend>python3-pytest</test_depend>

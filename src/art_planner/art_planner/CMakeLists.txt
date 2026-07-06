@@ -27,6 +27,7 @@ add_library(${PROJECT_NAME}
   src/validity_checker/height_map_box_checker.cpp
   src/objectives/path_length_objective.cpp
   src/objectives/motion_cost_objective.cpp
+  src/planners/grid_astar.cpp
   src/planners/lazy_prm_star_min_update.cpp
   src/planners/prm_motion_cost.cpp
 )

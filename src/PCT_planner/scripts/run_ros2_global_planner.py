@@ -27,8 +27,29 @@ import ctypes
 import numpy as np
 import open3d as o3d
 
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+
+def _find_project_root():
+    script_dir = os.path.dirname(os.path.realpath(__file__))
+    candidates = [
+        os.path.abspath(os.path.join(script_dir, '..')),
+        os.path.abspath(
+            os.path.join(script_dir, '..', '..', '..', '..', 'src', 'PCT_planner')
+        ),
+        os.path.abspath(os.path.join(os.getcwd(), 'src', 'PCT_planner')),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(
+            os.path.join(candidate, 'planner', 'lib', 'libmetis-gtsam.so')
+        ):
+            return candidate
+    raise FileNotFoundError(
+        'Could not find PCT_planner root containing planner/lib/libmetis-gtsam.so'
+    )
+
+
+ROOT = _find_project_root()
 LIB_PATH = os.path.join(ROOT, 'planner', 'lib')
+
 
 # ── GTSAM + smoothing libs preload (must happen before pybind11 imports) ──
 for _lib in [
@@ -42,6 +63,7 @@ sys.path.insert(0, os.path.join(ROOT, 'planner'))
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import ColorRGBA
 from sensor_msgs.msg import PointCloud2, PointField
 from geometry_msgs.msg import PointStamped, PoseStamped, Point
@@ -244,10 +266,13 @@ class PctGlobalPlannerNode(Node):
                 Odometry, self.odom_topic, self._odom_cb, 10)
 
         # ── publishers ──────────────────────────────────────────────────
+        path_qos = QoSProfile(depth=1)
+        path_qos.reliability = ReliabilityPolicy.RELIABLE
+        path_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self.pc_pub = self.create_publisher(PointCloud2, '/global_points', 1)
         self.tomo_pub = self.create_publisher(PointCloud2, '/tomogram', 1)
-        self.path_pub = self.create_publisher(Path, self.path_topic, 1)
-        self.astar_path_pub = self.create_publisher(Path, self.astar_path_topic, 1)
+        self.path_pub = self.create_publisher(Path, self.path_topic, path_qos)
+        self.astar_path_pub = self.create_publisher(Path, self.astar_path_topic, path_qos)
         self.marker_pub = self.create_publisher(Marker, '/pct_marker', 1)
 
         # ── concurrent goal state ───────────────────────────────────────
@@ -399,12 +424,14 @@ class PctGlobalPlannerNode(Node):
             self.get_logger().info(
                 f'  Goal z ≈ 0, using start z={start_z:.2f} for slice lookup.')
 
+        start_pos = np.array([sx, sy, start_z], dtype=np.float32)
+        end_pos = np.array([gx, gy, effective_gz], dtype=np.float32)
         try:
-            start_slice = self._z_to_slice(sx, sy, start_z)
+            start_slice = self.planner.pos2layer(start_pos)
         except Exception:
             start_slice = 0
         try:
-            end_slice = self._z_to_slice(gx, gy, effective_gz)
+            end_slice = self.planner.pos2layer(end_pos)
         except Exception:
             end_slice = start_slice
 
@@ -420,11 +447,6 @@ class PctGlobalPlannerNode(Node):
             return
 
         # ── run planner ──────────────────────────────────────────────────
-        self.planner.start_idx[0] = start_slice
-        self.planner.end_idx[0] = end_slice
-        start_pos = np.array([sx, sy], dtype=np.float32)
-        end_pos = np.array([gx, gy], dtype=np.float32)
-
         t0 = time.time()
         traj = self.planner.plan(start_pos, end_pos)
         elapsed = time.time() - t0
@@ -596,25 +618,38 @@ class PctGlobalPlannerNode(Node):
 
         d = self._tomo_data
         tomo = np.asarray(d['data'], dtype=np.float32)
-        trav = tomo[0]
-        elev = tomo[3]
+        trav = tomo[0].copy()
+        elev = tomo[3].copy()
         res = float(d['resolution'])
         ctr = np.asarray(d['center'], dtype=np.float32)
+        slice_dh = float(d['slice_dh'])
         n_sl, dim_x, dim_y = trav.shape
         ox, oy = dim_x // 2, dim_y // 2
+
+        # Match the original ROS1 tomography visualization: hide lower
+        # overlapping slices and carry their cost onto the visible layer.
+        for s in range(n_sl - 1):
+            hidden = (elev[s + 1] - elev[s]) < slice_dh
+            elev[s, hidden] = np.nan
+            trav[s + 1, hidden] = np.minimum(trav[s, hidden], trav[s + 1, hidden])
 
         all_pts = []
         for s in range(n_sl):
             g = elev[s]
             t = trav[s]
-            mask = ~np.isnan(g)
+            mask = np.isfinite(g)
             ix, iy = np.where(mask)
+            if len(ix) == 0:
+                continue
             wx = (ix - ox) * res + ctr[0]
             wy = (iy - oy) * res + ctr[1]
             wz = g[mask]
             wt = t[mask]
             layer = np.stack([wx, wy, wz, wt], axis=1).astype(np.float32)
             all_pts.append(layer)
+
+        if not all_pts:
+            raise RuntimeError('Tomogram contains no valid elevation cells.')
 
         pts4 = np.concatenate(all_pts, 0)
         self._tomo_points_count = len(pts4)

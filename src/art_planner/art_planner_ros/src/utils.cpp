@@ -94,6 +94,49 @@ ParamsPtr art_planner::loadRosParameters(const rclcpp::Node::SharedPtr& nh) {
                                  "planner/start_goal_search/n_iter",
                                  params->planner.start_goal_search.n_iter);
 
+  // Planner / Grid A-star.
+
+  params->planner.astar.allow_unknown_start_radius =
+      getParamWithDefaultWarning(nh,
+                                 "planner/astar/allow_unknown_start_radius",
+                                 params->planner.astar.allow_unknown_start_radius);
+  params->planner.astar.unknown_penalty =
+      getParamWithDefaultWarning(nh,
+                                 "planner/astar/unknown_penalty",
+                                 params->planner.astar.unknown_penalty);
+  params->planner.astar.traversability_weight =
+      getParamWithDefaultWarning(nh,
+                                 "planner/astar/traversability_weight",
+                                 params->planner.astar.traversability_weight);
+  params->planner.astar.turn_weight =
+      getParamWithDefaultWarning(nh,
+                                 "planner/astar/turn_weight",
+                                 params->planner.astar.turn_weight);
+  params->planner.astar.line_bias_weight =
+      getParamWithDefaultWarning(nh,
+                                 "planner/astar/line_bias_weight",
+                                 params->planner.astar.line_bias_weight);
+  params->planner.astar.max_expansions =
+      getParamWithDefaultWarning(nh,
+                                 "planner/astar/max_expansions",
+                                 params->planner.astar.max_expansions);
+  params->planner.astar.shortcut_path =
+      getParamWithDefaultWarning(nh,
+                                 "planner/astar/shortcut_path",
+                                 params->planner.astar.shortcut_path);
+  params->planner.astar.shortcut_max_step =
+      getParamWithDefaultWarning(nh,
+                                 "planner/astar/shortcut_max_step",
+                                 params->planner.astar.shortcut_max_step);
+  params->planner.astar.min_point_spacing =
+      getParamWithDefaultWarning(nh,
+                                 "planner/astar/min_point_spacing",
+                                 params->planner.astar.min_point_spacing);
+  params->planner.astar.max_segment_length =
+      getParamWithDefaultWarning(nh,
+                                 "planner/astar/max_segment_length",
+                                 params->planner.astar.max_segment_length);
+
   // Planner / Lazy PRM Star Min Update.
 
   params->planner.lazy_prm_star_min_update.invalidate_updated_graph_components =

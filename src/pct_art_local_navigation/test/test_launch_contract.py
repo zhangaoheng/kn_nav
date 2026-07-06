@@ -5,10 +5,15 @@ def test_launch_contains_expected_chain_and_no_nav2():
     source = (
         Path(__file__).parents[1] / 'launch' / 'local_pct_art_local_navigation.launch.py'
     ).read_text(encoding='utf-8')
+    assert "package='fast_lio'" in source
+    assert "fastlio_mapping" in source
     assert "package='open3d_loc'" in source
     assert "global_localization_node" in source
     assert "localization_service_node" in source
-    assert "package='art_planner_ros'" in source
+    assert "package='rog_local_planner'" in source
+    assert "package='art_planner_ros'" not in source
+    assert "package='fastdem_ros2'" not in source
+    assert "package='traversability_estimation'" not in source
     assert "package='pure_pursuit_planner'" in source
     assert "('/pct_path', '/local_path')" in source
     assert 'SetEnvironmentVariable' in source
@@ -31,9 +36,15 @@ def test_local_and_unitree_launches_select_fixed_config_dirs():
     assert "CONFIG_NAME = 'unitree'" in unitree_source
     assert "LaunchConfiguration('profile')" not in local_source
     assert "LaunchConfiguration('profile')" not in unitree_source
-    assert 'unitree_localization_3d_g1.launch.py' in unitree_source
-    assert "executable='global_localization_node'" not in unitree_source
-    assert "executable='localization_service_node'" not in unitree_source
+    assert 'unitree_localization_3d_g1.launch.py' not in unitree_source
+    assert "package='fast_lio'" in unitree_source
+    assert "fastlio_mapping" in unitree_source
+    assert "executable='global_localization_node'" in unitree_source
+    assert "executable='localization_service_node'" in unitree_source
+    assert "package='rog_local_planner'" in unitree_source
+    assert "package='art_planner_ros'" not in unitree_source
+    assert "package='fastdem_ros2'" not in unitree_source
+    assert "package='traversability_estimation'" not in unitree_source
 
 
 def test_launch_files_live_only_in_launch_directory():

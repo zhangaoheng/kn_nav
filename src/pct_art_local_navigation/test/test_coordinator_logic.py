@@ -6,6 +6,7 @@ from pct_art_local_navigation.coordinator_logic import (
     closest_progress_index,
     point_inside_map,
     select_local_goal,
+    select_local_goal_without_map,
     tangent_yaw,
     validate_local_path,
 )
@@ -44,12 +45,111 @@ def test_local_goal_uses_final_goal_when_reachable():
     assert selection.index == 2
 
 
+def test_local_goal_rejects_large_z_delta():
+    path = [Point2(i, 0.0) for i in range(6)]
+    path_z = [0.0, 2.0, 2.0, 2.0, 0.2, 0.2]
+    geometry = MapGeometry(0.0, 0.0, 0.0, 10.0, 10.0)
+
+    selection = select_local_goal(
+        path,
+        0,
+        geometry,
+        0.8,
+        3.5,
+        0.8,
+        4.0,
+        path_z,
+        0.0,
+        0.8,
+    )
+
+    assert selection is not None
+    assert selection.index == 4
+
+
+def test_local_goal_rejects_large_slope():
+    path = [Point2(i, 0.0) for i in range(6)]
+    path_z = [0.0, 0.6, 1.2, 1.2, 0.2, 0.2]
+    geometry = MapGeometry(0.0, 0.0, 0.0, 10.0, 10.0)
+
+    selection = select_local_goal(
+        path,
+        0,
+        geometry,
+        0.8,
+        3.5,
+        0.8,
+        4.0,
+        path_z,
+        0.0,
+        2.0,
+        Point2(0.0, 0.0),
+        0.35,
+    )
+
+    assert selection is not None
+    assert selection.index == 4
+
+
 def test_local_goal_rejects_points_near_map_edge():
     path = [Point2(i, 0.0) for i in range(6)]
     geometry = MapGeometry(0.0, 0.0, 0.0, 4.0, 4.0)
     selection = select_local_goal(path, 0, geometry, 0.8, 3.5, 0.8, 4.0)
     assert selection is not None
     assert selection.index == 1
+
+
+def test_local_goal_without_map_uses_range_and_final_goal():
+    path = [Point2(i, 0.0) for i in range(6)]
+    selection = select_local_goal_without_map(
+        path, 0, Point2(0.0, 0.0), 3.5, 0.8, 4.0
+    )
+    assert selection is not None
+    assert selection.index == 4
+
+    short_path = [Point2(0.0, 0.0), Point2(1.0, 0.0), Point2(2.0, 0.0)]
+    selection = select_local_goal_without_map(
+        short_path, 0, Point2(0.0, 0.0), 3.5, 0.8, 4.0
+    )
+    assert selection is not None
+    assert selection.index == 2
+
+
+def test_local_goal_without_map_rejects_large_z_delta():
+    path = [Point2(i, 0.0) for i in range(6)]
+    path_z = [0.0, 2.0, 2.0, 2.0, 0.2, 0.2]
+    selection = select_local_goal_without_map(
+        path,
+        0,
+        Point2(0.0, 0.0),
+        3.5,
+        0.8,
+        4.0,
+        path_z,
+        0.0,
+        0.8,
+    )
+    assert selection is not None
+    assert selection.index == 4
+
+
+def test_local_goal_without_map_rejects_large_slope():
+    path = [Point2(i, 0.0) for i in range(6)]
+    path_z = [0.0, 0.6, 1.2, 1.2, 0.2, 0.2]
+    selection = select_local_goal_without_map(
+        path,
+        0,
+        Point2(0.0, 0.0),
+        3.5,
+        0.8,
+        4.0,
+        path_z,
+        0.0,
+        2.0,
+        0.35,
+    )
+    assert selection is not None
+    assert selection.index == 4
 
 
 def test_tangent_yaw_uses_previous_segment_at_final_point():

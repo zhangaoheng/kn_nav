@@ -28,7 +28,7 @@ setup(
     zip_safe=True,
     maintainer='xuqiang656',
     maintainer_email='xuqiang656@example.com',
-    description='Coordinate PCT global paths with ART local planning.',
+    description='Coordinate PCT global paths with ROG local planning.',
     license='Apache-2.0',
     tests_require=['pytest'],
     entry_points={
