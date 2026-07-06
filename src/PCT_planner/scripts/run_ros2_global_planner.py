@@ -232,6 +232,8 @@ class PctGlobalPlannerNode(Node):
         self.declare_parameter('tomogram_republish_period_s', 1.0)
         self.declare_parameter('save_trajectory', False)
         self.declare_parameter('goal_z_epsilon', 0.05)
+        self.declare_parameter('infer_goal_z_from_tomogram', True)
+        self.declare_parameter('goal_z_search_radius_cells', 2)
         self.declare_parameter('allow_new_goal_during_planning', True)
 
         # Resolve parameter values
@@ -253,6 +255,12 @@ class PctGlobalPlannerNode(Node):
         self.tomo_period = self.get_parameter('tomogram_republish_period_s').value
         self.save_traj = self.get_parameter('save_trajectory').value
         self.goal_z_epsilon = self.get_parameter('goal_z_epsilon').value
+        self.infer_goal_z_from_tomogram = (
+            self.get_parameter('infer_goal_z_from_tomogram').value
+        )
+        self.goal_z_search_radius_cells = int(
+            self.get_parameter('goal_z_search_radius_cells').value
+        )
         self.allow_new_during = self.get_parameter('allow_new_goal_during_planning').value
 
         # ── TF ──────────────────────────────────────────────────────────
@@ -417,12 +425,24 @@ class PctGlobalPlannerNode(Node):
         self.get_logger().info(f'  Start: ({sx:.2f}, {sy:.2f}, z={start_z:.2f})')
 
         # ── compute slices ───────────────────────────────────────────────
-        # If goal z is negligible (near 0), use start slice for goal too
+        # RViz 2D goals often arrive with z=0 even when the target floor is
+        # represented in the tomogram. Prefer the tomogram height at goal XY
+        # so descending to a floor near z=0 does not get collapsed to start_z.
         effective_gz = gz
         if abs(gz) < self.goal_z_epsilon:
-            effective_gz = start_z
-            self.get_logger().info(
-                f'  Goal z ≈ 0, using start z={start_z:.2f} for slice lookup.')
+            inferred_gz = None
+            if self.infer_goal_z_from_tomogram:
+                inferred_gz = self._infer_goal_z_from_tomogram(gx, gy, gz)
+            if inferred_gz is not None:
+                effective_gz = inferred_gz
+                self.get_logger().info(
+                    f'  Goal z ≈ 0, inferred tomogram z={effective_gz:.2f} '
+                    'for slice lookup.')
+            else:
+                effective_gz = start_z
+                self.get_logger().info(
+                    f'  Goal z ≈ 0, using start z={start_z:.2f} '
+                    'for slice lookup.')
 
         start_pos = np.array([sx, sy, start_z], dtype=np.float32)
         end_pos = np.array([gx, gy, effective_gz], dtype=np.float32)
@@ -464,9 +484,11 @@ class PctGlobalPlannerNode(Node):
 
         # ── publish A* raw path ──────────────────────────────────────────
         astar_path = self.planner.getLastAstarPath()
+        publish_traj = traj
         if astar_path is not None and len(astar_path) > 0:
             self.astar_path_pub.publish(
                 traj_to_path(astar_path, self, frame=self.global_frame))
+            publish_traj = astar_path
             if self.publish_viz:
                 self.marker_pub.publish(
                     traj_to_marker(
@@ -476,13 +498,15 @@ class PctGlobalPlannerNode(Node):
                         width=0.07))
             self.get_logger().info(
                 f'Raw A* path: {astar_path.shape[0]} waypoints')
+            self.get_logger().info(
+                'Publishing raw A* path on /pct_path to preserve tomogram z.')
 
-        # ── publish smoothed path ───────────────────────────────────────
+        # ── publish path ────────────────────────────────────────────────
         self.path_pub.publish(
-            traj_to_path(traj, self, frame=self.global_frame, goal_yaw=gyaw))
+            traj_to_path(publish_traj, self, frame=self.global_frame, goal_yaw=gyaw))
         if self.publish_viz:
             self.marker_pub.publish(
-                traj_to_marker(traj, self, frame=self.global_frame,
+                traj_to_marker(publish_traj, self, frame=self.global_frame,
                                marker_id=self._next_marker_id()))
             # Goal sphere
             self.marker_pub.publish(
@@ -585,6 +609,38 @@ class PctGlobalPlannerNode(Node):
                     best_slice = s
 
         return best_slice
+
+    def _infer_goal_z_from_tomogram(self, x, y, reference_z):
+        """Infer a target height from nearby tomogram elevation cells."""
+        if self.planner.elev_g is None:
+            return None
+
+        try:
+            idx = self.planner.pos2array_idx([x, y])
+        except Exception as exc:
+            self.get_logger().debug(f'Cannot index tomogram goal XY: {exc}')
+            return None
+
+        if (
+            idx[0] < 0 or idx[0] >= self.planner.map_dim[0] or
+            idx[1] < 0 or idx[1] >= self.planner.map_dim[1]
+        ):
+            return None
+
+        radius = max(0, self.goal_z_search_radius_cells)
+        x0 = max(0, idx[0] - radius)
+        x1 = min(self.planner.map_dim[0], idx[0] + radius + 1)
+        y0 = max(0, idx[1] - radius)
+        y1 = min(self.planner.map_dim[1], idx[1] + radius + 1)
+
+        local_elev = self.planner.elev_g[:, x0:x1, y0:y1]
+        finite = np.isfinite(local_elev)
+        if not np.any(finite):
+            return None
+
+        scores = np.abs(local_elev - reference_z)
+        scores[~finite] = np.inf
+        return float(local_elev[np.unravel_index(np.argmin(scores), scores.shape)])
 
     def _point_in_bounds(self, x, y):
         """Check whether (x, y) falls within the tomogram grid."""

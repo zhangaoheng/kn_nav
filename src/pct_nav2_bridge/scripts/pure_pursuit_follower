@@ -1,9 +1,0 @@
-#!/usr/bin/env python3
-"""
-Entry point for pure_pursuit_follower node.
-"""
-import sys
-from pct_nav2_bridge.pure_pursuit_follower import main
-
-if __name__ == '__main__':
-    main()

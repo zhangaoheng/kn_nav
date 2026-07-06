@@ -64,5 +64,10 @@ pct_global_planner:
     # If goal z is within this threshold of 0, use robot's current floor [m]
     goal_z_epsilon: 0.05
 
+    # If a goal arrives with z≈0, infer the target floor height from tomogram
+    # cells near the goal XY before falling back to the robot's current floor.
+    infer_goal_z_from_tomogram: true
+    goal_z_search_radius_cells: 2
+
     # If true: queue latest goal when currently planning; false: discard
     allow_new_goal_during_planning: true

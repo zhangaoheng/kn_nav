@@ -8,7 +8,7 @@ THIRDPARTY_ROOT="${THIRDPARTY_ROOT:-/home/code/thirdparty/pct-install}"
 
 cd lib
 
-# rm -rf build
+rm -rf build
 mkdir -p build
 
 cd build
