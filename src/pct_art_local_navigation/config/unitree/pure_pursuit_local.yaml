@@ -13,7 +13,7 @@ pure_pursuit_node:
     maxCurvature: 3.0
     minVelocity: 0.40
     maxVelocity: 0.40
-    maxAngularVelocity: 0.6
+    maxAngularVelocity: 1.0
     rotate_to_path_threshold: 1.047
     rotate_to_path_tolerance: 0.349
     goal_yaw_tolerance: 0.175
