@@ -94,7 +94,7 @@ rog_local_planner:
       pcd_name: map.pcd
       ros_callback:
         enable: true
-        cloud_topic: /cloud_registered_1
+        cloud_topic: /scan_map
         odom_topic: /Odometry_open3d
         odom_timeout: 0.3
       visualization:

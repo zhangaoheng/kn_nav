@@ -1,7 +1,7 @@
 global_localization_node:
   ros__parameters:
-    path_map: "/home/kangneng/xq/map/pcd/kn-floor2/global_map_downsize.pcd"
-    path_imu_to_base: "/home/kangneng/xq/map/pcd/kn-floor2/imu_to_base.txt"
+    path_map: "/home/nav_map/cross-floor-kn/global_map_downsize.pcd"
+    path_imu_to_base: "/home/nav_map/corss-floor-kn/imu_to_base.txt"
 
     pcd_queue_maxsize: 10
     loc_frequence: 20.0

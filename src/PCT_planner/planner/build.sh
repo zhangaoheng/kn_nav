@@ -4,7 +4,7 @@ set -e
 ROOT_DIR=$(cd "$(dirname "$0")"; pwd)
 # THIRDPARTY_ROOT="${THIRDPARTY_ROOT:-/home/kangneng/xq/code/thirdparty/pct-install}"
 THIRDPARTY_ROOT="${THIRDPARTY_ROOT:-/home/code/thirdparty/pct-install}"
-# echo "ROOT_DIR: ${ROOT_DIR}"
+echo "ROOT_DIR: ${ROOT_DIR}"
 
 cd lib
 

@@ -1,5 +1,16 @@
 # kn_nav_ws
 
+
+ros2 service call /go2_cmd_vel_bridge/enable std_srvs/srv/SetBool '{data: true}'
+
+
+
+
+
+
+
+
+
 Integrated navigation workspace for local/device synchronization.
 
 Source packages are kept under `src/`:

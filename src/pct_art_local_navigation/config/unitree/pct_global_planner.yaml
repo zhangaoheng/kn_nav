@@ -10,10 +10,10 @@ pct_global_planner:
 
     # ── Map files ──────────────────────────────────────────────────────────
     # Absolute path to the source PCD point cloud
-    pcd_path: "/home/nav_map/chuzhou-kn-floor2/global_ground_map_downsize.pcd"
+    pcd_path: "/home/nav_map/corss-floor-kn/global_ground_map_downsize.pcd"
 
     # Absolute path to the pre-built tomogram pickle
-    tomo_path: "/home/code/work_space/kn_nav/src/PCT_planner/rsc/tomogram/global_ground_map_floor2.pickle"
+    tomo_path: "/home/code/work_space/kn_nav/src/PCT_planner/rsc/tomogram/liuxing_ground_voxel005_radius015.pickle"
 
     # ── TF frames ──────────────────────────────────────────────────────────
     # Planning frame (must match /pct_path frame_id and tomogram coordinates)
