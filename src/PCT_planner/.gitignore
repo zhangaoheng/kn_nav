@@ -4,7 +4,6 @@
 *.pcd
 *.npy
 *.pyc
-*.pickle
 *.so
 
 __pycache__/
