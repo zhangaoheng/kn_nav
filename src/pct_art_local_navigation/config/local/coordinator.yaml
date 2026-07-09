@@ -11,22 +11,34 @@ pct_art_coordinator:
     art_action_name: /art_planner/plan_to_goal
     require_map_for_goal_selection: false
     update_rate: 5.0
+    # 沿全局路径向前选局部目标点的期望距离，越大局部目标越远。
     lookahead_distance: 3.5
+    # 局部目标点距离机器人至少要超过该值，避免目标点贴身导致频繁切换或原地抖动。
     minimum_goal_distance: 0.15
+    # 局部目标点允许离机器人最远的距离，超过后不再继续向前选。
     maximum_goal_distance: 4.0
     maximum_local_goal_z_delta: 0.8
     maximum_local_goal_slope: 0.35
     map_edge_margin: 0.8
+    # 机器人接近当前局部目标到该距离内时，coordinator 会尝试推进到下一个局部目标。
     advance_distance: 1.5
+    # 新选出的局部目标与当前局部目标相差超过该距离时，才会真正更新 local_goal。
     goal_update_distance: 0.4
+    # local_goal 最小更新周期，限制局部目标刷新频率。
     goal_update_min_period: 0.5
+    # 切换局部目标时，短时间容忍 art_planner/path 为空，避免瞬时空路径直接 BLOCK。
     empty_art_path_grace_period: 0.75
+    # 最终目标点的位置到达阈值，单位米；若小于 pure_pursuit 的 final_heading_entry_distance，
+    # 可能出现控制器先停线速度、但 coordinator 还没判定到达的情况。
     goal_reached_distance: 0.15
+    # 最终目标点的航向角到达阈值，单位弧度；位置和航向都满足后才判定 GOAL_REACHED。
     goal_yaw_tolerance: 0.10
     progress_backtrack_points: 10
     progress_forward_search_points: 200
     maximum_path_start_distance: 1.0
+    # 非最终段时，art_planner/path 末端距离 local_goal 允许的最大偏差。
     maximum_path_goal_distance: 0.8
+    # 最终段时，art_planner/path 末端距离最终目标允许的最大偏差，通常要更严格。
     final_maximum_path_goal_distance: 0.25
     map_timeout: 6.0
     localization_timeout: 0.5

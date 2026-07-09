@@ -11,7 +11,13 @@ rog_local_planner:
       search_resolution: 0.2
       search_margin: 3.0
       output_spacing: 0.15
-      unknown_as_occupied: false
+      unknown_as_occupied: true
+      require_reference_path: true
+      reference_path_topic: /pct_path
+      reference_path_timeout: 0.0
+      reference_start_z_blend_distance: 0.6
+      reference_goal_match_tolerance: 0.8
+      reference_start_match_tolerance: 1.0
       require_map_ready: true
       allow_diagonal: true
       enable_path_smoothing: true
@@ -28,6 +34,24 @@ rog_local_planner:
       cost_sample_radius: 0.35
       cost_sample_step: 0.10
       turn_weight: 0.2
+
+    deformation:
+      enabled: true
+      sample_spacing: 0.10
+      max_lateral_offset: 0.8
+      lateral_offset_step: 0.2
+      collision_padding: 0.3
+      anchor_padding: 0.8
+      max_iterations: 3
+      fallback_to_corridor_astar: true
+      fallback_corridor_radius: 1.1
+
+    trajectory_constraints:
+      max_pitch: 0.45
+      max_yaw_delta_per_meter: 1.2
+      centerline_weight: 1.0
+      smoothness_weight: 0.4
+      offset_weight: 0.6
 
     projection:
       enable: true
@@ -46,6 +70,11 @@ rog_local_planner:
       footprint_marker_topic: /rog_local_planner/footprint_markers
       footprint_marker_stride: 2
       footprint_marker_alpha: 0.28
+      enable_deformation_debug: true
+      reference_path_topic: /rog_local_planner/reference_path
+      deformed_path_topic: /rog_local_planner/deformed_path
+      rejected_candidate_path_topic: /rog_local_planner/rejected_candidate_path
+      collision_marker_topic: /rog_local_planner/collision_markers
 
     robot:
       cylinder_radius: 0.28

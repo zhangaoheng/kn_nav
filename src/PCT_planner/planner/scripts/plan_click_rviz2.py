@@ -152,6 +152,8 @@ class ClickPlannerNode(Node):
         self.tomo_path = tomo_path
         self.tomo_name = os.path.splitext(os.path.basename(tomo_path))[0]
         self.clicks = []
+        self.click_z_epsilon = 0.05
+        self.z_search_radius_cells = 2
 
         self.tomo_pub = self.create_publisher(PointCloud2, '/tomogram', 1)
         self.path_pub = self.create_publisher(Path, '/pct_path', 1)
@@ -261,12 +263,21 @@ class ClickPlannerNode(Node):
         self.clicks.clear()
 
     def plan_from_clicks(self):
-        start_xyz, goal_xyz = self.clicks[0], self.clicks[1]
+        start_xyz = np.array(self.clicks[0], dtype=np.float32, copy=True)
+        goal_xyz = self.infer_goal_height(self.clicks[1])
 
         start_layer = self.find_slice(start_xyz)
         goal_layer = self.find_slice(goal_xyz)
         self.get_logger().info(
             f'Planning: start_slice={start_layer}, goal_slice={goal_layer}'
+        )
+        self.get_logger().info(
+            f'  Start: ({start_xyz[0]:.3f}, {start_xyz[1]:.3f}, '
+            f'z={start_xyz[2]:.3f})'
+        )
+        self.get_logger().info(
+            f'  Goal: ({goal_xyz[0]:.3f}, {goal_xyz[1]:.3f}, '
+            f'z={goal_xyz[2]:.3f})'
         )
 
         traj = self.planner.plan(start_xyz, goal_xyz)
@@ -295,7 +306,71 @@ class ClickPlannerNode(Node):
 
         out = os.path.join(PACKAGE_ROOT, 'rsc', self.tomo_name + '_click_traj.npy')
         np.save(out, traj)
-        self.get_logger().info(f'Path published: {traj.shape[0]} waypoints, saved to {out}')
+        self.get_logger().info(
+            f'Path published: {traj.shape[0]} waypoints, '
+            f'z_span={self.z_span(traj):.3f}, saved to {out}'
+        )
+
+    def infer_goal_height(self, xyz):
+        effective_xyz = np.array(xyz, dtype=np.float32, copy=True)
+        if abs(float(effective_xyz[2])) >= self.click_z_epsilon:
+            return effective_xyz
+
+        inferred_z = self.infer_goal_z_from_tomogram(
+            float(effective_xyz[0]),
+            float(effective_xyz[1]),
+            float(effective_xyz[2]),
+        )
+        if inferred_z is None:
+            return effective_xyz
+
+        effective_xyz[2] = inferred_z
+        self.get_logger().info(
+            f'Goal z ~= 0, inferred tomogram z={inferred_z:.3f} '
+            'for slice lookup.'
+        )
+        return effective_xyz
+
+    def infer_goal_z_from_tomogram(self, x, y, reference_z):
+        if self.planner.elev_g is None:
+            return None
+
+        try:
+            idx = self.planner.pos2array_idx([x, y])
+        except Exception as exc:
+            self.get_logger().debug(f'Cannot index tomogram goal XY: {exc}')
+            return None
+
+        if (
+            idx[0] < 0 or idx[0] >= self.planner.map_dim[0] or
+            idx[1] < 0 or idx[1] >= self.planner.map_dim[1]
+        ):
+            return None
+
+        radius = self.z_search_radius_cells
+        x0 = max(0, idx[0] - radius)
+        x1 = min(self.planner.map_dim[0], idx[0] + radius + 1)
+        y0 = max(0, idx[1] - radius)
+        y1 = min(self.planner.map_dim[1], idx[1] + radius + 1)
+
+        local_elev = self.planner.elev_g[:, x0:x1, y0:y1]
+        finite = np.isfinite(local_elev)
+        if not np.any(finite):
+            return None
+
+        scores = np.abs(local_elev - reference_z)
+        scores[~finite] = np.inf
+        return float(local_elev[np.unravel_index(np.argmin(scores), scores.shape)])
+
+    @staticmethod
+    def z_span(traj):
+        if traj is None or len(traj) == 0:
+            return 0.0
+        z = np.asarray(traj)[:, 2]
+        finite = np.isfinite(z)
+        if not np.any(finite):
+            return 0.0
+        return float(z[finite].max() - z[finite].min())
 
     def get_astar_path(self):
         if hasattr(self.planner, 'getLastAstarPath'):

@@ -2,7 +2,7 @@ import os
 import sys
 import pickle
 import numpy as np
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import distance_transform_edt, maximum_filter
 
 from utils import *
 
@@ -22,8 +22,18 @@ class TomogramPlanner(object):
         self.step_cost_weight = self.cfg.planner.step_cost_weight
         self.optimizer_cost_threshold = self.cfg.planner.optimizer_cost_threshold
         self.use_clearance_cost = self.cfg.planner.use_clearance_cost
+        self.clearance_cost_mode = getattr(
+            self.cfg.planner, 'clearance_cost_mode', 'absolute'
+        )
         self.clearance_cost_weight = self.cfg.planner.clearance_cost_weight
         self.clearance_cost_decay = self.cfg.planner.clearance_cost_decay
+        self.clearance_cost_local_radius = getattr(
+            self.cfg.planner, 'clearance_cost_local_radius', 1.0
+        )
+        self.clearance_cost_cap = getattr(
+            self.cfg.planner, 'clearance_cost_cap',
+            self.clearance_cost_weight
+        )
 
         self.tomo_dir = rsg_root + self.cfg.wrapper.tomo_dir
 
@@ -133,19 +143,48 @@ class TomogramPlanner(object):
 
         if not self.use_clearance_cost or self.clearance_cost_weight <= 0.0:
             return planning_trav, planning_gx, planning_gy
-        if self.clearance_cost_decay <= 0.0:
-            raise ValueError('clearance_cost_decay must be greater than zero')
 
-        free = np.isfinite(trav) & (trav <= self.a_star_cost_threshold)
+        traversable = np.isfinite(trav) & (trav <= self.a_star_cost_threshold)
+        clearance_free = np.isfinite(trav) & (trav <= self.optimizer_cost_threshold)
         for layer in range(trav.shape[0]):
             self.clearance[layer] = distance_transform_edt(
-                free[layer]
+                clearance_free[layer]
             ).astype(np.float32) * self.resolution
 
-        clearance_cost = self.clearance_cost_weight * np.exp(
-            -self.clearance / self.clearance_cost_decay
-        )
-        clearance_cost[~free] = 0.0
+        mode = str(self.clearance_cost_mode).lower()
+        if mode == 'absolute':
+            if self.clearance_cost_decay <= 0.0:
+                raise ValueError('clearance_cost_decay must be greater than zero')
+            clearance_cost = self.clearance_cost_weight * np.exp(
+                -self.clearance / self.clearance_cost_decay
+            )
+        elif mode == 'relative':
+            local_radius_cells = max(
+                1,
+                int(np.ceil(self.clearance_cost_local_radius / self.resolution))
+            )
+            window = 2 * local_radius_cells + 1
+            local_width = maximum_filter(
+                self.clearance,
+                size=(1, window, window),
+                mode='nearest'
+            )
+            relative_clearance = self.clearance / (local_width + 1e-6)
+            relative_clearance = np.clip(relative_clearance, 0.0, 1.0)
+            clearance_cost = self.clearance_cost_weight * (
+                1.0 - relative_clearance
+            ) ** 2
+            clearance_cost = np.clip(
+                clearance_cost,
+                0.0,
+                self.clearance_cost_cap
+            )
+        else:
+            raise ValueError(
+                "clearance_cost_mode must be 'relative' or 'absolute'"
+            )
+
+        clearance_cost[~traversable] = 0.0
         planning_trav += clearance_cost
 
         clearance_gx = np.zeros_like(clearance_cost)
@@ -192,6 +231,9 @@ class TomogramPlanner(object):
         opt_init = np.concatenate([opt_init.transpose(1, 0), init_layer.reshape(-1, 1)], axis=-1)
         traj = np.concatenate([traj_raw, layers.reshape(-1, 1)], axis=-1)
         y_idx = (traj.shape[-1] - 1) // 2
+        heights = self.sample_traj_heights(
+            layers, traj[:, 0], traj[:, y_idx], heights
+        )
         traj_3d = np.stack([traj[:, 0], traj[:, y_idx], heights / self.resolution], axis=1)
         traj_3d = transTrajGrid2Map(self.map_dim, self.center, self.resolution, traj_3d)
 
@@ -199,6 +241,47 @@ class TomogramPlanner(object):
 
     def getLastAstarPath(self):
         return self.last_astar_traj
+
+    def sample_traj_heights(self, layers, cols, rows, fallback_heights):
+        """Sample tomogram elevation along optimized XY to avoid flat z output."""
+        sampled = np.asarray(fallback_heights, dtype=np.float64).copy()
+        if self.elev_g is None:
+            return sampled
+
+        layers = np.rint(layers).astype(np.int32)
+        rows = np.rint(rows).astype(np.int32)
+        cols = np.rint(cols).astype(np.int32)
+        for i in range(sampled.shape[0]):
+            h = self.nearest_elevation(layers[i], rows[i], cols[i])
+            if h is not None:
+                sampled[i] = h
+        return sampled
+
+    def nearest_elevation(self, layer, row, col, search_radius=2):
+        layer = int(np.clip(layer, 0, self.n_slice - 1))
+        row = int(np.clip(row, 0, self.map_dim[0] - 1))
+        col = int(np.clip(col, 0, self.map_dim[1] - 1))
+
+        h = self.elev_g[layer, row, col]
+        if np.isfinite(h):
+            return float(h)
+
+        x0 = max(0, row - search_radius)
+        x1 = min(self.map_dim[0], row + search_radius + 1)
+        y0 = max(0, col - search_radius)
+        y1 = min(self.map_dim[1], col + search_radius + 1)
+        local_elev = self.elev_g[layer, x0:x1, y0:y1]
+        finite = np.isfinite(local_elev)
+        if not np.any(finite):
+            return None
+
+        local_rows, local_cols = np.where(finite)
+        dist_sq = (
+            (local_rows + x0 - row) ** 2 +
+            (local_cols + y0 - col) ** 2
+        )
+        nearest = int(np.argmin(dist_sq))
+        return float(local_elev[local_rows[nearest], local_cols[nearest]])
 
     def astar_path_to_map(self, path):
         path_idx = np.rint(path).astype(np.int32)

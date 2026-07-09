@@ -11,7 +11,7 @@
 #
 # Usage:
 #   ros2 launch pure_pursuit_planner pct_pure_pursuit.launch.py \
-#     network_interface:=enp2s0
+#     network_interface:=eth0
 # =============================================================================
 
 import os
@@ -31,7 +31,7 @@ def generate_launch_description():
     network_interface_argument = DeclareLaunchArgument(
         'network_interface',
         default_value='eth0',
-        description='Network interface connected to the Go2, e.g. enp2s0',
+        description='Network interface connected to the Go2, e.g. eth0',
     )
 
     pure_pursuit_node = Node(

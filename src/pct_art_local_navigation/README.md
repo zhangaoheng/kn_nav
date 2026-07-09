@@ -33,6 +33,20 @@ ros2 launch pct_art_local_navigation unitree_pct_art_local_navigation.launch.py 
   network_interface:=enp2s0
 ```
 
+To bypass local planning and test whether the PCT global path is directly
+trackable by Pure Pursuit, launch:
+
+```bash
+ros2 launch pct_art_local_navigation global_path_follow_test.launch.py \
+  network_interface:=enp2s0
+```
+
+This starts `PCT /pct_path -> Pure Pursuit -> /cmd_vel` and does not start
+`pct_art_coordinator`, `rog_local_planner`, `/local_goal`, or `/local_path`.
+The Go2 bridge is declared but disabled by default; pass
+`start_go2_bridge:=true` if you want the bridge process available for explicit
+enablement.
+
 The Go2 bridge starts disabled. Inspect localization, map, ART path and status,
 then enable motion explicitly:
 

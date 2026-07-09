@@ -31,6 +31,7 @@ struct PurePursuitConfig {
     double rotate_to_path_tolerance = 0.349;
     double goal_yaw_tolerance = 0.175;
     double rotate_to_heading_gain = 1.0;
+    bool standalone_goal_completion = false;
     double obstacle_th = 0.5;
     double odom_timeout = 0.3;
 };

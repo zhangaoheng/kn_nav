@@ -484,11 +484,9 @@ class PctGlobalPlannerNode(Node):
 
         # ── publish A* raw path ──────────────────────────────────────────
         astar_path = self.planner.getLastAstarPath()
-        publish_traj = traj
         if astar_path is not None and len(astar_path) > 0:
             self.astar_path_pub.publish(
                 traj_to_path(astar_path, self, frame=self.global_frame))
-            publish_traj = astar_path
             if self.publish_viz:
                 self.marker_pub.publish(
                     traj_to_marker(
@@ -499,14 +497,14 @@ class PctGlobalPlannerNode(Node):
             self.get_logger().info(
                 f'Raw A* path: {astar_path.shape[0]} waypoints')
             self.get_logger().info(
-                'Publishing raw A* path on /pct_path to preserve tomogram z.')
+                'Publishing raw A* path on /pct_astar_path for debug.')
 
         # ── publish path ────────────────────────────────────────────────
         self.path_pub.publish(
-            traj_to_path(publish_traj, self, frame=self.global_frame, goal_yaw=gyaw))
+            traj_to_path(traj, self, frame=self.global_frame, goal_yaw=gyaw))
         if self.publish_viz:
             self.marker_pub.publish(
-                traj_to_marker(publish_traj, self, frame=self.global_frame,
+                traj_to_marker(traj, self, frame=self.global_frame,
                                marker_id=self._next_marker_id()))
             # Goal sphere
             self.marker_pub.publish(
@@ -732,14 +730,18 @@ class PctGlobalPlannerNode(Node):
 def main():
     rclpy.init(args=sys.argv)
 
-    node = PctGlobalPlannerNode()
+    node = None
     try:
+        node = PctGlobalPlannerNode()
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info('Stopped by user.')
+        if node is not None and rclpy.ok():
+            node.get_logger().info('Stopped by user.')
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if node is not None:
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

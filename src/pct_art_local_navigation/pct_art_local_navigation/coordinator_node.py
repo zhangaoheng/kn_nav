@@ -971,16 +971,19 @@ class PctArtCoordinator(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = PctArtCoordinator()
+    node = None
     try:
+        node = PctArtCoordinator()
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        if rclpy.ok():
+        if node is not None and rclpy.ok():
             node._publish_empty_path()
-        node.destroy_node()
-        rclpy.shutdown()
+        if node is not None:
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

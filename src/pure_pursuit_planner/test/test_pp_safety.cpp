@@ -98,6 +98,27 @@ TEST(PurePursuitSafety, NonFinalApproachDoesNotStopAtPathEnd)
   EXPECT_GT(command[0], 0.0);
 }
 
+TEST(PurePursuitSafety, StandaloneGoalCompletionStopsAtPathEnd)
+{
+  PurePursuitConfig config;
+  config.goal_threshold = 0.35;
+  config.standalone_goal_completion = true;
+  config.minVelocity = 0.2;
+  config.maxVelocity = 0.2;
+  config.Lfc = 0.5;
+  PurePursuitComponent planner(config);
+
+  const std::vector<double> x{0.0, 1.0};
+  const std::vector<double> y{0.0, 0.0};
+  const std::vector<double> yaw{0.0, 0.0};
+  const std::vector<double> curvature{0.0, 0.0};
+
+  auto command = planner.computeVelocity(
+    x, y, yaw, curvature, Pose2D{1.0, 0.0, 0.0}, 0.0, false);
+  EXPECT_DOUBLE_EQ(command[0], 0.0);
+  EXPECT_DOUBLE_EQ(command[1], 0.0);
+}
+
 TEST(PurePursuitSafety, AlignsFinalYawWithMinimumAngularVelocity)
 {
   PurePursuitConfig config;

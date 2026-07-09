@@ -92,8 +92,10 @@ PurePursuitNode::PurePursuitNode(const rclcpp::NodeOptions& options)
 
     RCLCPP_INFO(
         this->get_logger(),
-        "Pure Pursuit ready: odom_topic=%s, odom_timeout=%.2f s",
-        odom_topic_.c_str(), config_.odom_timeout);
+        "Pure Pursuit ready: odom_topic=%s, odom_timeout=%.2f s, "
+        "standalone_goal_completion=%s",
+        odom_topic_.c_str(), config_.odom_timeout,
+        config_.standalone_goal_completion ? "true" : "false");
 }
 
 void PurePursuitNode::declareAndGetParameters() {
@@ -115,6 +117,8 @@ void PurePursuitNode::declareAndGetParameters() {
     config_.goal_yaw_tolerance = this->declare_parameter("goal_yaw_tolerance", 0.175);
     config_.rotate_to_heading_gain =
         this->declare_parameter("rotate_to_heading_gain", 1.0);
+    config_.standalone_goal_completion =
+        this->declare_parameter("standalone_goal_completion", false);
     config_.obstacle_th = this->declare_parameter("obstacle_th", 0.5);
     odom_topic_ = this->declare_parameter<std::string>("odom_topic", "/Odometry_open3d");
     final_approach_topic_ = this->declare_parameter<std::string>(

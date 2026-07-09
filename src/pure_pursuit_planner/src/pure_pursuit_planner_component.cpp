@@ -58,6 +58,11 @@ std::vector<double> PurePursuitComponent::computeVelocity(
         }
         return {0.0, calculateFinalRotationAngularVelocity(goal_yaw_error)};
     }
+    if (cfg_.standalone_goal_completion &&
+        path_end_distance <= cfg_.goal_threshold) {
+        rotating_to_path_ = false;
+        return {0.0, 0.0};
+    }
 
     //std::cout << "odom_sub_flag: " << odom_sub_flag << std::endl;
     auto [ind, Lf] = searchTargetIndex();

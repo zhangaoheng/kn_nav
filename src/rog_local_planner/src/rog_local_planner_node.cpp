@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <queue>
 #include <sstream>
 #include <string>
@@ -25,6 +26,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <rog_map/rog_map.h>
+#include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/utils.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -202,6 +204,20 @@ double poseYaw(const geometry_msgs::msg::Pose & pose)
   return tf2::getYaw(q);
 }
 
+double posePitch(const geometry_msgs::msg::Pose & pose)
+{
+  tf2::Quaternion q(
+    pose.orientation.x,
+    pose.orientation.y,
+    pose.orientation.z,
+    pose.orientation.w);
+  double roll = 0.0;
+  double pitch = 0.0;
+  double yaw = 0.0;
+  tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+  return pitch;
+}
+
 Vec3 posePosition(const geometry_msgs::msg::PoseStamped & pose)
 {
   return Vec3(pose.pose.position.x, pose.pose.position.y, pose.pose.position.z);
@@ -246,6 +262,37 @@ struct FootprintCheck
   int radial_index{0};
 };
 
+struct TrajectorySample
+{
+  Vec3 center{Vec3::Zero()};
+  double arc{0.0};
+  double yaw{0.0};
+  double pitch{0.0};
+  size_t segment_index{0};
+};
+
+struct CollisionInterval
+{
+  double start_arc{0.0};
+  double end_arc{0.0};
+  size_t first_sample{0};
+  size_t last_sample{0};
+};
+
+struct CollisionSample
+{
+  TrajectorySample trajectory;
+  FootprintCheck footprint;
+  size_t sample_index{0};
+};
+
+struct CollisionReport
+{
+  bool collision_free{true};
+  std::vector<CollisionInterval> intervals;
+  std::vector<CollisionSample> failed_samples;
+};
+
 std::string vecToString(const Vec3 & value)
 {
   std::ostringstream out;
@@ -288,9 +335,27 @@ public:
 
     path_pub_ = node_->create_publisher<nav_msgs::msg::Path>(
       path_topic_, rclcpp::QoS(1).transient_local());
+    reference_path_sub_ = node_->create_subscription<nav_msgs::msg::Path>(
+      reference_path_topic_,
+      rclcpp::QoS(1).reliable().transient_local(),
+      std::bind(&RogLocalPlanner::referencePathCallback, this, std::placeholders::_1));
+    reference_path_volatile_sub_ = node_->create_subscription<nav_msgs::msg::Path>(
+      reference_path_topic_,
+      rclcpp::QoS(10).reliable(),
+      std::bind(&RogLocalPlanner::referencePathCallback, this, std::placeholders::_1));
     if (visualization_enable_footprint_markers_) {
       footprint_marker_pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
         visualization_footprint_marker_topic_, rclcpp::QoS(1).transient_local());
+    }
+    if (visualization_enable_deformation_debug_) {
+      reference_debug_path_pub_ = node_->create_publisher<nav_msgs::msg::Path>(
+        visualization_reference_path_topic_, rclcpp::QoS(1).transient_local());
+      deformed_debug_path_pub_ = node_->create_publisher<nav_msgs::msg::Path>(
+        visualization_deformed_path_topic_, rclcpp::QoS(1).transient_local());
+      rejected_candidate_path_pub_ = node_->create_publisher<nav_msgs::msg::Path>(
+        visualization_rejected_candidate_path_topic_, rclcpp::QoS(1).transient_local());
+      collision_marker_pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
+        visualization_collision_marker_topic_, rclcpp::QoS(1).transient_local());
     }
     action_server_ = rclcpp_action::create_server<PlanToGoal>(
       node_,
@@ -301,11 +366,18 @@ public:
 
     RCLCPP_INFO(
       node_->get_logger(),
-      "ROG local planner ready: action=%s, path=%s, frame=%s, robot=%s",
-      action_name_.c_str(), path_topic_.c_str(), global_frame_.c_str(), robot_frame_.c_str());
+      "ROG local planner ready: action=%s, path=%s, reference=%s, frame=%s, robot=%s",
+      action_name_.c_str(), path_topic_.c_str(), reference_path_topic_.c_str(),
+      global_frame_.c_str(), robot_frame_.c_str());
   }
 
 private:
+  void referencePathCallback(const nav_msgs::msg::Path::SharedPtr msg)
+  {
+    std::lock_guard<std::mutex> lock(reference_path_mutex_);
+    latest_reference_path_ = msg;
+  }
+
   void readParameters()
   {
     global_frame_ = declareAndGet<std::string>("global_frame", "map");
@@ -318,7 +390,16 @@ private:
     search_resolution_ = declareAndGet<double>("planner.search_resolution", 0.0);
     search_margin_ = declareAndGet<double>("planner.search_margin", 3.0);
     output_spacing_ = declareAndGet<double>("planner.output_spacing", 0.15);
-    unknown_as_occupied_ = declareAndGet<bool>("planner.unknown_as_occupied", false);
+    unknown_as_occupied_ = declareAndGet<bool>("planner.unknown_as_occupied", true);
+    require_reference_path_ = declareAndGet<bool>("planner.require_reference_path", true);
+    reference_path_topic_ = declareAndGet<std::string>("planner.reference_path_topic", "/pct_path");
+    reference_path_timeout_ = declareAndGet<double>("planner.reference_path_timeout", 0.0);
+    reference_start_z_blend_distance_ = declareAndGet<double>(
+      "planner.reference_start_z_blend_distance", 0.6);
+    reference_goal_match_tolerance_ = declareAndGet<double>(
+      "planner.reference_goal_match_tolerance", 0.8);
+    reference_start_match_tolerance_ = declareAndGet<double>(
+      "planner.reference_start_match_tolerance", 1.0);
     require_map_ready_ = declareAndGet<bool>("planner.require_map_ready", true);
     allow_diagonal_ = declareAndGet<bool>("planner.allow_diagonal", true);
     enable_path_smoothing_ = declareAndGet<bool>("planner.enable_path_smoothing", false);
@@ -342,6 +423,28 @@ private:
     cost_sample_step_ = declareAndGet<double>("cost.cost_sample_step", 0.10);
     cost_turn_weight_ = declareAndGet<double>("cost.turn_weight", 0.2);
 
+    deformation_enabled_ = declareAndGet<bool>("deformation.enabled", true);
+    deformation_sample_spacing_ = declareAndGet<double>("deformation.sample_spacing", 0.10);
+    deformation_max_lateral_offset_ = declareAndGet<double>("deformation.max_lateral_offset", 0.8);
+    deformation_lateral_offset_step_ = declareAndGet<double>("deformation.lateral_offset_step", 0.2);
+    deformation_collision_padding_ = declareAndGet<double>("deformation.collision_padding", 0.3);
+    deformation_anchor_padding_ = declareAndGet<double>("deformation.anchor_padding", 0.8);
+    deformation_max_iterations_ = declareAndGet<int>("deformation.max_iterations", 3);
+    deformation_fallback_to_corridor_astar_ = declareAndGet<bool>(
+      "deformation.fallback_to_corridor_astar", true);
+    fallback_corridor_radius_ = declareAndGet<double>(
+      "deformation.fallback_corridor_radius", 1.1);
+
+    trajectory_max_pitch_ = declareAndGet<double>("trajectory_constraints.max_pitch", 0.45);
+    trajectory_max_yaw_delta_per_meter_ = declareAndGet<double>(
+      "trajectory_constraints.max_yaw_delta_per_meter", 1.2);
+    trajectory_centerline_weight_ = declareAndGet<double>(
+      "trajectory_constraints.centerline_weight", 1.0);
+    trajectory_smoothness_weight_ = declareAndGet<double>(
+      "trajectory_constraints.smoothness_weight", 0.4);
+    trajectory_offset_weight_ = declareAndGet<double>(
+      "trajectory_constraints.offset_weight", 0.6);
+
     projection_enable_ = declareAndGet<bool>("projection.enable", true);
     projection_radius_ = declareAndGet<double>("projection.radius", 0.45);
     projection_step_ = declareAndGet<double>("projection.step", 0.10);
@@ -364,11 +467,25 @@ private:
       "visualization.footprint_marker_stride", 2);
     visualization_footprint_marker_alpha_ = declareAndGet<double>(
       "visualization.footprint_marker_alpha", 0.28);
+    visualization_enable_deformation_debug_ = declareAndGet<bool>(
+      "visualization.enable_deformation_debug", true);
+    visualization_reference_path_topic_ = declareAndGet<std::string>(
+      "visualization.reference_path_topic", "/rog_local_planner/reference_path");
+    visualization_deformed_path_topic_ = declareAndGet<std::string>(
+      "visualization.deformed_path_topic", "/rog_local_planner/deformed_path");
+    visualization_rejected_candidate_path_topic_ = declareAndGet<std::string>(
+      "visualization.rejected_candidate_path_topic", "/rog_local_planner/rejected_candidate_path");
+    visualization_collision_marker_topic_ = declareAndGet<std::string>(
+      "visualization.collision_marker_topic", "/rog_local_planner/collision_markers");
 
     replan_rate_ = std::max(0.1, replan_rate_);
     planning_timeout_ = std::max(0.01, planning_timeout_);
     output_spacing_ = std::max(0.03, output_spacing_);
     search_margin_ = std::max(0.0, search_margin_);
+    reference_path_timeout_ = std::max(0.0, reference_path_timeout_);
+    reference_start_z_blend_distance_ = std::max(0.0, reference_start_z_blend_distance_);
+    reference_goal_match_tolerance_ = std::max(0.0, reference_goal_match_tolerance_);
+    reference_start_match_tolerance_ = std::max(0.0, reference_start_match_tolerance_);
     path_smoothing_iterations_ = std::max(0, path_smoothing_iterations_);
     path_smoothing_data_weight_ = std::max(0.0, path_smoothing_data_weight_);
     path_smoothing_smooth_weight_ = std::max(0.0, path_smoothing_smooth_weight_);
@@ -385,6 +502,19 @@ private:
     cost_sample_radius_ = std::max(0.0, cost_sample_radius_);
     cost_sample_step_ = std::max(0.03, cost_sample_step_);
     cost_turn_weight_ = std::max(0.0, cost_turn_weight_);
+    deformation_sample_spacing_ = std::max(0.03, deformation_sample_spacing_);
+    deformation_max_lateral_offset_ = std::max(0.0, deformation_max_lateral_offset_);
+    deformation_lateral_offset_step_ = std::max(0.03, deformation_lateral_offset_step_);
+    deformation_collision_padding_ = std::max(0.0, deformation_collision_padding_);
+    deformation_anchor_padding_ = std::max(0.0, deformation_anchor_padding_);
+    deformation_max_iterations_ = std::max(0, deformation_max_iterations_);
+    fallback_corridor_radius_ = std::max(
+      deformation_max_lateral_offset_, fallback_corridor_radius_);
+    trajectory_max_pitch_ = std::clamp(trajectory_max_pitch_, 0.0, 0.5 * M_PI);
+    trajectory_max_yaw_delta_per_meter_ = std::max(0.0, trajectory_max_yaw_delta_per_meter_);
+    trajectory_centerline_weight_ = std::max(0.0, trajectory_centerline_weight_);
+    trajectory_smoothness_weight_ = std::max(0.0, trajectory_smoothness_weight_);
+    trajectory_offset_weight_ = std::max(0.0, trajectory_offset_weight_);
     projection_radius_ = std::max(0.0, projection_radius_);
     projection_step_ = std::max(0.03, projection_step_);
     cylinder_radius_ = std::max(0.0, cylinder_radius_);
@@ -405,6 +535,18 @@ private:
       cylinder_radius_, cylinder_offset_, clearance_up_, clearance_down_, vertical_step_,
       radial_samples_, enable_pitch_footprint_ ? "true" : "false", max_footprint_pitch_,
       footprint_z_offset_);
+    RCLCPP_INFO(
+      node_->get_logger(),
+      "ROG PCT reference planner: enabled=%s, require_reference=%s, topic=%s, timeout=%.3f, "
+      "sample_spacing=%.3f, max_lateral_offset=%.3f, offset_step=%.3f, unknown_as_occupied=%s",
+      deformation_enabled_ ? "true" : "false",
+      require_reference_path_ ? "true" : "false",
+      reference_path_topic_.c_str(),
+      reference_path_timeout_,
+      deformation_sample_spacing_,
+      deformation_max_lateral_offset_,
+      deformation_lateral_offset_step_,
+      unknown_as_occupied_ ? "true" : "false");
   }
 
   template<typename T>
@@ -522,17 +664,18 @@ private:
     Vec3 start = posePosition(start_pose);
     Vec3 goal = posePosition(goal_pose);
     const double goal_yaw = poseYaw(goal_pose.pose);
-    double start_yaw = std::atan2(goal.y() - start.y(), goal.x() - start.x());
+    double start_yaw = poseYaw(start_pose.pose);
+    const double start_pitch = clampFootprintPitch(posePitch(start_pose.pose));
     double path_pitch = segmentPitch(start, goal);
 
     const bool start_center_inside = map_->insideLocalMapPublic(start);
     const FootprintCheck start_check = start_center_inside ?
-      checkFootprintFree(start, start_yaw, path_pitch) :
+      checkFootprintFree(start, start_yaw, start_pitch) :
       makeCenterOutsideFailure(start);
     if (!start_center_inside || !start_check.free) {
       Vec3 projected_start;
       std::string projection_failure;
-      if (projectNearestFreePose(start, start_yaw, path_pitch, start, goal, projected_start, &projection_failure)) {
+      if (projectNearestFreePose(start, start_yaw, start_pitch, start, goal, projected_start, &projection_failure)) {
         RCLCPP_WARN_THROTTLE(
           node_->get_logger(),
           *node_->get_clock(),
@@ -541,7 +684,6 @@ private:
           vecToString(start).c_str(), vecToString(projected_start).c_str(),
           (projected_start - start).norm());
         start = projected_start;
-        start_yaw = std::atan2(goal.y() - start.y(), goal.x() - start.x());
         path_pitch = segmentPitch(start, goal);
       } else {
         attempt.status = PlanToGoal::Feedback::INVALID_START;
@@ -556,14 +698,17 @@ private:
       }
     }
 
+    const double goal_check_yaw = horizontalDistance(start, goal) > 1e-6 ?
+      std::atan2(goal.y() - start.y(), goal.x() - start.x()) :
+      goal_yaw;
     const bool goal_center_inside = map_->insideLocalMapPublic(goal);
     const FootprintCheck goal_check = goal_center_inside ?
-      checkFootprintFree(goal, start_yaw, path_pitch) :
+      checkFootprintFree(goal, goal_check_yaw, path_pitch) :
       makeCenterOutsideFailure(goal);
     if (!goal_center_inside || !goal_check.free) {
       Vec3 projected_goal;
       std::string projection_failure;
-      if (projectNearestFreePose(goal, start_yaw, path_pitch, start, goal, projected_goal, &projection_failure)) {
+      if (projectNearestFreePose(goal, goal_check_yaw, path_pitch, start, goal, projected_goal, &projection_failure)) {
         RCLCPP_WARN_THROTTLE(
           node_->get_logger(),
           *node_->get_clock(),
@@ -572,7 +717,6 @@ private:
           vecToString(goal).c_str(), vecToString(projected_goal).c_str(),
           (projected_goal - goal).norm());
         goal = projected_goal;
-        start_yaw = std::atan2(goal.y() - start.y(), goal.x() - start.x());
         path_pitch = segmentPitch(start, goal);
       } else {
         attempt.status = PlanToGoal::Feedback::INVALID_GOAL;
@@ -587,15 +731,68 @@ private:
       }
     }
 
+    std::vector<Vec3> reference_points;
+    std::string reference_failure;
+    const bool wants_reference = deformation_enabled_ || require_reference_path_;
+    const bool have_reference = wants_reference &&
+      buildReferenceTrajectory(start, goal, reference_points, &reference_failure);
+    if (have_reference) {
+      publishDebugPath(reference_debug_path_pub_, reference_points);
+    } else if (require_reference_path_) {
+      attempt.status = PlanToGoal::Feedback::NO_SOLUTION;
+      attempt.reason = makePlanFailureReason(
+        "PCT reference path is required but unavailable",
+        start,
+        goal,
+        start_yaw,
+        goal_yaw,
+        reference_failure);
+      return attempt;
+    }
+
+    if (have_reference && deformation_enabled_) {
+      std::vector<Vec3> deformed_points;
+      std::string deformation_failure;
+      if (planByReferenceDeformation(
+          reference_points, start_yaw, start_pitch, deformed_points, &deformation_failure))
+      {
+        attempt.path = makePath(deformed_points, goal_pose.pose.orientation);
+        attempt.status = PlanToGoal::Feedback::FOUND_SOLUTION;
+        publishDebugPath(deformed_debug_path_pub_, deformed_points);
+        return attempt;
+      }
+
+      RCLCPP_WARN_THROTTLE(
+        node_->get_logger(),
+        *node_->get_clock(),
+        1000,
+        "PCT lateral deformation failed: %s",
+        deformation_failure.c_str());
+      if (!deformation_fallback_to_corridor_astar_) {
+        attempt.status = PlanToGoal::Feedback::NO_SOLUTION;
+        attempt.reason = makePlanFailureReason(
+          "PCT lateral deformation found no collision-free path",
+          start,
+          goal,
+          start_yaw,
+          goal_yaw,
+          deformation_failure);
+        return attempt;
+      }
+    }
+
     std::vector<Vec3> points;
-    if (isFootprintLineFree(start, goal)) {
+    const std::vector<Vec3> * fallback_reference = have_reference ? &reference_points : nullptr;
+    if (fallback_reference == nullptr && isFootprintLineFree(start, goal)) {
       points = {start, goal};
     } else {
       std::string astar_failure;
-      if (!runProjectedAStar(start, goal, points, &astar_failure)) {
+      if (!runProjectedAStar(start, goal, points, &astar_failure, fallback_reference)) {
         attempt.status = PlanToGoal::Feedback::NO_SOLUTION;
         attempt.reason = makePlanFailureReason(
-          "projected A* found no collision-free path",
+          fallback_reference == nullptr ?
+          "projected A* found no collision-free path" :
+          "PCT corridor fallback A* found no collision-free path",
           start,
           goal,
           start_yaw,
@@ -605,8 +802,22 @@ private:
       }
     }
 
-    points = cleanPathGeometry(shortcutPath(points));
+    points = cleanPathGeometry(shortcutPath(points, fallback_reference));
     points = projectPathToLinearHeight(resamplePath(points), start, goal);
+    if (
+      fallback_reference != nullptr &&
+      !pathWithinReferenceCorridor(points, *fallback_reference, fallback_corridor_radius_))
+    {
+      attempt.status = PlanToGoal::Feedback::NO_SOLUTION;
+      attempt.reason = makePlanFailureReason(
+        "PCT corridor fallback escaped the allowed reference corridor",
+        start,
+        goal,
+        start_yaw,
+        goal_yaw,
+        "fallback_corridor_radius=" + std::to_string(fallback_corridor_radius_));
+      return attempt;
+    }
     if (enable_path_smoothing_ && points.size() > 2) {
       const std::vector<Vec3> smoothed = smoothPath(points, start, goal);
       std::string smoothing_failure;
@@ -694,11 +905,187 @@ private:
     }
   }
 
+  bool getLatestReferencePath(nav_msgs::msg::Path & path, std::string * failure_reason = nullptr)
+  {
+    nav_msgs::msg::Path::SharedPtr cached;
+    {
+      std::lock_guard<std::mutex> lock(reference_path_mutex_);
+      cached = latest_reference_path_;
+    }
+    if (!cached) {
+      setFailureReason(failure_reason, "no /pct_path has been received");
+      return false;
+    }
+    if (cached->poses.empty()) {
+      setFailureReason(failure_reason, "latest /pct_path is empty");
+      return false;
+    }
+    if (reference_path_timeout_ > 0.0) {
+      const rclcpp::Time stamp(cached->header.stamp);
+      if (stamp.nanoseconds() > 0) {
+        const double age = (node_->now() - stamp).seconds();
+        if (age > reference_path_timeout_) {
+          std::ostringstream out;
+          out << "latest /pct_path is stale, age=" << std::fixed << std::setprecision(3)
+              << age << " s, timeout=" << reference_path_timeout_;
+          setFailureReason(failure_reason, out.str());
+          return false;
+        }
+      }
+    }
+    path = *cached;
+    return true;
+  }
+
+  bool referencePathToGlobalPoints(
+    const nav_msgs::msg::Path & path,
+    std::vector<Vec3> & points,
+    std::string * failure_reason = nullptr)
+  {
+    points.clear();
+    points.reserve(path.poses.size());
+    const std::string path_frame = path.header.frame_id.empty() ? global_frame_ : path.header.frame_id;
+
+    for (size_t i = 0; i < path.poses.size(); ++i) {
+      geometry_msgs::msg::PoseStamped pose = path.poses[i];
+      if (pose.header.frame_id.empty()) {
+        pose.header.frame_id = path_frame;
+      }
+      if (pose.header.stamp.sec == 0 && pose.header.stamp.nanosec == 0) {
+        pose.header.stamp = path.header.stamp;
+      }
+
+      geometry_msgs::msg::PoseStamped global_pose;
+      if (pose.header.frame_id == global_frame_) {
+        global_pose = pose;
+      } else {
+        try {
+          tf_buffer_.transform(pose, global_pose, global_frame_, tf2::durationFromSec(0.1));
+        } catch (const tf2::TransformException & ex) {
+          std::ostringstream out;
+          out << "failed to transform /pct_path pose " << i << " from frame "
+              << pose.header.frame_id << " to " << global_frame_ << ": " << ex.what();
+          setFailureReason(failure_reason, out.str());
+          return false;
+        }
+      }
+
+      const Vec3 point = posePosition(global_pose);
+      if (!std::isfinite(point.x()) || !std::isfinite(point.y()) || !std::isfinite(point.z())) {
+        std::ostringstream out;
+        out << "/pct_path contains non-finite point at index " << i;
+        setFailureReason(failure_reason, out.str());
+        return false;
+      }
+      if (points.empty() || horizontalDistance(points.back(), point) > 1e-6 ||
+        std::abs(points.back().z() - point.z()) > 1e-6)
+      {
+        points.push_back(point);
+      }
+    }
+
+    if (points.size() < 2) {
+      setFailureReason(failure_reason, "/pct_path has fewer than two unique points");
+      return false;
+    }
+    return true;
+  }
+
+  bool buildReferenceTrajectory(
+    const Vec3 & start,
+    const Vec3 & goal,
+    std::vector<Vec3> & reference_points,
+    std::string * failure_reason = nullptr)
+  {
+    nav_msgs::msg::Path reference_path_msg;
+    if (!getLatestReferencePath(reference_path_msg, failure_reason)) {
+      return false;
+    }
+
+    std::vector<Vec3> global_reference;
+    if (!referencePathToGlobalPoints(reference_path_msg, global_reference, failure_reason)) {
+      return false;
+    }
+
+    const std::vector<double> cumulative = cumulativeHorizontalArc(global_reference);
+    if (cumulative.size() != global_reference.size() || cumulative.back() <= 1e-6) {
+      setFailureReason(failure_reason, "/pct_path horizontal length is too small");
+      return false;
+    }
+
+    double start_progress = 0.0;
+    Vec3 start_reference = Vec3::Zero();
+    double start_distance = 0.0;
+    if (!closestProgressOnPath(
+        start, global_reference, cumulative, 0.0, cumulative.back(),
+        start_progress, &start_reference, &start_distance))
+    {
+      setFailureReason(failure_reason, "could not project robot start onto /pct_path");
+      return false;
+    }
+    if (start_distance > reference_start_match_tolerance_) {
+      std::ostringstream out;
+      out << "robot start is " << std::fixed << std::setprecision(3)
+          << start_distance << " m from /pct_path, tolerance="
+          << reference_start_match_tolerance_;
+      setFailureReason(failure_reason, out.str());
+      return false;
+    }
+
+    double goal_progress = 0.0;
+    Vec3 goal_reference = Vec3::Zero();
+    double goal_distance = 0.0;
+    const bool found_goal_ahead = closestProgressOnPath(
+      goal, global_reference, cumulative, start_progress, cumulative.back(),
+      goal_progress, &goal_reference, &goal_distance);
+    if (!found_goal_ahead) {
+      setFailureReason(failure_reason, "could not project local goal ahead of robot on /pct_path");
+      return false;
+    }
+    if (goal_distance > reference_goal_match_tolerance_) {
+      std::ostringstream out;
+      out << "local goal is " << std::fixed << std::setprecision(3)
+          << goal_distance << " m from /pct_path, tolerance="
+          << reference_goal_match_tolerance_;
+      setFailureReason(failure_reason, out.str());
+      return false;
+    }
+    if (goal_progress <= start_progress + 1e-3) {
+      setFailureReason(failure_reason, "local goal is not ahead of robot on /pct_path");
+      return false;
+    }
+
+    reference_points.clear();
+    reference_points.push_back(start);
+    const double z_offset = start.z() - start_reference.z();
+    for (
+      double progress = start_progress + deformation_sample_spacing_;
+      progress < goal_progress - 1e-6;
+      progress += deformation_sample_spacing_)
+    {
+      Vec3 point = interpolatePathAtProgress(global_reference, cumulative, progress);
+      if (reference_start_z_blend_distance_ > 1e-6) {
+        const double ratio = std::clamp(
+          (progress - start_progress) / reference_start_z_blend_distance_, 0.0, 1.0);
+        point.z() += (1.0 - ratio) * z_offset;
+      }
+      reference_points.push_back(point);
+    }
+    reference_points.push_back(goal);
+
+    if (reference_points.size() < 2) {
+      setFailureReason(failure_reason, "built reference trajectory has fewer than two points");
+      return false;
+    }
+    return true;
+  }
+
   bool runProjectedAStar(
     const Vec3 & start,
     const Vec3 & goal,
     std::vector<Vec3> & path,
-    std::string * failure_reason = nullptr)
+    std::string * failure_reason = nullptr,
+    const std::vector<Vec3> * corridor_reference = nullptr)
   {
     const double resolution = search_resolution_ > 0.0 ? search_resolution_ : map_->getInfResolution();
     if (!std::isfinite(resolution) || resolution <= 0.0) {
@@ -831,6 +1218,12 @@ private:
           continue;
         }
         const Vec3 neighbor_point = toPoint(nix, niy);
+        if (
+          corridor_reference != nullptr &&
+          closestHorizontalDistanceToPath(neighbor_point, *corridor_reference) > fallback_corridor_radius_)
+        {
+          continue;
+        }
         FootprintCheck footprint_check;
         Vec3 failure_center = Vec3::Zero();
         int failure_sample_index = -1;
@@ -1392,6 +1785,153 @@ private:
     return best_point;
   }
 
+  static std::vector<double> cumulativeHorizontalArc(const std::vector<Vec3> & path)
+  {
+    std::vector<double> cumulative;
+    cumulative.reserve(path.size());
+    cumulative.push_back(0.0);
+    for (size_t i = 1; i < path.size(); ++i) {
+      cumulative.push_back(cumulative.back() + horizontalDistance(path[i - 1], path[i]));
+    }
+    return cumulative;
+  }
+
+  static double closestHorizontalDistanceToPath(const Vec3 & point, const std::vector<Vec3> & path)
+  {
+    if (path.empty()) {
+      return std::numeric_limits<double>::infinity();
+    }
+    if (path.size() == 1) {
+      return horizontalDistance(point, path.front());
+    }
+
+    double best_distance = std::numeric_limits<double>::infinity();
+    for (size_t i = 0; i + 1 < path.size(); ++i) {
+      const Vec3 segment = path[i + 1] - path[i];
+      const double length_sq = segment.x() * segment.x() + segment.y() * segment.y();
+      double ratio = 0.0;
+      if (length_sq > 1e-12) {
+        ratio = ((point.x() - path[i].x()) * segment.x() +
+          (point.y() - path[i].y()) * segment.y()) / length_sq;
+        ratio = std::clamp(ratio, 0.0, 1.0);
+      }
+      const Vec3 candidate = path[i] + ratio * segment;
+      best_distance = std::min(best_distance, horizontalDistance(point, candidate));
+    }
+    return best_distance;
+  }
+
+  static bool closestProgressOnPath(
+    const Vec3 & point,
+    const std::vector<Vec3> & path,
+    const std::vector<double> & cumulative,
+    double min_progress,
+    double max_progress,
+    double & progress,
+    Vec3 * closest_point = nullptr,
+    double * closest_distance = nullptr)
+  {
+    if (path.empty() || cumulative.size() != path.size()) {
+      return false;
+    }
+    if (path.size() == 1) {
+      progress = 0.0;
+      if (closest_point != nullptr) {
+        *closest_point = path.front();
+      }
+      if (closest_distance != nullptr) {
+        *closest_distance = horizontalDistance(point, path.front());
+      }
+      return min_progress <= 0.0 && max_progress >= 0.0;
+    }
+
+    double best_distance = std::numeric_limits<double>::infinity();
+    double best_progress = 0.0;
+    Vec3 best_point = path.front();
+    bool found = false;
+    for (size_t i = 0; i + 1 < path.size(); ++i) {
+      const Vec3 segment = path[i + 1] - path[i];
+      const double segment_length = horizontalDistance(path[i], path[i + 1]);
+      if (segment_length <= 1e-9) {
+        continue;
+      }
+      const double length_sq = segment.x() * segment.x() + segment.y() * segment.y();
+      double ratio = ((point.x() - path[i].x()) * segment.x() +
+        (point.y() - path[i].y()) * segment.y()) / length_sq;
+      ratio = std::clamp(ratio, 0.0, 1.0);
+      const double candidate_progress = cumulative[i] + ratio * segment_length;
+      if (candidate_progress + 1e-9 < min_progress || candidate_progress - 1e-9 > max_progress) {
+        continue;
+      }
+      const Vec3 candidate = path[i] + ratio * segment;
+      const double candidate_distance = horizontalDistance(point, candidate);
+      if (candidate_distance < best_distance) {
+        best_distance = candidate_distance;
+        best_progress = candidate_progress;
+        best_point = candidate;
+        found = true;
+      }
+    }
+
+    if (!found) {
+      return false;
+    }
+    progress = best_progress;
+    if (closest_point != nullptr) {
+      *closest_point = best_point;
+    }
+    if (closest_distance != nullptr) {
+      *closest_distance = best_distance;
+    }
+    return true;
+  }
+
+  static Vec3 interpolatePathAtProgress(
+    const std::vector<Vec3> & path,
+    const std::vector<double> & cumulative,
+    double progress)
+  {
+    if (path.empty()) {
+      return Vec3::Zero();
+    }
+    if (path.size() == 1 || cumulative.size() != path.size()) {
+      return path.front();
+    }
+    if (progress <= 0.0) {
+      return path.front();
+    }
+    if (progress >= cumulative.back()) {
+      return path.back();
+    }
+    auto upper = std::lower_bound(cumulative.begin(), cumulative.end(), progress);
+    size_t index = static_cast<size_t>(std::distance(cumulative.begin(), upper));
+    index = std::clamp<size_t>(index, 1, path.size() - 1);
+    const double start_progress = cumulative[index - 1];
+    const double end_progress = cumulative[index];
+    const double length = end_progress - start_progress;
+    if (length <= 1e-9) {
+      return path[index];
+    }
+    const double ratio = (progress - start_progress) / length;
+    return path[index - 1] + ratio * (path[index] - path[index - 1]);
+  }
+
+  bool pathWithinReferenceCorridor(
+    const std::vector<Vec3> & points,
+    const std::vector<Vec3> & reference_path,
+    double radius) const
+  {
+    if (reference_path.empty()) {
+      return true;
+    }
+    for (const Vec3 & point : points) {
+      if (closestHorizontalDistanceToPath(point, reference_path) > radius + 1e-9) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   Vec3 limitDeviationToPath(const Vec3 & point, const std::vector<Vec3> & reference_path) const
   {
     if (path_smoothing_max_deviation_ <= 0.0) {
@@ -1499,6 +2039,347 @@ private:
     return projectPathToLinearHeight(resamplePath(smoothed), start, goal);
   }
 
+  static double pointSequenceYawAt(const std::vector<Vec3> & points, size_t index, double fallback = 0.0)
+  {
+    if (points.size() < 2 || index >= points.size()) {
+      return fallback;
+    }
+    if (index + 1 < points.size() && horizontalDistance(points[index], points[index + 1]) > 1e-9) {
+      const Vec3 delta = points[index + 1] - points[index];
+      return std::atan2(delta.y(), delta.x());
+    }
+    if (index > 0 && horizontalDistance(points[index - 1], points[index]) > 1e-9) {
+      const Vec3 delta = points[index] - points[index - 1];
+      return std::atan2(delta.y(), delta.x());
+    }
+    return fallback;
+  }
+
+  std::vector<TrajectorySample> sampleTrajectory(
+    const std::vector<Vec3> & points,
+    double spacing,
+    double start_yaw,
+    double start_pitch) const
+  {
+    std::vector<TrajectorySample> samples;
+    if (points.empty()) {
+      return samples;
+    }
+    if (points.size() == 1) {
+      samples.push_back({points.front(), 0.0, start_yaw, start_pitch, 0});
+      return samples;
+    }
+
+    const double sample_spacing = std::max(0.03, spacing);
+    double arc = 0.0;
+    double last_yaw = start_yaw;
+    double last_pitch = start_pitch;
+    for (size_t i = 0; i + 1 < points.size(); ++i) {
+      const Vec3 delta = points[i + 1] - points[i];
+      const double horizontal = horizontalDistance(points[i], points[i + 1]);
+      if (horizontal <= 1e-9) {
+        continue;
+      }
+      const double yaw = std::atan2(delta.y(), delta.x());
+      const double pitch = segmentPitch(points[i], points[i + 1]);
+      const int steps = std::max(1, static_cast<int>(std::ceil(horizontal / sample_spacing)));
+      const int first_step = samples.empty() ? 0 : 1;
+      for (int step = first_step; step <= steps; ++step) {
+        const double ratio = static_cast<double>(step) / static_cast<double>(steps);
+        TrajectorySample sample;
+        sample.center = points[i] + ratio * delta;
+        sample.arc = arc + ratio * horizontal;
+        sample.yaw = samples.empty() && step == 0 ? start_yaw : yaw;
+        sample.pitch = samples.empty() && step == 0 ? start_pitch : pitch;
+        sample.segment_index = i;
+        samples.push_back(sample);
+      }
+      arc += horizontal;
+      last_yaw = yaw;
+      last_pitch = pitch;
+    }
+    if (samples.empty()) {
+      samples.push_back({points.front(), 0.0, start_yaw, start_pitch, 0});
+      samples.push_back({points.back(), 0.0, last_yaw, last_pitch, points.size() - 2});
+    }
+    return samples;
+  }
+
+  CollisionReport analyzeTrajectoryCollision(
+    const std::vector<Vec3> & points,
+    double start_yaw,
+    double start_pitch)
+  {
+    CollisionReport report;
+    const std::vector<TrajectorySample> samples = sampleTrajectory(
+      points, deformation_sample_spacing_, start_yaw, start_pitch);
+    const double total_arc = samples.empty() ? 0.0 : samples.back().arc;
+
+    for (size_t i = 0; i < samples.size(); ++i) {
+      const FootprintCheck check = checkFootprintFree(
+        samples[i].center, samples[i].yaw, samples[i].pitch);
+      if (check.free) {
+        continue;
+      }
+      report.collision_free = false;
+      report.failed_samples.push_back({samples[i], check, i});
+      CollisionInterval interval;
+      interval.start_arc = std::max(0.0, samples[i].arc - deformation_collision_padding_);
+      interval.end_arc = std::min(total_arc, samples[i].arc + deformation_collision_padding_);
+      interval.first_sample = i;
+      interval.last_sample = i;
+      if (!report.intervals.empty() &&
+        interval.start_arc <= report.intervals.back().end_arc + deformation_sample_spacing_)
+      {
+        report.intervals.back().end_arc = std::max(report.intervals.back().end_arc, interval.end_arc);
+        report.intervals.back().last_sample = i;
+      } else {
+        report.intervals.push_back(interval);
+      }
+    }
+    return report;
+  }
+
+  static double smoothStep(double value)
+  {
+    value = std::clamp(value, 0.0, 1.0);
+    return value * value * (3.0 - 2.0 * value);
+  }
+
+  double deformationWindowWeight(
+    double arc,
+    const CollisionInterval & interval,
+    double window_start,
+    double window_end) const
+  {
+    if (arc < window_start || arc > window_end) {
+      return 0.0;
+    }
+    if (arc >= interval.start_arc && arc <= interval.end_arc) {
+      return 1.0;
+    }
+    if (arc < interval.start_arc) {
+      const double denom = std::max(1e-6, interval.start_arc - window_start);
+      return smoothStep((arc - window_start) / denom);
+    }
+    const double denom = std::max(1e-6, window_end - interval.end_arc);
+    return smoothStep((window_end - arc) / denom);
+  }
+
+  std::vector<Vec3> applyLateralDeformation(
+    const std::vector<Vec3> & input,
+    const CollisionInterval & interval,
+    double lateral_offset) const
+  {
+    if (input.size() <= 2 || std::abs(lateral_offset) <= 1e-9) {
+      return input;
+    }
+
+    std::vector<Vec3> output = input;
+    const std::vector<double> cumulative = cumulativeHorizontalArc(input);
+    const double total_arc = cumulative.empty() ? 0.0 : cumulative.back();
+    const double window_start = std::max(0.0, interval.start_arc - deformation_anchor_padding_);
+    const double window_end = std::min(total_arc, interval.end_arc + deformation_anchor_padding_);
+
+    for (size_t i = 1; i + 1 < output.size(); ++i) {
+      const double weight = deformationWindowWeight(cumulative[i], interval, window_start, window_end);
+      if (weight <= 1e-9) {
+        continue;
+      }
+      const double yaw = pointSequenceYawAt(input, i);
+      const Vec3 lateral = footprintLeft(yaw);
+      output[i].x() += lateral.x() * lateral_offset * weight;
+      output[i].y() += lateral.y() * lateral_offset * weight;
+    }
+    return resamplePath(output);
+  }
+
+  bool trajectorySatisfiesConstraints(
+    const std::vector<Vec3> & points,
+    std::string * failure_reason = nullptr) const
+  {
+    if (points.size() < 2) {
+      setFailureReason(failure_reason, "trajectory has fewer than two points");
+      return false;
+    }
+    for (size_t i = 0; i + 1 < points.size(); ++i) {
+      const double pitch = segmentPitch(points[i], points[i + 1]);
+      if (std::abs(pitch) > trajectory_max_pitch_ + 1e-9) {
+        std::ostringstream out;
+        out << "segment " << i << " pitch " << std::fixed << std::setprecision(3)
+            << pitch << " exceeds " << trajectory_max_pitch_;
+        setFailureReason(failure_reason, out.str());
+        return false;
+      }
+    }
+    if (trajectory_max_yaw_delta_per_meter_ > 0.0 && points.size() > 2) {
+      for (size_t i = 1; i + 1 < points.size(); ++i) {
+        const double previous_length = horizontalDistance(points[i - 1], points[i]);
+        const double next_length = horizontalDistance(points[i], points[i + 1]);
+        if (previous_length <= 1e-6 || next_length <= 1e-6) {
+          continue;
+        }
+        const double previous_yaw = pointSequenceYawAt(points, i - 1);
+        const double next_yaw = pointSequenceYawAt(points, i);
+        const double turn = std::abs(normalizeAngle(next_yaw - previous_yaw));
+        const double yaw_rate = turn / std::max(0.05, 0.5 * (previous_length + next_length));
+        if (yaw_rate > trajectory_max_yaw_delta_per_meter_ + 1e-9) {
+          std::ostringstream out;
+          out << "turn at point " << i << " is " << std::fixed << std::setprecision(3)
+              << yaw_rate << " rad/m, exceeds " << trajectory_max_yaw_delta_per_meter_;
+          setFailureReason(failure_reason, out.str());
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  double trajectoryScore(
+    const std::vector<Vec3> & candidate,
+    const std::vector<Vec3> & reference) const
+  {
+    if (candidate.size() < 2) {
+      return std::numeric_limits<double>::infinity();
+    }
+
+    double length = 0.0;
+    double centerline_error = 0.0;
+    double max_offset = 0.0;
+    for (size_t i = 0; i < candidate.size(); ++i) {
+      if (i + 1 < candidate.size()) {
+        length += horizontalDistance(candidate[i], candidate[i + 1]);
+      }
+      const double distance = closestHorizontalDistanceToPath(candidate[i], reference);
+      centerline_error += distance * distance;
+      max_offset = std::max(max_offset, distance);
+    }
+    centerline_error /= static_cast<double>(candidate.size());
+
+    double smoothness = 0.0;
+    for (size_t i = 1; i + 1 < candidate.size(); ++i) {
+      const double previous_yaw = pointSequenceYawAt(candidate, i - 1);
+      const double next_yaw = pointSequenceYawAt(candidate, i);
+      smoothness += std::abs(normalizeAngle(next_yaw - previous_yaw));
+    }
+
+    return length +
+      trajectory_centerline_weight_ * centerline_error +
+      trajectory_smoothness_weight_ * smoothness +
+      trajectory_offset_weight_ * max_offset;
+  }
+
+  bool planByReferenceDeformation(
+    const std::vector<Vec3> & reference_points,
+    double start_yaw,
+    double start_pitch,
+    std::vector<Vec3> & planned_points,
+    std::string * failure_reason = nullptr)
+  {
+    if (reference_points.size() < 2) {
+      setFailureReason(failure_reason, "reference trajectory has fewer than two points");
+      return false;
+    }
+
+    std::vector<Vec3> current = reference_points;
+    std::string last_failure;
+    for (int iteration = 0; iteration <= deformation_max_iterations_; ++iteration) {
+      const CollisionReport report = analyzeTrajectoryCollision(current, start_yaw, start_pitch);
+      publishCollisionMarkers(report);
+      if (report.collision_free) {
+        std::string constraint_failure;
+        if (!trajectorySatisfiesConstraints(current, &constraint_failure)) {
+          setFailureReason(failure_reason, "collision-free reference violates trajectory constraints: " + constraint_failure);
+          return false;
+        }
+        std::vector<Vec3> final_points = resamplePath(current);
+        std::string validation_failure;
+        if (!pathCollisionFree(final_points, &validation_failure)) {
+          setFailureReason(
+            failure_reason,
+            "sampled trajectory passed deformation checks but failed final segment validation: " +
+            validation_failure);
+          return false;
+        }
+        planned_points = final_points;
+        return true;
+      }
+
+      if (iteration >= deformation_max_iterations_) {
+        break;
+      }
+      if (report.intervals.empty()) {
+        setFailureReason(failure_reason, "collision report has no intervals");
+        return false;
+      }
+
+      const CollisionInterval interval = report.intervals.front();
+      bool found_candidate = false;
+      double best_score = std::numeric_limits<double>::infinity();
+      std::vector<Vec3> best_candidate;
+      std::vector<Vec3> last_rejected_candidate;
+
+      for (
+        double magnitude = deformation_lateral_offset_step_;
+        magnitude <= deformation_max_lateral_offset_ + 1e-9;
+        magnitude += deformation_lateral_offset_step_)
+      {
+        for (const double side : {1.0, -1.0}) {
+          std::vector<Vec3> candidate = applyLateralDeformation(current, interval, side * magnitude);
+          last_rejected_candidate = candidate;
+          if (!pathWithinReferenceCorridor(candidate, reference_points, deformation_max_lateral_offset_)) {
+            last_failure = "candidate exceeds max lateral offset";
+            continue;
+          }
+          std::string constraint_failure;
+          if (!trajectorySatisfiesConstraints(candidate, &constraint_failure)) {
+            last_failure = constraint_failure;
+            continue;
+          }
+          const CollisionReport candidate_report = analyzeTrajectoryCollision(
+            candidate, start_yaw, start_pitch);
+          if (!candidate_report.collision_free) {
+            last_failure = "candidate remains in collision";
+            continue;
+          }
+          std::string final_validation_failure;
+          if (!pathCollisionFree(candidate, &final_validation_failure)) {
+            last_failure = final_validation_failure;
+            continue;
+          }
+          const double score = trajectoryScore(candidate, reference_points);
+          if (score < best_score) {
+            best_score = score;
+            best_candidate = std::move(candidate);
+            found_candidate = true;
+          }
+        }
+      }
+
+      if (!found_candidate) {
+        publishDebugPath(rejected_candidate_path_pub_, last_rejected_candidate);
+        std::ostringstream out;
+        out << "no lateral deformation candidate cleared interval ["
+            << std::fixed << std::setprecision(3)
+            << interval.start_arc << ", " << interval.end_arc
+            << "] on iteration " << iteration;
+        if (!last_failure.empty()) {
+          out << ", last_failure=" << last_failure;
+        }
+        setFailureReason(failure_reason, out.str());
+        return false;
+      }
+
+      current = std::move(best_candidate);
+      publishDebugPath(deformed_debug_path_pub_, current);
+    }
+
+    setFailureReason(
+      failure_reason,
+      "lateral deformation exhausted max_iterations=" + std::to_string(deformation_max_iterations_));
+    return false;
+  }
+
   bool pathCollisionFree(
     const std::vector<Vec3> & points,
     std::string * failure_reason = nullptr,
@@ -1587,7 +2468,29 @@ private:
     return true;
   }
 
-  std::vector<Vec3> shortcutPath(const std::vector<Vec3> & input)
+  bool lineWithinReferenceCorridor(
+    const Vec3 & start,
+    const Vec3 & goal,
+    const std::vector<Vec3> * reference_path) const
+  {
+    if (reference_path == nullptr || reference_path->empty()) {
+      return true;
+    }
+    const double length = horizontalDistance(start, goal);
+    const int steps = std::max(1, static_cast<int>(std::ceil(length / output_spacing_)));
+    for (int i = 0; i <= steps; ++i) {
+      const double ratio = static_cast<double>(i) / static_cast<double>(steps);
+      const Vec3 sample = start + ratio * (goal - start);
+      if (closestHorizontalDistanceToPath(sample, *reference_path) > fallback_corridor_radius_ + 1e-9) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  std::vector<Vec3> shortcutPath(
+    const std::vector<Vec3> & input,
+    const std::vector<Vec3> * reference_path = nullptr)
   {
     if (input.size() <= 2) {
       return input;
@@ -1598,7 +2501,10 @@ private:
     while (i + 1 < input.size()) {
       size_t best = i + 1;
       for (size_t j = input.size() - 1; j > i + 1; --j) {
-        if (isFootprintLineFree(input[i], input[j])) {
+        if (
+          lineWithinReferenceCorridor(input[i], input[j], reference_path) &&
+          isFootprintLineFree(input[i], input[j]))
+        {
           best = j;
           break;
         }
@@ -1667,13 +2573,72 @@ private:
       pose.pose.position.z = points[i].z();
       if (i + 1 < points.size()) {
         const Vec3 delta = points[i + 1] - points[i];
-        pose.pose.orientation = yawToQuaternion(std::atan2(delta.y(), delta.x()));
+        pose.pose.orientation = yawPitchToQuaternion(
+          std::atan2(delta.y(), delta.x()), segmentPitch(points[i], points[i + 1]));
       } else {
         pose.pose.orientation = final_orientation;
       }
       path.poses.push_back(pose);
     }
     return path;
+  }
+
+  void publishDebugPath(
+    const rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr & publisher,
+    const std::vector<Vec3> & points) const
+  {
+    if (!publisher) {
+      return;
+    }
+    if (points.empty()) {
+      nav_msgs::msg::Path empty_path;
+      empty_path.header.frame_id = global_frame_;
+      empty_path.header.stamp = node_->now();
+      publisher->publish(empty_path);
+      return;
+    }
+    const double final_yaw = pointSequenceYawAt(points, points.size() - 1);
+    publisher->publish(makePath(points, yawToQuaternion(final_yaw)));
+  }
+
+  void publishCollisionMarkers(const CollisionReport & report) const
+  {
+    if (!collision_marker_pub_) {
+      return;
+    }
+
+    visualization_msgs::msg::MarkerArray markers;
+    visualization_msgs::msg::Marker clear_marker;
+    clear_marker.header.frame_id = global_frame_;
+    clear_marker.header.stamp = node_->now();
+    clear_marker.action = visualization_msgs::msg::Marker::DELETEALL;
+    markers.markers.push_back(clear_marker);
+
+    int marker_id = 0;
+    const size_t max_markers = 200;
+    for (size_t i = 0; i < report.failed_samples.size() && i < max_markers; ++i) {
+      const auto & failed = report.failed_samples[i];
+      visualization_msgs::msg::Marker marker;
+      marker.header = clear_marker.header;
+      marker.ns = "trajectory_collision_samples";
+      marker.id = marker_id++;
+      marker.type = visualization_msgs::msg::Marker::SPHERE;
+      marker.action = visualization_msgs::msg::Marker::ADD;
+      marker.pose.position.x = failed.trajectory.center.x();
+      marker.pose.position.y = failed.trajectory.center.y();
+      marker.pose.position.z = failed.trajectory.center.z();
+      marker.pose.orientation.w = 1.0;
+      marker.scale.x = 0.16;
+      marker.scale.y = 0.16;
+      marker.scale.z = 0.16;
+      marker.color.a = 0.85;
+      marker.color.r = 1.0;
+      marker.color.g = 0.15;
+      marker.color.b = 0.05;
+      markers.markers.push_back(marker);
+    }
+
+    collision_marker_pub_->publish(markers);
   }
 
   void clearFootprintMarkers() const
@@ -1824,18 +2789,32 @@ private:
   tf2_ros::TransformListener tf_listener_;
   rclcpp_action::Server<PlanToGoal>::SharedPtr action_server_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr reference_path_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr reference_path_volatile_sub_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr reference_debug_path_pub_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr deformed_debug_path_pub_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr rejected_candidate_path_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr footprint_marker_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr collision_marker_pub_;
+  std::mutex reference_path_mutex_;
+  nav_msgs::msg::Path::SharedPtr latest_reference_path_;
 
   std::string global_frame_;
   std::string robot_frame_;
   std::string action_name_;
   std::string path_topic_;
+  std::string reference_path_topic_{"/pct_path"};
   double replan_rate_{2.0};
   double planning_timeout_{0.2};
   double search_resolution_{0.0};
   double search_margin_{3.0};
   double output_spacing_{0.15};
   bool unknown_as_occupied_{false};
+  bool require_reference_path_{true};
+  double reference_path_timeout_{0.0};
+  double reference_start_z_blend_distance_{0.6};
+  double reference_goal_match_tolerance_{0.8};
+  double reference_start_match_tolerance_{1.0};
   bool require_map_ready_{true};
   bool allow_diagonal_{true};
   bool enable_path_smoothing_{false};
@@ -1854,6 +2833,20 @@ private:
   double cost_sample_radius_{0.35};
   double cost_sample_step_{0.10};
   double cost_turn_weight_{0.2};
+  bool deformation_enabled_{true};
+  double deformation_sample_spacing_{0.10};
+  double deformation_max_lateral_offset_{0.8};
+  double deformation_lateral_offset_step_{0.2};
+  double deformation_collision_padding_{0.3};
+  double deformation_anchor_padding_{0.8};
+  int deformation_max_iterations_{3};
+  bool deformation_fallback_to_corridor_astar_{true};
+  double fallback_corridor_radius_{1.1};
+  double trajectory_max_pitch_{0.45};
+  double trajectory_max_yaw_delta_per_meter_{1.2};
+  double trajectory_centerline_weight_{1.0};
+  double trajectory_smoothness_weight_{0.4};
+  double trajectory_offset_weight_{0.6};
   bool projection_enable_{true};
   double projection_radius_{0.45};
   double projection_step_{0.10};
@@ -1870,6 +2863,11 @@ private:
   std::string visualization_footprint_marker_topic_{"/rog_local_planner/footprint_markers"};
   int visualization_footprint_marker_stride_{2};
   double visualization_footprint_marker_alpha_{0.28};
+  bool visualization_enable_deformation_debug_{true};
+  std::string visualization_reference_path_topic_{"/rog_local_planner/reference_path"};
+  std::string visualization_deformed_path_topic_{"/rog_local_planner/deformed_path"};
+  std::string visualization_rejected_candidate_path_topic_{"/rog_local_planner/rejected_candidate_path"};
+  std::string visualization_collision_marker_topic_{"/rog_local_planner/collision_markers"};
 };
 }  // namespace
 
