@@ -41,8 +41,10 @@ ros2 launch pct_art_local_navigation global_path_follow_test.launch.py \
   network_interface:=enp2s0
 ```
 
-This starts `PCT /pct_path -> Pure Pursuit -> /cmd_vel` and does not start
-`pct_art_coordinator`, `rog_local_planner`, `/local_goal`, or `/local_path`.
+This starts
+`PCT /pct_path -> pct_global_path_follow_coordinator -> Pure Pursuit -> /cmd_vel`
+and does not start `pct_art_coordinator`, `rog_local_planner`, `/local_goal`,
+or `/local_path`.
 The Go2 bridge is declared but disabled by default; pass
 `start_go2_bridge:=true` if you want the bridge process available for explicit
 enablement.
@@ -59,9 +61,17 @@ If the PCT planner is already running, add `start_pct_planner:=false`.
 The launch file adds the standard Unitree SDK install directory
 `/opt/unitree_robotics/lib` to `LD_LIBRARY_PATH` for the Go2 bridge.
 
-Goal completion is owned by `pct_art_coordinator`. Pure Pursuit only tracks the
-current `/local_path` and performs final heading control while
-`/pct_art_local_navigation/final_approach` is true.
+In the full local-navigation launch, goal completion is owned by
+`pct_art_coordinator`. Pure Pursuit only tracks the current `/local_path` and
+performs final heading control while `/pct_art_local_navigation/final_approach`
+is true.
+
+For `global_path_follow_test.launch.py`, completion is owned by
+`pct_global_path_follow_coordinator`. It forwards `/pct_path` to
+`/global_path_follow/path`, enables final heading control near the path end, and
+publishes an empty tracking path after the final position and yaw are reached.
+This prevents the old completed path from pulling the robot back if it is moved
+manually after arrival.
 
 - `config/coordinator.yaml`: `goal_reached_distance` (metres) and
   `goal_yaw_tolerance` (radians), plus final segment validation with

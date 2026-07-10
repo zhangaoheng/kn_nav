@@ -56,14 +56,17 @@ def test_global_path_follow_test_bypasses_local_planning():
     assert "package='fast_lio'" in source
     assert "package='open3d_loc'" in source
     assert "executable='run_ros2_global_planner'" in source
+    assert "executable='pct_global_path_follow_coordinator'" in source
     assert "executable='pure_pursuit_planner'" in source
     assert "executable='go2_cmd_vel_bridge'" in source
     assert "package='rog_local_planner'" not in source
     assert "executable='pct_art_coordinator'" not in source
+    assert "('/pct_path', '/global_path_follow/path')" in source
     assert "('/pct_path', '/local_path')" not in source
     assert 'No pct_art_coordinator, ROG local planner, /local_goal, or /local_path' in source
-    assert "'standalone_goal_completion': True" in source
-    assert 'Pure Pursuit standalone goal completion is enabled for this test' in source
+    assert 'global_path_follow_coordinator.yaml' in source
+    assert 'clears the path after final pose completion' in source
+    assert "'standalone_goal_completion': True" not in source
     assert "DeclareLaunchArgument('start_go2_bridge', default_value='false')" in source
 
 

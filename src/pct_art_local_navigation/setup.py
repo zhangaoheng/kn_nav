@@ -34,6 +34,10 @@ setup(
     entry_points={
         'console_scripts': [
             'pct_art_coordinator = pct_art_local_navigation.coordinator_node:main',
+            (
+                'pct_global_path_follow_coordinator = '
+                'pct_art_local_navigation.global_path_follow_coordinator_node:main'
+            ),
         ],
     },
 )

@@ -1,0 +1,36 @@
+pct_global_path_follow_coordinator:
+  ros__parameters:
+    global_frame: map
+    robot_frame: base_link
+    global_path_topic: /pct_path
+    tracking_path_topic: /global_path_follow/path
+    tracking_segment_topic: /global_path_follow/tracking_segment
+    tracking_point_topic: /global_path_follow/tracking_point
+    final_approach_topic: /pct_art_local_navigation/final_approach
+    status_topic: /pct_global_path_follow/status
+    update_rate: 10.0
+    tracking_path_republish_rate: 5.0
+    goal_reached_distance: 0.15
+    goal_yaw_tolerance: 0.10
+    # 终点 z 容差，单位米；跨楼路径必须满足该高度容差，避免一楼 XY 对上二楼终点时误判到达。
+    goal_reached_z_tolerance: 0.8
+    final_heading_entry_distance: 0.25
+    tf_timeout: 0.1
+    # true 时只发布机器人当前位置往前的一段路径给 pure_pursuit，避免控制器反复追整条全局路径。
+    crop_path_to_robot: true
+    # 裁剪后给 pure_pursuit 的前方路径长度，单位米；z 会沿原始 PCT 跨楼路径插值/保留。
+    tracking_path_length: 6.0
+    # 即使前方长度较短，也尽量保留的最少路径点数，避免路径段过短导致方向不稳定。
+    tracking_path_min_points: 8
+    # 额外发布的 /global_path_follow/tracking_point 距离裁剪起点的前视距离，单位米。
+    tracking_point_lookahead_distance: 0.7
+    # 跨楼路径必须打开：选当前路径段时同时考虑 z，避免一楼追到二楼 XY 重叠的路径段。
+    use_height_for_progress: true
+    # z 误差在最近路径段打分中的权重；楼层高度差明显时 1.0 通常足够。
+    progress_z_weight: 1.0
+    # 候选路径段允许和机器人 z 相差的最大值，单位米；楼层高差约 3m 时可有效滤掉楼上/楼下。
+    progress_max_z_distance: 1.2
+    # 最近路径进度搜索允许向后回看的线段数，防止定位小抖动导致进度倒退太多。
+    progress_backtrack_segments: 20
+    # 最近路径进度搜索允许向前查找的线段数，路径点很密时可适当增大。
+    progress_forward_segments: 300

@@ -25,7 +25,7 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
-CONFIG_NAME = 'local'
+CONFIG_NAME = 'unitree'
 MAX_LOG_SESSIONS = 50
 
 
@@ -91,6 +91,7 @@ def generate_launch_description():
     fast_lio_params = config_file('fast_lio.yaml')
     open3d_loc_params = config_file('open3d_loc.yaml')
     pct_default_params = config_file('pct_global_planner.yaml')
+    follow_coordinator_params = config_file('global_path_follow_coordinator.yaml')
     pursuit_params = config_file('pure_pursuit_local.yaml')
     bridge_params = config_file('go2_bridge_local.yaml')
 
@@ -141,15 +142,21 @@ def generate_launch_description():
         condition=IfCondition(start_pct_planner),
     )
 
+    global_path_follow_coordinator = Node(
+        package='pct_art_local_navigation',
+        executable='pct_global_path_follow_coordinator',
+        name='pct_global_path_follow_coordinator',
+        output='both',
+        parameters=[follow_coordinator_params, {'use_sim_time': use_sim_time}],
+    )
+
     pure_pursuit = Node(
         package='pure_pursuit_planner',
         executable='pure_pursuit_planner',
         name='pure_pursuit_node',
         output='both',
-        parameters=[
-            pursuit_params,
-            {'standalone_goal_completion': True, 'use_sim_time': use_sim_time},
-        ],
+        parameters=[pursuit_params, {'use_sim_time': use_sim_time}],
+        remappings=[('/pct_path', '/global_path_follow/path')],
     )
 
     go2_bridge = Node(
@@ -166,11 +173,12 @@ def generate_launch_description():
 
     startup_summary = LogInfo(
         msg=[
-            '[global path follow test] launching PCT -> Pure Pursuit -> Go2 bridge '
+            '[global path follow test] launching PCT -> Global Path Coordinator '
+            '-> Pure Pursuit -> Go2 bridge '
             'with config/',
             CONFIG_NAME,
             '. No pct_art_coordinator, ROG local planner, /local_goal, or /local_path. '
-            'Pure Pursuit standalone goal completion is enabled for this test. '
+            'The global path coordinator clears the path after final pose completion. '
             'Logs=',
             log_dir,
             '. FAST-LIO + Open3D localization start=',
@@ -185,7 +193,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('start_open3d_loc', default_value='true'),
         DeclareLaunchArgument('start_pct_planner', default_value='true'),
-        DeclareLaunchArgument('start_go2_bridge', default_value='false'),
+        DeclareLaunchArgument('start_go2_bridge', default_value='true'),
         DeclareLaunchArgument(
             'network_interface',
             default_value='eth0',
@@ -208,7 +216,14 @@ def generate_launch_description():
         ),
         log_process_start(open3d_localization_service, 'open3d localization service'),
         log_process_start(pct_planner, 'pct_global_planner (/pct_path)'),
-        log_process_start(pure_pursuit, 'pure_pursuit_node (/cmd_vel from /pct_path)'),
+        log_process_start(
+            global_path_follow_coordinator,
+            'pct_global_path_follow_coordinator (/global_path_follow/path)',
+        ),
+        log_process_start(
+            pure_pursuit,
+            'pure_pursuit_node (/cmd_vel from /global_path_follow/path)',
+        ),
         log_process_start(
             go2_bridge,
             'go2_cmd_vel_bridge (/go2_cmd_vel_bridge/enable)',
@@ -217,6 +232,7 @@ def generate_launch_description():
         open3d_global_localization,
         open3d_localization_service,
         pct_planner,
+        global_path_follow_coordinator,
         pure_pursuit,
         go2_bridge,
     ])
