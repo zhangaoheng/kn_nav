@@ -1,49 +1,34 @@
 global_localization_node:
   ros__parameters:
-    # path_map: "/home/nav_map/nav_test/global_map_downsize.pcd"
-    # path_map: "/home/kangneng/xq/map/pcd/map1-2/global_map_downsize.pcd"
-    # path_map: "/home/kangneng/xq/map/pcd/kn-floor2/global_map_downsize.pcd"
-    path_map: "/home/nav_map/chuzhou-kn-floor2/global_map_downsize.pcd"
-    
-    # path_imu_to_base: "/home/kangneng/xq/map/pcd/kn-floor2/imu_to_base.txt"
-    # path_imu_to_base: "/home/kangneng/xq/map/pcd/map1-2/imu_to_base_origin.txt"
-    path_imu_to_base: "/home/nav_map/chuzhou-kn-floor2/imu_to_base.txt"
-
+    path_map: "/home/nav_map/cross-floor-kn/global_map_downsize.pcd"
+    path_imu_to_base: "/home/nav_map/corss-floor-kn/imu_to_base.txt"
 
     pcd_queue_maxsize: 10
     loc_frequence: 20.0
+    map_publish_interval: 5.0
 
-    # 地图发布频率，单位:秒
-    map_publish_interval: 5.0     
-
-    # Downsample and ICP parameters.
-    voxelsize_coarse: 0.2   # 初步下采样体素大小
+    voxelsize_coarse: 0.2
     voxel_downsample_size: 0.1
-    icp_distance_threshold: 0.15    # icp的时候最近点的距离阈值
-    fitness_eval_threshold: 0.15    # 评估icp结果的fitness时，最近点的距离阈值，过大可能导致错误的高fitness，过小可能导致正确的低fitness
-    normal_search_radius: 0.4       # 法线估计的搜索半径
+    icp_distance_threshold: 0.15
+    fitness_eval_threshold: 0.15
+    normal_search_radius: 0.4
 
-    threshold_fitness: 0.5          # tracking定位只有fitness大于这个值才认为定位结果可信
-    threshold_fitness_init: 0.5       # 初始化定位只有fitness大于这个值才认为定位结果可信，过大可能导致无法初始化，过小可能接受错误初始化
+    threshold_fitness: 0.5
+    threshold_fitness_init: 0.7
 
-    max_icp_translation: 0.4        # tracking阶段icp最大平移修正，防止定位过程中出现大跳变
-    max_icp_yaw_deg: 2.0        # tracking阶段icp最大yaw修正，单位是度，防止定位过程中出现大角度跳变
-
-    max_init_icp_translation: 1.0     # 初始化阶段icp最大平移修正，允许初始位姿存在一定偏差
-    max_init_icp_yaw_deg: 20.0      # 初始化阶段icp最大yaw修正，单位是度，允许初始位姿角度不准时收敛
-    min_init_fitness_improvement: 0.02    # 全局定位时，初始icp的fitness必须比RANSAC的fitness至少提高这个值才接受icp结果，
+    max_icp_translation: 0.4
+    max_icp_yaw_deg: 2.0
+    max_init_icp_translation: 2.0
+    max_init_icp_yaw_deg: 20.0
+    min_init_fitness_improvement: 0.02
     min_source_points: 500
     min_target_points: 500
     maxpoints_source: 80000
     maxpoints_target: 400000
 
     dis_updatemap: 3.5
-
-    # x, y, z, roll, pitch, yaw (单位:度degrees)
     initialpose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-    # 静态 TF: Alink_to_Blink 表示 Alink 在 Blink 下的位姿, 即 T_B_A.
-    # 数值格式: x, y, z, qx, qy, qz, qw
     static_tf_imu_link_to_base_link: [0.200000, 0.000000, 0.000000, 0.010145, 0.135211, -0.001385, 0.990764]
     static_tf_motion_link_to_base_link: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
 
