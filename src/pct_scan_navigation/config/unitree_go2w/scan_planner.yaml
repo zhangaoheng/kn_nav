@@ -29,8 +29,8 @@ scan_planner_node:
     grid_map.frame_id: map
     grid_map.sliding_map_frame_id: scan_sliding_map
     grid_map.ground_height: 0.0
-    grid_map.sliding_map_size_x: 10.0
-    grid_map.sliding_map_size_y: 10.0
+    grid_map.sliding_map_size_x: 7.0
+    grid_map.sliding_map_size_y: 7.0
     grid_map.sliding_map_size_z: 5.0
     grid_map.local_update_range_x: 5.5
     grid_map.local_update_range_y: 5.5
@@ -40,7 +40,7 @@ scan_planner_node:
     grid_map.double_cylinder_radius: 0.28
     grid_map.double_cylinder_offset: 0.23
     grid_map.obstacles_inflation_z_up: 0.1
-    grid_map.obstacles_inflation_z_down: 0.1
+    grid_map.obstacles_inflation_z_down: 0.3
 
     grid_map.cx: 317.19183349609375
     grid_map.cy: 256.4806823730469

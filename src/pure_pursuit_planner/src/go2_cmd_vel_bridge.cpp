@@ -26,8 +26,6 @@ namespace pure_pursuit_planner
 namespace
 {
 
-constexpr char kSportStateTopic[] = "rt/sportmodestate";
-
 class UnitreeSportCommandClient final : public SportCommandInterface
 {
 public:
@@ -72,6 +70,8 @@ public:
     const std::string network_interface =
       declare_parameter<std::string>("network_interface", "");
     const int dds_domain_id = declare_parameter<int>("dds_domain_id", 0);
+    const std::string sport_state_topic =
+      declare_parameter<std::string>("sport_state_topic", "rt/sportmodestate");
     const double sdk_timeout = declarePositiveParameter("sdk_timeout", 0.5);
     const double control_rate = declarePositiveParameter("control_rate", 20.0);
 
@@ -97,6 +97,9 @@ public:
     }
     if (dds_domain_id < 0) {
       throw std::invalid_argument("dds_domain_id must be non-negative");
+    }
+    if (sport_state_topic.empty()) {
+      throw std::invalid_argument("sport_state_topic must not be empty");
     }
     if (!std::isfinite(safety_config.min_vx) ||
       !std::isfinite(safety_config.max_vx))
@@ -131,7 +134,7 @@ public:
         &Go2CmdVelBridge::enableCallback, this, std::placeholders::_1,
         std::placeholders::_2));
 
-    sport_state_subscription_ = std::make_unique<SportStateSubscriber>(kSportStateTopic);
+    sport_state_subscription_ = std::make_unique<SportStateSubscriber>(sport_state_topic);
     sport_state_subscription_->InitChannel(
       std::bind(&Go2CmdVelBridge::sportStateCallback, this, std::placeholders::_1), 1);
 
@@ -143,8 +146,9 @@ public:
     publishSafeCommand({});
     RCLCPP_INFO(
       get_logger(),
-      "Go2 cmd_vel bridge initialized on '%s'; bridge is DISABLED and will not change posture",
-      network_interface.c_str());
+      "Go2 cmd_vel bridge initialized on '%s' with sport state topic '%s'; "
+      "bridge is DISABLED and will not change posture",
+      network_interface.c_str(), sport_state_topic.c_str());
   }
 
   ~Go2CmdVelBridge() override
