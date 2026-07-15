@@ -1,7 +1,0 @@
-# Footprint path to check.
-traversability_msgs/FootprintPath[] path
-
----
-
-# Traversability results
-traversability_msgs/TraversabilityResult[] result

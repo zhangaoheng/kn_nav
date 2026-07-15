@@ -24,8 +24,7 @@ pure_pursuit_node:
     rotate_to_path_tolerance: 0.349
     goal_yaw_tolerance: 0.175
     rotate_to_heading_gain: 2.0
-    final_approach_topic: /pct_art_local_navigation/final_approach
+    final_approach_topic: /pct_scan_navigation/final_approach
     obstacle_th: 0.5
     odom_topic: /Odometry_open3d
     odom_timeout: 1.0
-

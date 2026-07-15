@@ -122,7 +122,7 @@ void PurePursuitNode::declareAndGetParameters() {
     config_.obstacle_th = this->declare_parameter("obstacle_th", 0.5);
     odom_topic_ = this->declare_parameter<std::string>("odom_topic", "/Odometry_open3d");
     final_approach_topic_ = this->declare_parameter<std::string>(
-        "final_approach_topic", "/pct_art_local_navigation/final_approach");
+        "final_approach_topic", "/pct_scan_navigation/final_approach");
     config_.final_heading_entry_distance =
         this->declare_parameter("final_heading_entry_distance", config_.goal_threshold);
     config_.final_heading_command_deadband =

@@ -1,0 +1,170 @@
+scan_planner_node:
+  ros__parameters:
+    # 机器人本体位姿里程计话题。run_real.launch.py 默认同时把 /grid_map/body_pose 重映射到同一份里程计。
+    body_pose_topic: /LIO/odom_vehicle
+
+    # =========================
+    # FSM / 导航模式参数
+    # =========================
+    # 1: RViz 交互目标点模式，订阅 /move_base_simple/goal。
+    # 2: 预设关键点模式，需要在 ROS2 参数中提供 fsm.waypoint_num 与 fsm.waypoint*_x/y/z。
+    # 3: 参考路径跟随模式，订阅 /initial_path，适合接上全局规划器输出的 nav_msgs/Path。
+    fsm.navi_mode: 1
+    # 距离当前局部轨迹终点超过该阈值时触发重规划。
+    fsm.thresh_replan: 1.0
+    # 距离局部轨迹终点小于该阈值时认为无需重规划。
+    fsm.thresh_no_replan: 0.1
+    # 局部规划前视距离，通常应与 manager.planning_horizon 保持一致。
+    fsm.planning_horizon: 7.5
+    # 轨迹碰撞检测的紧急提前时间，越大越保守。
+    fsm.emergency_time_: 1.0
+    # true 时，规划失败会进入安全停止/冻结逻辑。
+    fsm.fail_safe: true
+    # 连续重规划失败上限；超过后进入失败保护。
+    fsm.max_replan_fail_count: 1000
+
+    # =========================
+    # GridMap / 局部占据地图参数
+    # =========================
+    # 传感器类型。实车激光雷达使用 lidar；深度相机可使用 depth。
+    grid_map.sensor_type: lidar
+    # true: 输入点云已经在世界/map坐标系；false: 输入点云在传感器坐标系，需要使用 sensor_pose 变换。
+    grid_map.cloud_is_world: false
+    # true: 在 sensor_pose 基础上叠加代码中的固定外参；若传入位姿已经是点云坐标系位姿，应设为 false。
+    grid_map.need_extrinsic: true
+    # 占据栅格分辨率，单位 m。
+    grid_map.resolution: 0.05
+    # 全局/世界坐标系名称。
+    grid_map.frame_id: world
+    # 滑动局部地图的可视化坐标系名称。
+    grid_map.sliding_map_frame_id: sliding_map
+    # 地面高度基准，主要用于过滤/可视化。
+    grid_map.ground_height: 0.0
+    # 滑动局部地图尺寸，单位 m。
+    grid_map.sliding_map_size_x: 10.0
+    grid_map.sliding_map_size_y: 10.0
+    grid_map.sliding_map_size_z: 5.0
+    # 每次点云更新时的局部更新范围，单位 m。
+    grid_map.local_update_range_x: 5.0
+    grid_map.local_update_range_y: 5.0
+    grid_map.local_update_range_z: 2.5
+    # 是否启用以机器人为中心的滑动地图。
+    grid_map.map_sliding_en: true
+    # 机器人相对局部地图中心移动超过该距离时触发地图滑动。
+    grid_map.map_sliding_thresh: 0.2
+    # 机器人碰撞体近似为上下双圆柱；半径与中心偏移用于自身体积膨胀。
+    grid_map.double_cylinder_radius: 0.25
+    grid_map.double_cylinder_offset: 0.18
+    # 障碍物在 z 方向向上/向下膨胀距离，给机器人身体和地面误差留余量。
+    grid_map.obstacles_inflation_z_up: 0.1
+    grid_map.obstacles_inflation_z_down: 0.4
+
+    # =========================
+    # Depth 相机参数
+    # =========================
+    # sensor_type=depth 时使用；lidar 模式下保留默认值即可。
+    grid_map.cx: 317.19183349609375
+    grid_map.cy: 256.4806823730469
+    grid_map.fx: 609.5884399414062
+    grid_map.fy: 609.22021484375
+    # 深度点过滤范围，单位 m。
+    grid_map.depth_filter_maxdist: 3.0
+    grid_map.depth_filter_mindist: 0.3
+    # 深度图边缘过滤像素宽度。
+    grid_map.depth_filter_margin: 1
+    # 深度图缩放系数，例如 RealSense uint16 深度常用 1000.0 表示 mm -> m。
+    grid_map.k_depth_scaling_factor: 1000.0
+    # 深度图采样步长，越大越省算力但地图更稀疏。
+    grid_map.skip_pixel: 2
+
+    # =========================
+    # 概率占据更新参数
+    # =========================
+    # 命中/未命中概率更新。p_hit 越大越容易把栅格标为障碍，p_miss 越小越容易清空自由空间。
+    grid_map.p_hit: 0.85
+    grid_map.p_miss: 0.30
+    # 占据概率上下限，防止单个栅格概率无限累积。
+    grid_map.p_min: 0.12
+    grid_map.p_max: 0.98
+    # 判定为占据的概率阈值。
+    grid_map.p_occ: 0.80
+    # 单束射线最大更新长度，单位 m。
+    grid_map.max_ray_length: 5.0
+    # 可视化占据点时使用的高度阈值/偏移。
+    grid_map.vis_height: 0.3
+    # 是否显示占据更新时间调试信息。
+    grid_map.show_occ_time: false
+
+    # =========================
+    # 轨迹管理器参数
+    # =========================
+    # 速度、加速度、jerk 约束，单位分别为 m/s、m/s^2、m/s^3。
+    manager.max_vel: 0.75
+    manager.max_acc: 0.5
+    manager.max_jerk: 4.0
+    # B 样条控制点间距，越小轨迹自由度越高但优化量更大。
+    manager.control_points_distance: 0.2
+    # 可行性检查容差，允许轻微超限以避免频繁失败。
+    manager.feasibility_tolerance: 0.5
+    # 轨迹规划前视距离，通常与 fsm.planning_horizon 保持一致。
+    manager.planning_horizon: 7.5
+
+    # =========================
+    # B 样条优化权重
+    # =========================
+    # 平滑项、避障项、动力学可行性项、贴合参考/目标项权重。
+    optimization.lambda_smooth: 1.0
+    optimization.lambda_collision: 1.0
+    optimization.lambda_feasibility: 0.1
+    optimization.lambda_fitness: 1.0
+    # 障碍物安全距离，单位 m。通常应不小于机器人外形半径余量。
+    optimization.dist0: 0.2
+    # 优化器内部使用的速度/加速度约束及容差。
+    optimization.max_vel: 0.75
+    optimization.vel_tolerance: 1.0
+    optimization.max_acc: 0.5
+    optimization.acc_tolerance: 1.0
+    # B 样条阶数，3 表示三次 B 样条。
+    optimization.order: 3
+
+closed_loop_controller:
+  ros__parameters:
+    # =========================
+    # 闭环轨迹跟踪控制器
+    # =========================
+    # 输入 /planning/bspline 与机器人本体位姿，输出 /cmd_vel。
+    body_pose_topic: /LIO/odom_vehicle
+    # 在轨迹上向前采样的时间，越大越平滑但转弯可能滞后。
+    time_forward: 0.8
+    # 航向误差超过该阈值时优先转向。
+    heading_error_threshold: 0.8
+    # 位置与 yaw 误差比例增益。
+    kp_pos: 0.8
+    kp_yaw: 1.5
+    # 输出速度上限，单位 m/s 与 rad/s。
+    max_vx: 0.75
+    max_vy: 0.35
+    max_vyaw: 1.0
+    # 距离轨迹终点小于该值时认为跟踪完成。
+    finish_dist: 0.15
+
+go2_gait_publisher:
+  ros__parameters:
+    # =========================
+    # Go2 步态可视化/关节状态发布器
+    # =========================
+    # 该节点根据里程计速度合成关节状态，主要用于可视化，不是 Unitree SDK 底盘控制桥。
+    body_pose_topic: /LIO/odom_vehicle
+    joint_topic: /joint_states
+    # 关节状态发布频率。
+    rate: 60.0
+    # 步态频率和速度阈值。
+    gait_frequency: 2.2
+    min_walk_speed: 0.05
+    max_walk_speed: 1.0
+    # true 时即使低速也保持小跑步态。
+    always_trot: false
+    # 髋/大腿/小腿关节摆动幅度。
+    hip_swing: 0.08
+    thigh_swing: 0.32
+    calf_swing: 0.42

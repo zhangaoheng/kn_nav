@@ -1,0 +1,1 @@
+ROS1 simulation packages are intentionally excluded from the ROS2 Humble real-robot build.
