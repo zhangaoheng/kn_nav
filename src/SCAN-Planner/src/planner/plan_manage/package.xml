@@ -16,7 +16,6 @@
   <depend>path_searching</depend>
   <depend>plan_env</depend>
   <depend>rclcpp</depend>
-  <depend>rclpy</depend>
   <depend>scan_planner_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>

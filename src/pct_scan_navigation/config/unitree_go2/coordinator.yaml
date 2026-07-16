@@ -1,51 +1,9 @@
 pct_scan_coordinator:
   ros__parameters:
+    mode: 2
     global_frame: map
     path_topic: /pct_path
     odom_topic: /Odometry_open3d
-    planner_status_topic: /scan_planner/planner_status
-    controller_topic: /scan_planner/controller_command
-    request_topic: /scan_planner/planning_request
-    status_topic: /pct_scan_navigation/status
-    final_approach_topic: /pct_scan_navigation/final_approach
-    motion_enabled_topic: /pct_scan_navigation/motion_enabled
-    cmd_vel_topic: /cmd_vel
-    enable_service: /pct_scan_navigation/enable
-    cancel_service: /pct_scan_navigation/cancel
-    # The Unitree command layer owns hardware arming/safety gating. Navigation
-    # therefore forwards valid commands immediately without a separate enable call.
-    motion_enabled_on_start: true
-    # When SCAN reports BLOCKED, resubmit the current goal to PCT. A successful
-    # /pct_path response is accepted even when it is identical to the old path.
-    global_replan_goal_topic: /goal_pose
-    maximum_global_replan_attempts: 3
-    global_replan_timeout: 5.0
-    global_replan_retry_delay: 1.0
-    # A recovered planner should start a new bounded retry episode instead of
-    # carrying old failures for the rest of a long multi-floor navigation.
-    global_replan_reset_after_tracking: 10.0
-
-    duplicate_spacing: 0.05
-    resample_spacing: 0.20
-    # Cap the minimum-snap interpolation problem; long PCT routes otherwise
-    # block the single-threaded ScanPlanner callback for a long time.
-    maximum_reference_points: 60
-    maximum_path_start_distance: 1.0
-
-    goal_reached_distance: 0.10
-    final_heading_entry_distance: 0.10
-    goal_yaw_tolerance: 0.10
-    final_yaw_deadband: 0.02
-    final_yaw_kp: 1.5
-    min_final_angular_velocity: 0.15
-    max_final_angular_velocity: 0.40
-
-    max_vx: 0.80
-    max_vy: 0.30
-    max_vyaw: 0.80
-    max_linear_acceleration: 1.0
-    max_yaw_acceleration: 1.0
-    odom_timeout: 0.30
-    planner_status_timeout: 0.50
-    controller_command_timeout: 0.20
-    initial_planning_timeout: 2.0
+    waypoints_topic: /scan_planner/waypoints
+    waypoint_spacing: 1.0
+    waypoint_z_offset: 0.0

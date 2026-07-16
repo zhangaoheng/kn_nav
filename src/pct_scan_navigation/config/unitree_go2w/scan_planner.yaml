@@ -1,30 +1,15 @@
 scan_planner_node:
   ros__parameters:
-    body_pose_topic: /Odometry_open3d
-    fsm.navi_mode: 3
+    fsm.navi_mode: 2
     fsm.thresh_replan: 1.0
     fsm.thresh_no_replan: 0.1
     fsm.planning_horizon: 3.5
-    # Shorten the rolling target after repeated local failures (useful on
-    # stairs/tight turns); any successful local plan resets the failure count
-    # and restores the normal 3.5 m horizon.
-    fsm.minimum_planning_horizon: 1.0
-    fsm.planning_horizon_shrink_step: 0.5
-    fsm.planning_failures_per_horizon_shrink: 5
-    fsm.emergency_time_: 1.0
+    fsm.emergency_time: 1.0
     fsm.fail_safe: true
     fsm.max_replan_fail_count: 100
-    fsm.path_z_offset: 0.0
-    fsm.max_path_odom_z_difference: 0.6
-    # Prevent XY-overlapping multi-floor paths from advancing the rolling
-    # target onto another floor before base_link changes height.
-    fsm.local_target_max_z_difference: 0.8
-    fsm.local_target_topic: /scan_planner/local_target
-
     grid_map.sensor_type: lidar
     grid_map.cloud_is_world: true
     grid_map.need_extrinsic: false
-    grid_map.cloud_timeout: 0.5
     grid_map.resolution: 0.20
     grid_map.frame_id: map
     grid_map.sliding_map_frame_id: scan_sliding_map
@@ -39,6 +24,7 @@ scan_planner_node:
     grid_map.map_sliding_thresh: 0.2
     grid_map.double_cylinder_radius: 0.28
     grid_map.double_cylinder_offset: 0.23
+    grid_map.body_height: 0.4
     grid_map.obstacles_inflation_z_up: 0.1
     grid_map.obstacles_inflation_z_down: 0.3
 
@@ -80,7 +66,6 @@ scan_planner_node:
 
 closed_loop_controller:
   ros__parameters:
-    body_pose_topic: /Odometry_open3d
     time_forward: 0.60
     heading_error_threshold: 0.80
     kp_pos: 0.8
@@ -89,5 +74,3 @@ closed_loop_controller:
     max_vy: 0.30
     max_vyaw: 0.50
     finish_dist: 0.15
-    odom_timeout: 0.30
-    trajectory_timeout: 1.0

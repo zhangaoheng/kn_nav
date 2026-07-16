@@ -1,27 +1,48 @@
 # pct_scan_navigation
 
-PCT 全局规划的统一导航启动包，提供：
+PCT 全局规划与 SCAN-Planner 局部导航的轻量协调和统一启动包。
 
-- `local_pct_scan_navigation.launch.py`：PCT + SCAN-Planner。
-- `unitree_go2*_pct_scan_navigation.launch.py`：Go2 / Go2-W 实机配置。
-- `global_path_follow_test.launch.py`：PCT + Pure Pursuit 直接跟踪，不使用局部规划或避障。
+## Build
 
 ```bash
 cd work_space/kn_nav_ws
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install --packages-up-to pct_scan_navigation
 source install/setup.bash
+```
+
+## Mode 1: direct SCAN goal
+
+RViz `/goal_pose` 直接交给 SCAN-Planner，不启动 PCT 全局规划器：
+
+```bash
+ros2 launch pct_scan_navigation local_pct_scan_navigation.launch.py \
+  navigation_mode:=1
+```
+
+## Mode 2: PCT rolling waypoints
+
+Mode 2 是默认模式。PCT 发布 `/pct_path`，coordinator 沿三维路径每隔 1 m
+提取 waypoint，并根据机器人累计移动距离滚动发布剩余 waypoint 到
+`/scan_planner/waypoints`。中间点仅用于塑造 SCAN 参考轨迹，最后一点始终是
+唯一导航终点。
+
+```bash
 ros2 launch pct_scan_navigation local_pct_scan_navigation.launch.py
 ```
 
-配置位于 `config/local`、`config/unitree_go2` 和 `config/unitree_go2w`。底盘桥默认关闭；确认定位与规划正常后，通过 `start_go2_bridge:=true` 启动并调用：
+可通过 coordinator 配置调整：
 
-```bash
-ros2 service call /go2_cmd_vel_bridge/enable std_srvs/srv/SetBool '{data: true}'
-```
+- `waypoint_spacing`：采样和滚动间距，默认 `1.0` m；
+- `waypoint_z_offset`：发布 waypoint 的统一高度偏移，默认 `0.0` m。
 
-取消 SCAN 导航任务：
+Mode 3 尚未实现，选择 `navigation_mode:=3` 会使启动立即失败并关闭导航。
 
-```bash
-ros2 service call /pct_scan_navigation/cancel std_srvs/srv/Trigger '{}'
-```
+## Robot profiles
+
+配置位于 `config/local`、`config/unitree_go2` 和 `config/unitree_go2w`。
+本地启动默认关闭底盘桥；Go2/Go2-W 实机启动文件默认启动桥，但仍需按照底盘
+桥自身的安全接口完成硬件使能。
+
+`global_path_follow_test.launch.py` 保留为 PCT + Pure Pursuit 直接跟踪测试；该链路
+不使用 SCAN 局部规划和避障。

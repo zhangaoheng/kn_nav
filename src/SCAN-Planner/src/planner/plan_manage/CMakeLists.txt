@@ -50,13 +50,10 @@ install(TARGETS
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME} OPTIONAL)
 install(FILES launch/default.rviz DESTINATION share/${PROJECT_NAME}/rviz OPTIONAL)
-install(PROGRAMS scripts/keypoint_recorder.py
-  DESTINATION lib/${PROJECT_NAME} OPTIONAL)
-
 if(BUILD_TESTING)
   find_package(launch_testing_ament_cmake REQUIRED)
   add_launch_test(test/test_planner_startup.py TIMEOUT 30)
-  add_launch_test(test/test_waypoint_parameters.py TIMEOUT 30)
+  add_launch_test(test/test_waypoint_mode_startup.py TIMEOUT 30)
 endif()
 
 ament_package()

@@ -8,10 +8,16 @@ from pathlib import Path
 import launch.logging
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction, SetEnvironmentVariable
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, SetEnvironmentVariable, Shutdown
 from launch.conditions import IfCondition
-from launch.substitutions import EnvironmentVariable, LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import (
+    EnvironmentVariable,
+    LaunchConfiguration,
+    PathJoinSubstitution,
+    PythonExpression,
+)
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -76,6 +82,8 @@ def generate_launch_description():
     coordinator_params_file = LaunchConfiguration('coordinator_params_file')
     pct_params_file = LaunchConfiguration('pct_params_file')
     config_profile = LaunchConfiguration('config_profile')
+    navigation_mode = LaunchConfiguration('navigation_mode')
+    navigation_mode_value = ParameterValue(navigation_mode, value_type=int)
 
     navigation_share = FindPackageShare('pct_scan_navigation')
 
@@ -104,16 +112,24 @@ def generate_launch_description():
         package='pct_planner', executable='run_ros2_global_planner',
         name='pct_global_planner', output='both',
         parameters=[pct_params_file, {'use_sim_time': use_sim_time}],
-        condition=IfCondition(start_pct_planner),
+        condition=IfCondition(PythonExpression([
+            "'", navigation_mode, "' == '2' and '", start_pct_planner, "' == 'true'",
+        ])),
     )
     scan_planner = Node(
         package='scan_planner', executable='scan_planner_node',
         name='scan_planner_node', output='both',
-        parameters=[scan_params_file, {'use_sim_time': use_sim_time}],
+        parameters=[scan_params_file, {
+            'fsm.navi_mode': navigation_mode_value,
+            'use_sim_time': use_sim_time,
+        }],
         remappings=[
-            ('/grid_map/body_pose', '/Odometry_open3d'),
-            ('/grid_map/sensor_pose', '/Odometry_open3d'),
-            ('/grid_map/cloud', '/scan_map'),
+            ('body_pose', '/Odometry_open3d'),
+            ('sensor_pose', '/Odometry_open3d'),
+            ('cloud', '/scan_map'),
+            ('move_base_simple/goal', '/goal_pose'),
+            ('waypoints', '/scan_planner/waypoints'),
+            ('initial_path', '/initial_path'),
         ],
     )
     controller = Node(
@@ -124,7 +140,11 @@ def generate_launch_description():
     coordinator = Node(
         package='pct_scan_navigation', executable='pct_scan_coordinator',
         name='pct_scan_coordinator', output='both',
-        parameters=[coordinator_params_file, {'use_sim_time': use_sim_time}],
+        parameters=[coordinator_params_file, {
+            'mode': navigation_mode_value,
+            'use_sim_time': use_sim_time,
+        }],
+        on_exit=Shutdown(reason='pct_scan_coordinator exited'),
     )
     bridge = Node(
         package='pure_pursuit_planner', executable='go2_cmd_vel_bridge',
@@ -138,6 +158,10 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='false'),
+        DeclareLaunchArgument(
+            'navigation_mode', default_value='2',
+            description='1: direct RViz goal to SCAN, 2: PCT rolling waypoints; 3 unsupported',
+        ),
         DeclareLaunchArgument(
             'config_profile', default_value='local',
             description='Configuration directory under pct_scan_navigation/config',

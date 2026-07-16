@@ -12,7 +12,7 @@ import pytest
 @pytest.mark.launch_test
 def generate_test_description():
     config = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "config", "planner.yaml")
+        os.path.join(os.path.dirname(__file__), "..", "config", "scan_planner.yaml")
     )
     planner = launch_ros.actions.Node(
         package="scan_planner",

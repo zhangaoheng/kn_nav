@@ -41,7 +41,7 @@ namespace scan_planner
     enum NAVI_MODE
     {
       MANUAL_TARGET = 1,
-      PRESET_TARGET = 2,
+      WAYPOINT_PATH = 2,
       REFERENCE_PATH = 3,
     };
 
@@ -51,10 +51,8 @@ namespace scan_planner
     scan_planner_msgs::msg::DataDisp data_disp_;
 
     /* parameters */
-    int navi_mode_; // 1 manual select, 2 hard code
+    int navi_mode_;
     double no_replan_thresh_, replan_thresh_;
-    std::vector<Eigen::Vector3d> preset_waypoints_;
-    int waypoint_num_;
     double planning_horizon_;
     double emergency_time_;
     double rviz_goal_height_;
@@ -65,7 +63,6 @@ namespace scan_planner
 
     /* planning data */
     bool trigger_, have_target_, have_odom_, have_new_target_;
-    bool preset_started_{false};
     bool rviz_height_ready_;
     bool go2_execution_frozen_;
     bool enable_fail_safe_, need_hover_stop_;
@@ -82,7 +79,7 @@ namespace scan_planner
     Eigen::Vector3d end_pt_, end_vel_;                                       // goal state
     Eigen::Vector3d local_target_pt_, local_target_vel_;                     // local target state
     std::vector<Eigen::Vector3d> active_waypoints_;
-    int current_wp_;
+    nav_msgs::msg::Path::SharedPtr pending_waypoint_path_;
 
     bool flag_escape_emergency_;
 
@@ -91,7 +88,7 @@ namespace scan_planner
     rclcpp::TimerBase::SharedPtr exec_timer_, safety_timer_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
-    rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr waypoint_sub_, path_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr go2_execution_frozen_sub_;
     rclcpp::Publisher<scan_planner_msgs::msg::Bspline>::SharedPtr bspline_pub_;
     rclcpp::Publisher<scan_planner_msgs::msg::DataDisp>::SharedPtr data_disp_pub_;
@@ -108,10 +105,10 @@ namespace scan_planner
     std::pair<int, SCANReplanFSM::FSM_EXEC_STATE> timesOfConsecutiveStateCalls();
     void printFSMExecState();
 
-    void planGlobalTrajbyGivenWps();
     bool planGlobalTrajByWaypoints(const std::vector<Eigen::Vector3d> &waypoints);
-    bool planNextWaypoint();
-    bool isWaypointSequenceMode() const;
+    bool acceptWaypointPath(const nav_msgs::msg::Path &path, double z_offset,
+                            const std::string &label);
+    void cancelWaypointNavigation();
     bool adjustGlobalTargetIfOccupied();
     void getLocalTarget();
     void finishProcess();
@@ -125,6 +122,7 @@ namespace scan_planner
     void checkCollisionCallback();
     void rvizGoalCallback(const geometry_msgs::msg::PoseStamped::ConstSharedPtr &msg);
     void waypointCallback(const nav_msgs::msg::Path::ConstSharedPtr &msg);
+    void dynamicWaypointCallback(const nav_msgs::msg::Path::ConstSharedPtr &msg);
     void pathCallback(const nav_msgs::msg::Path::ConstSharedPtr &msg);
     void odometryCallback(const nav_msgs::msg::Odometry::ConstSharedPtr &msg);
     void go2ExecutionFrozenCallback(const std_msgs::msg::Bool::ConstSharedPtr &msg);

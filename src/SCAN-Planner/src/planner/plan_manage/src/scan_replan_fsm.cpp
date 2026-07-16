@@ -19,7 +19,6 @@ namespace scan_planner
   void SCANReplanFSM::init(rclcpp::Node *node)
   {
     node_ = node;
-    current_wp_ = 0;
     exec_state_ = FSM_EXEC_STATE::INIT;
     trigger_ = false;
     have_target_ = false;
@@ -47,20 +46,6 @@ namespace scan_planner
     body_height_ = load_parameter<double>(node_, "grid_map.body_height", 0.4);
     self_inflation_frame_id_ = load_parameter<std::string>(node_, "grid_map.frame_id", "world");
 
-    if (navi_mode_ == NAVI_MODE::PRESET_TARGET)
-    {
-      const auto flat_waypoints = load_parameter<std::vector<double>>(node_, "fsm.waypoints", {});
-      if (flat_waypoints.empty() || flat_waypoints.size() % 3 != 0)
-        throw std::runtime_error("navi_mode=2 requires non-empty fsm.waypoints with x,y,z triples");
-      waypoint_num_ = static_cast<int>(flat_waypoints.size() / 3);
-      preset_waypoints_.resize(waypoint_num_);
-      for (int i = 0; i < waypoint_num_; i++)
-      {
-        preset_waypoints_[i] = Eigen::Vector3d(flat_waypoints[3 * i], flat_waypoints[3 * i + 1],
-                                               flat_waypoints[3 * i + 2]);
-      }
-    }
-
     /* initialize main modules */
     visualization_.reset(new PlanningVisualization(node_));
     planner_manager_.reset(new SCANPlannerManager);
@@ -87,37 +72,15 @@ namespace scan_planner
       goal_sub_ = node_->create_subscription<geometry_msgs::msg::PoseStamped>(
           "move_base_simple/goal", 1,
           std::bind(&SCANReplanFSM::rvizGoalCallback, this, std::placeholders::_1));
+    else if (navi_mode_ == NAVI_MODE::WAYPOINT_PATH)
+      waypoint_sub_ = node_->create_subscription<nav_msgs::msg::Path>(
+          "waypoints", rclcpp::QoS(1).reliable().transient_local(),
+          std::bind(&SCANReplanFSM::dynamicWaypointCallback, this, std::placeholders::_1));
     else if (navi_mode_ == NAVI_MODE::REFERENCE_PATH)
       path_sub_ = node_->create_subscription<nav_msgs::msg::Path>(
           "initial_path", 1, std::bind(&SCANReplanFSM::pathCallback, this, std::placeholders::_1));
-    else if (navi_mode_ == NAVI_MODE::PRESET_TARGET)
-      RCLCPP_INFO(node_->get_logger(), "Preset waypoint mode will start after the first odometry message");
     else
       throw std::runtime_error("fsm.navi_mode must be 1, 2, or 3");
-  }
-
-  void SCANReplanFSM::planGlobalTrajbyGivenWps()
-  {
-    std::vector<Eigen::Vector3d> wps = preset_waypoints_;
-
-    for (size_t i = 0; i < wps.size(); i++)
-    {
-      visualization_->displayGoalPoint(wps[i], Eigen::Vector4d(0, 0.5, 0.5, 1), 0.3, i);
-    }
-
-    active_waypoints_ = wps;
-    current_wp_ = 0;
-    trigger_ = true;
-    init_pt_ = odom_pos_;
-
-    if (planNextWaypoint())
-    {
-      changeFSMExecState(GEN_NEW_TRAJ, "TRIG");
-    }
-    else
-    {
-      RCLCPP_ERROR(node_->get_logger(), "Unable to generate global trajectory to first preset waypoint");
-    }
   }
 
   void SCANReplanFSM::rvizGoalCallback(const geometry_msgs::msg::PoseStamped::ConstSharedPtr &msg)
@@ -242,59 +205,6 @@ namespace scan_planner
     return true;
   }
 
-  bool SCANReplanFSM::planNextWaypoint()
-  {
-    if (current_wp_ < 0 || current_wp_ >= (int)active_waypoints_.size())
-    {
-      RCLCPP_WARN(node_->get_logger(), "[navi_mode=%d] No active waypoint to plan", navi_mode_);
-      return false;
-    }
-
-    end_pt_ = active_waypoints_[current_wp_];
-    setStartStateFromOdomOrCurrentTraj();
-
-    bool success = planner_manager_->planGlobalTraj(
-        start_pt_,
-        start_vel_,
-        start_acc_,
-        end_pt_,
-        Eigen::Vector3d::Zero(),
-        Eigen::Vector3d::Zero());
-
-    if (!success)
-    {
-      RCLCPP_ERROR(node_->get_logger(), "[navi_mode=%d] Unable to generate trajectory to waypoint %d",
-                   navi_mode_, current_wp_ + 1);
-      return false;
-    }
-
-    if (!adjustGlobalTargetIfOccupied())
-      return false;
-
-    constexpr double step_size_t = 0.1;
-    int i_end = floor(planner_manager_->global_data_.global_duration_ / step_size_t);
-    std::vector<Eigen::Vector3d> gloabl_traj(i_end);
-    for (int i = 0; i < i_end; i++)
-    {
-      gloabl_traj[i] = planner_manager_->global_data_.global_traj_.evaluate(i * step_size_t);
-    }
-
-    end_vel_.setZero();
-    have_target_ = true;
-    have_new_target_ = true;
-    visualization_->displayGlobalPathList(gloabl_traj, 0.1, 0);
-    visualization_->displayGoalPoint(end_pt_, Eigen::Vector4d(0, 0.5, 0.5, 1), 0.3, current_wp_);
-    RCLCPP_INFO(node_->get_logger(), "[navi_mode=%d] Planning to waypoint %d/%zu: [%.2f, %.2f, %.2f]",
-                navi_mode_, current_wp_ + 1, active_waypoints_.size(), end_pt_(0), end_pt_(1), end_pt_(2));
-
-    return true;
-  }
-
-  bool SCANReplanFSM::isWaypointSequenceMode() const
-  {
-    return navi_mode_ == NAVI_MODE::PRESET_TARGET;
-  }
-
   bool SCANReplanFSM::adjustGlobalTargetIfOccupied()
   {
     auto map = planner_manager_->grid_map_;
@@ -345,39 +255,72 @@ namespace scan_planner
       return;
     }
 
-    trigger_ = true;
+    acceptWaypointPath(*msg, body_height_, "Reference path");
+  }
 
+  void SCANReplanFSM::dynamicWaypointCallback(const nav_msgs::msg::Path::ConstSharedPtr &msg)
+  {
+    if (!msg || msg->poses.empty())
+    {
+      pending_waypoint_path_.reset();
+      cancelWaypointNavigation();
+      return;
+    }
+    if (!have_odom_)
+    {
+      pending_waypoint_path_ = std::make_shared<nav_msgs::msg::Path>(*msg);
+      RCLCPP_INFO(node_->get_logger(), "Queue waypoint path until body_pose is available");
+      return;
+    }
+    acceptWaypointPath(*msg, 0.0, "Dynamic waypoint path");
+  }
+
+  bool SCANReplanFSM::acceptWaypointPath(const nav_msgs::msg::Path &path, double z_offset,
+                                         const std::string &label)
+  {
     std::vector<Eigen::Vector3d> waypoints;
-    waypoints.reserve(msg->poses.size());
-
-    for (const auto& pose_stamped : msg->poses)
+    waypoints.reserve(path.poses.size());
+    for (const auto &pose_stamped : path.poses)
     {
-      Eigen::Vector3d wp;
-      wp(0) = pose_stamped.pose.position.x;
-      wp(1) = pose_stamped.pose.position.y;
-      wp(2) = pose_stamped.pose.position.z + body_height_; // Adjust for body height
-      waypoints.push_back(wp);
-    }
-    bool success = planGlobalTrajByWaypoints(waypoints);
-
-    if (success)
-    {
-      /*** FSM ***/
-      if (exec_state_ == WAIT_TARGET)
+      const auto &position = pose_stamped.pose.position;
+      if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z))
       {
-        changeFSMExecState(GEN_NEW_TRAJ, "TRIG");
+        RCLCPP_WARN(node_->get_logger(), "%s contains a non-finite waypoint", label.c_str());
+        return false;
       }
-      else if (exec_state_ == EXEC_TRAJ)
-      {
-        changeFSMExecState(REPLAN_TRAJ, "TRIG");
-      }
+      waypoints.emplace_back(position.x, position.y, position.z + z_offset);
+    }
 
-      RCLCPP_INFO(node_->get_logger(), "Reference path accepted");
-    }
-    else
+    trigger_ = true;
+    init_pt_ = odom_pos_;
+    active_waypoints_ = waypoints;
+    if (!planGlobalTrajByWaypoints(waypoints))
     {
-      RCLCPP_ERROR(node_->get_logger(), "Unable to generate global trajectory from reference path");
+      RCLCPP_ERROR(node_->get_logger(), "Unable to generate global trajectory from %s", label.c_str());
+      return false;
     }
+
+    if (exec_state_ == WAIT_TARGET || exec_state_ == INIT)
+      changeFSMExecState(GEN_NEW_TRAJ, "TRIG");
+    else if (exec_state_ == EXEC_TRAJ || exec_state_ == REPLAN_TRAJ)
+      changeFSMExecState(REPLAN_TRAJ, "TRIG");
+    RCLCPP_INFO(node_->get_logger(), "%s accepted: %zu guides, final=[%.2f %.2f %.2f]",
+                label.c_str(), waypoints.size(), end_pt_(0), end_pt_(1), end_pt_(2));
+    return true;
+  }
+
+  void SCANReplanFSM::cancelWaypointNavigation()
+  {
+    active_waypoints_.clear();
+    have_target_ = false;
+    have_new_target_ = false;
+    trigger_ = false;
+    replan_fail_count_ = 0;
+    need_hover_stop_ = false;
+    if (have_odom_)
+      callEmergencyStop(odom_pos_);
+    changeFSMExecState(WAIT_TARGET, "WAYPOINT_CANCEL");
+    RCLCPP_INFO(node_->get_logger(), "Dynamic waypoint path cleared; navigation stopped");
   }
 
   void SCANReplanFSM::odometryCallback(const nav_msgs::msg::Odometry::ConstSharedPtr &msg)
@@ -406,10 +349,11 @@ namespace scan_planner
 
     have_odom_ = true;
     publishSelfInflationMarker();
-    if (navi_mode_ == NAVI_MODE::PRESET_TARGET && !preset_started_)
+    if (navi_mode_ == NAVI_MODE::WAYPOINT_PATH && pending_waypoint_path_)
     {
-      preset_started_ = true;
-      planGlobalTrajbyGivenWps();
+      auto pending = pending_waypoint_path_;
+      pending_waypoint_path_.reset();
+      dynamicWaypointCallback(pending);
     }
   }
 
@@ -617,43 +561,10 @@ namespace scan_planner
 
       Eigen::Vector3d pos = info->position_traj_.evaluateDeBoorT(t_cur);
 
-      if (isWaypointSequenceMode() &&
-          current_wp_ + 1 < (int)active_waypoints_.size() &&
-          (end_pt_ - odom_pos_).norm() < 0.5)
-      {
-        current_wp_++;
-        if (planNextWaypoint())
-        {
-          changeFSMExecState(GEN_NEW_TRAJ, "FSM");
-          return;
-        }
-        replan_fail_count_++;
-        changeFSMExecState(GEN_NEW_TRAJ, "FSM");
-        return;
-      }
-
       /* && (end_pt_ - pos).norm() < 0.5 */
       if (t_cur > info->duration_ - 1e-2)
       {
-        if (isWaypointSequenceMode() && current_wp_ + 1 < (int)active_waypoints_.size())
-        {
-          current_wp_++;
-          if (planNextWaypoint())
-          {
-            changeFSMExecState(GEN_NEW_TRAJ, "FSM");
-            return;
-          }
-          replan_fail_count_++;
-          changeFSMExecState(GEN_NEW_TRAJ, "FSM");
-          return;
-        }
-
-        if (isWaypointSequenceMode())
-        {
-          active_waypoints_.clear();
-          current_wp_ = 0;
-        }
-
+        active_waypoints_.clear();
         have_target_ = false;
 
         changeFSMExecState(WAIT_TARGET, "FSM");
@@ -742,13 +653,17 @@ namespace scan_planner
       start_acc_.setZero();
     }
 
-    if (!planner_manager_->planGlobalTraj(
-            start_pt_,
-            start_vel_,
-            start_acc_,
-            end_pt_,
-            Eigen::Vector3d::Zero(),
-            Eigen::Vector3d::Zero()))
+    bool global_success = false;
+    if (navi_mode_ == NAVI_MODE::WAYPOINT_PATH && !active_waypoints_.empty())
+      global_success = planner_manager_->planGlobalTrajWaypoints(
+          start_pt_, start_vel_, start_acc_, active_waypoints_,
+          Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
+    else
+      global_success = planner_manager_->planGlobalTraj(
+          start_pt_, start_vel_, start_acc_, end_pt_,
+          Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
+
+    if (!global_success)
     {
       RCLCPP_ERROR(node_->get_logger(),
                    "[navi_mode=%d] Unable to refresh global trajectory from odom to current target", navi_mode_);
