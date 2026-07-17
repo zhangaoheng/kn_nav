@@ -2,7 +2,8 @@
 
 # Open a 2-column x 4-row tmux workspace.  The four panes in the left
 # column enter the robot Docker container and receive commands without
-# pressing Enter; the four panes in the right column stay on the host.
+# pressing Enter.  The top two panes in the right column also enter the
+# container without receiving commands; the remaining two stay on the host.
 
 set -euo pipefail
 
@@ -21,10 +22,11 @@ if (( $# != 0 )); then
 fi
 
 LEFT_TITLES=(livox pct_scan goal_points enable_go2)
+RIGHT_TITLES=(container_1 container_2 host_3 host_4)
 LEFT_COMMANDS=(
   "ros2 launch livox_ros_driver2 msg_MID360s_launch.py"
   "ros2 launch pct_scan_navigation unitree_go2w_pct_scan_navigation.launch.py"
-  "python3 work_space/kn_nav_ws/src/tools/goal_points_cli.py"
+  "python3 /home/code/work_space/kn_nav/src/tools/goal_points_cli.py"
   "ros2 service call /go2_cmd_vel_bridge/enable std_srvs/srv/SetBool '{data: true}'"
 )
 
@@ -84,13 +86,18 @@ tmux set-window-option -t "${SESSION_NAME}:navigation" pane-border-format \
 
 for index in "${!left_panes[@]}"; do
   tmux select-pane -t "${left_panes[index]}" -T "${LEFT_TITLES[index]}"
-  tmux select-pane -t "${right_panes[index]}" -T "host_$((index + 1))"
+  tmux select-pane -t "${right_panes[index]}" -T "${RIGHT_TITLES[index]}"
 
   # Run Docker directly as the pane process instead of typing a command into
   # an intermediate host shell.  This guarantees that each left pane is
   # attached to the container before it receives its prepared ROS command.
   tmux respawn-pane -k -t "${left_panes[index]}" \
     "docker exec -it ${CONTAINER_ID} /bin/bash"
+
+  if (( index < 2 )); then
+    tmux respawn-pane -k -t "${right_panes[index]}" \
+      "docker exec -it ${CONTAINER_ID} /bin/bash"
+  fi
 done
 
 # Give Docker time to present the container shell, then insert the four

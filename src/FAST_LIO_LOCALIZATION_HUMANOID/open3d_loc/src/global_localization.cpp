@@ -91,13 +91,29 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
     loc_frequence_ = 2.0; //
     loc_fitness_.store(0.0);
 
+    state_callback_group_ =
+        this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    scan_callback_group_ =
+        this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+
+    rclcpp::SubscriptionOptions state_subscription_options;
+    state_subscription_options.callback_group = state_callback_group_;
+    rclcpp::SubscriptionOptions scan_subscription_options;
+    scan_subscription_options.callback_group = scan_callback_group_;
+
     // 注册回调函数
     sub_imulink2odom_ = this->create_subscription<nav_msgs::msg::Odometry>(
-        "/Odometry_loc", 50, std::bind(&GloabalLocalization::CallbackImulink2Odom, this, std::placeholders::_1));
+        "/Odometry_loc", 50,
+        std::bind(&GloabalLocalization::CallbackImulink2Odom, this, std::placeholders::_1),
+        state_subscription_options);
     sub_scan_cur_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-        "/cloud_registered_body_1", 50, std::bind(&GloabalLocalization::CallbackScanBody, this, std::placeholders::_1));
+        "/cloud_registered_body_1", 50,
+        std::bind(&GloabalLocalization::CallbackScanBody, this, std::placeholders::_1),
+        scan_subscription_options);
     sub_initialpose_ = this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
-        "/initialpose", 50, std::bind(&GloabalLocalization::CallbackInitialPose, this, std::placeholders::_1));
+        "/initialpose", 50,
+        std::bind(&GloabalLocalization::CallbackInitialPose, this, std::placeholders::_1),
+        state_subscription_options);
 
     // 队列最大数量
     this->declare_parameter<int>("pcd_queue_maxsize", 5);

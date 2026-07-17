@@ -55,6 +55,9 @@ public:
     double ComputeMotionDis(const Eigen::Vector3d &a, const Eigen::Vector3d &b);
 
 private:
+    rclcpp::CallbackGroup::SharedPtr state_callback_group_;
+    rclcpp::CallbackGroup::SharedPtr scan_callback_group_;
+
     /// 命名约定: Alink2Blink 表示 A_link 在 B_link 下的位姿, 即 T_B_A.
     /// @brief 订阅imulink2odom,即fast_lio的里程计信息
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_imulink2odom_;
