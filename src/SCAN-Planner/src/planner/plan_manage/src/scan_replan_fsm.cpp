@@ -148,7 +148,7 @@ namespace scan_planner
       /*** FSM ***/
       if (exec_state_ == WAIT_TARGET)
         changeFSMExecState(GEN_NEW_TRAJ, "TRIG");
-      else if (exec_state_ == EXEC_TRAJ)
+      else if (exec_state_ == EXEC_TRAJ || exec_state_ == FINAL_YAW_ALIGN)
         changeFSMExecState(REPLAN_TRAJ, "TRIG");
 
       // visualization_->displayGoalPoint(end_pt_, Eigen::Vector4d(1, 0, 0, 1), 0.3, 0);
@@ -307,7 +307,8 @@ namespace scan_planner
 
     if (exec_state_ == WAIT_TARGET || exec_state_ == INIT)
       changeFSMExecState(GEN_NEW_TRAJ, "TRIG");
-    else if (exec_state_ == EXEC_TRAJ || exec_state_ == REPLAN_TRAJ)
+    else if (exec_state_ == EXEC_TRAJ || exec_state_ == REPLAN_TRAJ ||
+             exec_state_ == FINAL_YAW_ALIGN)
       changeFSMExecState(REPLAN_TRAJ, "TRIG");
     RCLCPP_INFO(node_->get_logger(), "%s accepted: %zu guides, final=[%.2f %.2f %.2f]",
                 label.c_str(), waypoints.size(), end_pt_(0), end_pt_(1), end_pt_(2));
@@ -482,7 +483,8 @@ namespace scan_planner
     else
       continuously_called_times_ = 1;
 
-    static string state_str[7] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP"};
+    static string state_str[7] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ",
+                                  "EXEC_TRAJ", "FINAL_YAW_ALIGN", "EMERGENCY_STOP"};
     int pre_s = int(exec_state_);
     exec_state_ = new_state;
     cout << "[" + pos_call + "]: from " + state_str[pre_s] + " to " + state_str[int(new_state)] << endl;
@@ -495,7 +497,8 @@ namespace scan_planner
 
   void SCANReplanFSM::printFSMExecState()
   {
-    static string state_str[7] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP"};
+    static string state_str[7] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ",
+                                  "EXEC_TRAJ", "FINAL_YAW_ALIGN", "EMERGENCY_STOP"};
 
     cout << "[FSM]: state: " + state_str[int(exec_state_)] << endl;
   }
@@ -575,6 +578,12 @@ namespace scan_planner
 
     case REPLAN_TRAJ:
     {
+      if ((odom_pos_ - end_pt_).head<2>().norm() <= finish_dist_)
+      {
+        replan_fail_count_ = 0;
+        changeFSMExecState(FINAL_YAW_ALIGN, "FSM");
+        break;
+      }
 
       if (planFromCurrentTraj())
       {
@@ -608,14 +617,7 @@ namespace scan_planner
           changeFSMExecState(REPLAN_TRAJ, "FSM");
           return;
         }
-        if (!goalReached())
-          return;
-
-        active_waypoints_.clear();
-        have_target_ = false;
-        have_end_yaw_ = false;
-
-        changeFSMExecState(WAIT_TARGET, "FSM");
+        changeFSMExecState(FINAL_YAW_ALIGN, "FSM");
         return;
       }
       else if ((end_pt_ - pos).norm() < no_replan_thresh_)
@@ -632,6 +634,23 @@ namespace scan_planner
       {
         changeFSMExecState(REPLAN_TRAJ, "FSM");
       }
+      break;
+    }
+
+    case FINAL_YAW_ALIGN:
+    {
+      if ((odom_pos_ - end_pt_).head<2>().norm() > finish_dist_)
+      {
+        changeFSMExecState(REPLAN_TRAJ, "FSM");
+        return;
+      }
+      if (!goalReached())
+        return;
+
+      active_waypoints_.clear();
+      have_target_ = false;
+      have_end_yaw_ = false;
+      changeFSMExecState(WAIT_TARGET, "FSM");
       break;
     }
 

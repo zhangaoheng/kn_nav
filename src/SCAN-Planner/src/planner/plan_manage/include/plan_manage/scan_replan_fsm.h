@@ -36,6 +36,7 @@ namespace scan_planner
       GEN_NEW_TRAJ,
       REPLAN_TRAJ,
       EXEC_TRAJ,
+      FINAL_YAW_ALIGN,
       EMERGENCY_STOP
     };
     enum NAVI_MODE

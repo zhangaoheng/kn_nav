@@ -4,6 +4,8 @@ Panels:
     Name: Displays
     Property Tree Widget:
       Expanded:
+        - //grid_map/occupancy_inflate1
+        - //grid_map/occupancy_inflate1/Topic1
         - //self_inflation1/Topic1
       Splitter Ratio: 0.5667870044708252
     Tree Height: 625
@@ -25,7 +27,7 @@ Panels:
     Experimental: true
     Name: Time
     SyncMode: 0
-    SyncSource: /tomogram
+    SyncSource: /grid_map/occupancy_inflate
 Visualization Manager:
   Class: ""
   Displays:
@@ -318,8 +320,8 @@ Visualization Manager:
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: -4.375
-        Min Value: -6.125
+        Max Value: -0.30000001192092896
+        Min Value: -1.5
         Value: true
       Axis: Z
       Channel Name: intensity
@@ -327,7 +329,7 @@ Visualization Manager:
       Color: 255; 255; 255
       Color Transformer: AxisColor
       Decay Time: 0
-      Enabled: false
+      Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Max Intensity: 4096
@@ -344,11 +346,11 @@ Visualization Manager:
         Durability Policy: Volatile
         Filter size: 10
         History Policy: Keep Last
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         Value: /grid_map/occupancy_inflate
       Use Fixed Frame: true
       Use rainbow: true
-      Value: false
+      Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -468,25 +470,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 39.490962982177734
+      Distance: 26.911985397338867
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 2.2847163677215576
-        Y: 14.617563247680664
-        Z: -7.011488914489746
+        X: -0.8759779334068298
+        Y: 1.440845012664795
+        Z: -7.0129075050354
       Focal Shape Fixed Size: false
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.7747970819473267
+      Pitch: 1.5697963237762451
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 2.9162039756774902
+      Yaw: 3.0112051963806152
     Saved: ~
 Window Geometry:
   Displays:
