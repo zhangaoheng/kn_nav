@@ -20,6 +20,7 @@ def test_coordinator_profiles_use_lightweight_mode2_contract():
         'waypoints_topic': '/scan_planner/waypoints',
         'waypoint_spacing': 1.0,
         'waypoint_z_offset': 0.0,
+        'goal_tolerance': 0.15,
     }
     for profile in ('local', 'unitree_go2', 'unitree_go2w'):
         params = load(profile, 'coordinator.yaml')['pct_scan_coordinator']['ros__parameters']
@@ -53,6 +54,10 @@ def test_scan_profiles_select_dynamic_waypoint_mode():
         assert 'body_pose_topic' not in controller
         assert 'odom_timeout' not in controller
         assert 'trajectory_timeout' not in controller
+        assert params['fsm.finish_dist'] == 0.15
+        assert params['fsm.finish_yaw'] == 0.10
+        assert controller['finish_dist'] == 0.15
+        assert controller['finish_yaw'] == 0.10
 
 
 def test_launch_synchronizes_modes_and_current_scan_topics():
@@ -108,6 +113,17 @@ def test_scan_mode2_is_dynamic_and_has_no_mandatory_sequence():
     assert 'planNextWaypoint' not in source
     assert 'fsm.waypoints' not in source
     assert 'keypoint_recorder.py' not in cmake
+
+
+def test_goal_completion_is_latched_without_new_status_topics():
+    coordinator = (ROOT / 'src/pct_scan_coordinator.cpp').read_text()
+    fsm = (SCAN_MANAGE / 'src/scan_replan_fsm.cpp').read_text()
+    controller = (SCAN_MANAGE / 'src/closed_loop_controller.cpp').read_text()
+    assert 'route_completed_' in coordinator
+    assert 'goalReached()' in fsm
+    assert 'bspline.yaw_pts.push_back(end_yaw_)' in fsm
+    assert 'task_completed_' in controller
+    assert 'final_yaw_ - odom_yaw_' in controller
 
 
 def test_direct_global_path_follow_chain_is_preserved():

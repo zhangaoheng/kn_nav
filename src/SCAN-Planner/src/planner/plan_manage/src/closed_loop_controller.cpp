@@ -30,6 +30,7 @@ public:
     max_vy_ = declare_parameter<double>("max_vy", 0.35);
     max_vyaw_ = std::min(declare_parameter<double>("max_vyaw", 1.0), kMaxVYawLimit);
     finish_dist_ = declare_parameter<double>("finish_dist", 0.15);
+    finish_yaw_ = declare_parameter<double>("finish_yaw", 0.10);
 
     bspline_sub_ = create_subscription<scan_planner_msgs::msg::Bspline>(
         "planning/bspline", 10,
@@ -92,6 +93,9 @@ private:
       RCLCPP_WARN(get_logger(), "Ignoring invalid B-spline");
       return;
     }
+    if (task_completed_ && msg->traj_id == traj_id_)
+      return;
+
     Eigen::MatrixXd points(3, msg->pos_pts.size());
     for (size_t i = 0; i < msg->pos_pts.size(); ++i)
       points.col(i) << msg->pos_pts[i].x, msg->pos_pts[i].y, msg->pos_pts[i].z;
@@ -103,9 +107,13 @@ private:
     traj_.push_back(traj_[1].getDerivative());
     traj_duration_ = traj_[0].getTimeSum();
     traj_id_ = msg->traj_id;
+    have_final_yaw_ = !msg->yaw_pts.empty() && std::isfinite(msg->yaw_pts.back());
+    if (have_final_yaw_)
+      final_yaw_ = normalizeAngle(msg->yaw_pts.back());
     exec_time_ = 0.0;
     last_update_time_ = now();
     receive_traj_ = true;
+    task_completed_ = false;
     RCLCPP_INFO(get_logger(), "Received trajectory %lld, duration %.3fs",
                 static_cast<long long>(traj_id_), traj_duration_);
   }
@@ -119,6 +127,12 @@ private:
 
   void cmdCallback()
   {
+    if (task_completed_)
+    {
+      publishExecutionFrozen(false);
+      publishStop();
+      return;
+    }
     if (!receive_traj_ || !have_odom_)
     {
       publishExecutionFrozen(false);
@@ -130,6 +144,26 @@ private:
     if (dt < 0.0 || dt > 0.2) dt = 0.0;
     const double t_eval = std::min(exec_time_, traj_duration_);
     Eigen::Vector3d pos_des = traj_[0].evaluateDeBoorT(t_eval);
+    const Eigen::Vector2d final_pos_error(pos_des.x() - odom_pos_.x(),
+                                          pos_des.y() - odom_pos_.y());
+    if (exec_time_ >= traj_duration_ && final_pos_error.norm() <= finish_dist_)
+    {
+      publishExecutionFrozen(false);
+      last_update_time_ = current_time;
+      const double final_yaw_error = have_final_yaw_
+          ? normalizeAngle(final_yaw_ - odom_yaw_) : 0.0;
+      if (std::abs(final_yaw_error) > finish_yaw_)
+      {
+        publishStop(kp_yaw_ * final_yaw_error);
+        return;
+      }
+
+      task_completed_ = true;
+      publishStop();
+      RCLCPP_INFO(get_logger(), "Trajectory %lld completed",
+                  static_cast<long long>(traj_id_));
+      return;
+    }
     const double yaw_error = normalizeAngle(estimateDesiredYaw(t_eval, pos_des) - odom_yaw_);
     const double yaw_command = std::clamp(kp_yaw_ * yaw_error, -max_vyaw_, max_vyaw_);
     if (std::abs(yaw_error) > heading_error_threshold_)
@@ -167,15 +201,18 @@ private:
   rclcpp::TimerBase::SharedPtr cmd_timer_;
   bool receive_traj_{false};
   bool have_odom_{false};
+  bool have_final_yaw_{false};
+  bool task_completed_{false};
   std::vector<UniformBspline> traj_;
   double traj_duration_{0.0};
   std::int64_t traj_id_{0};
   Eigen::Vector3d odom_pos_{Eigen::Vector3d::Zero()};
   double odom_yaw_{0.0};
+  double final_yaw_{0.0};
   double exec_time_{0.0};
   rclcpp::Time last_update_time_{0, 0, RCL_ROS_TIME};
   double time_forward_, heading_error_threshold_, kp_pos_, kp_yaw_;
-  double max_vx_, max_vy_, max_vyaw_, finish_dist_;
+  double max_vx_, max_vy_, max_vyaw_, finish_dist_, finish_yaw_;
 };
 }  // namespace scan_planner
 

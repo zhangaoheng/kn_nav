@@ -55,6 +55,7 @@ namespace scan_planner
     double no_replan_thresh_, replan_thresh_;
     double planning_horizon_;
     double emergency_time_;
+    double finish_dist_, finish_yaw_;
     double rviz_goal_height_;
     double self_inflation_z_up_, self_inflation_z_down_;
     double self_double_cylinder_radius_, self_double_cylinder_offset_;
@@ -63,6 +64,7 @@ namespace scan_planner
 
     /* planning data */
     bool trigger_, have_target_, have_odom_, have_new_target_;
+    bool have_end_yaw_;
     bool rviz_height_ready_;
     bool go2_execution_frozen_;
     bool enable_fail_safe_, need_hover_stop_;
@@ -77,6 +79,7 @@ namespace scan_planner
 
     Eigen::Vector3d init_pt_, start_pt_, start_vel_, start_acc_, start_yaw_; // start state
     Eigen::Vector3d end_pt_, end_vel_;                                       // goal state
+    double end_yaw_{0.0};
     Eigen::Vector3d local_target_pt_, local_target_vel_;                     // local target state
     std::vector<Eigen::Vector3d> active_waypoints_;
     nav_msgs::msg::Path::SharedPtr pending_waypoint_path_;
@@ -113,6 +116,9 @@ namespace scan_planner
     void getLocalTarget();
     void finishProcess();
     void publishSelfInflationMarker();
+    void updateGoalYaw(const geometry_msgs::msg::Quaternion &orientation,
+                       const std::string &label);
+    bool goalReached() const;
     double getOdomYaw() const;
     double estimateYawFromSegment(const Eigen::Vector3d &from, const Eigen::Vector3d &to) const;
     void updateLocalTrajTimeFreeze();

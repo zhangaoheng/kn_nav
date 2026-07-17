@@ -136,6 +136,8 @@ def generate_launch_description():
         package='scan_planner', executable='closed_loop_controller',
         name='closed_loop_controller', output='both',
         parameters=[scan_params_file, {'use_sim_time': use_sim_time}],
+        remappings=[('body_pose', '/Odometry_open3d'),],
+
     )
     coordinator = Node(
         package='pct_scan_navigation', executable='pct_scan_coordinator',
@@ -168,7 +170,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument('start_open3d_loc', default_value='true'),
         DeclareLaunchArgument('start_pct_planner', default_value='true'),
-        DeclareLaunchArgument('start_go2_bridge', default_value='false'),
+        DeclareLaunchArgument('start_go2_bridge', default_value='true'),
         DeclareLaunchArgument('network_interface', default_value='enp2s0'),
         DeclareLaunchArgument('scan_params_file', default_value=navigation_config('scan_planner.yaml')),
         DeclareLaunchArgument('coordinator_params_file', default_value=navigation_config('coordinator.yaml')),

@@ -3,8 +3,10 @@ scan_planner_node:
     fsm.navi_mode: 2
     fsm.thresh_replan: 1.0
     fsm.thresh_no_replan: 0.1
-    fsm.planning_horizon: 3.5
+    fsm.planning_horizon: 5.5
     fsm.emergency_time: 1.0
+    fsm.finish_dist: 0.15
+    fsm.finish_yaw: 0.10
     fsm.fail_safe: true
     fsm.max_replan_fail_count: 100
     grid_map.sensor_type: lidar
@@ -46,19 +48,19 @@ scan_planner_node:
     grid_map.vis_height: 0.3
     grid_map.show_occ_time: false
 
-    manager.max_vel: 0.30
-    manager.max_acc: 0.30
-    manager.max_jerk: 3.0
+    manager.max_vel: 0.75
+    manager.max_acc: 0.5
+    manager.max_jerk: 4.0
     manager.control_points_distance: 0.20
     manager.feasibility_tolerance: 0.50
-    manager.planning_horizon: 3.5
+    manager.planning_horizon: 5.5
 
     optimization.lambda_smooth: 1.0
     optimization.lambda_collision: 1.0
     optimization.lambda_feasibility: 0.1
     optimization.lambda_fitness: 1.0
     optimization.dist0: 0.25
-    optimization.max_vel: 0.30
+    optimization.max_vel: 0.75
     optimization.vel_tolerance: 1.0
     optimization.max_acc: 0.30
     optimization.acc_tolerance: 1.0
@@ -70,7 +72,8 @@ closed_loop_controller:
     heading_error_threshold: 0.80
     kp_pos: 0.8
     kp_yaw: 1.5
-    max_vx: 0.30
-    max_vy: 0.30
-    max_vyaw: 0.50
+    max_vx: 0.75
+    max_vy: 0.35
+    max_vyaw: 1.0
     finish_dist: 0.15
+    finish_yaw: 0.10

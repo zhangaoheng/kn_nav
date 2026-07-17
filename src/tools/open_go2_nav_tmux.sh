@@ -8,7 +8,17 @@ set -euo pipefail
 
 SESSION_NAME="${SESSION_NAME:-go2_nav}"
 CONTAINER_ID="${CONTAINER_ID:-f3b82610c6d7}"
-STARTUP_WAIT="${STARTUP_WAIT:-1}"
+STARTUP_WAIT="${STARTUP_WAIT:-2}"
+
+recreate=false
+if [[ "${1:-}" == "--recreate" ]]; then
+  recreate=true
+  shift
+fi
+if (( $# != 0 )); then
+  echo "Usage: $0 [--recreate]" >&2
+  exit 2
+fi
 
 LEFT_TITLES=(livox pct_scan goal_points enable_go2)
 LEFT_COMMANDS=(
@@ -28,9 +38,23 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
+container_running="$(
+  docker inspect --format '{{.State.Running}}' "${CONTAINER_ID}" 2>/dev/null || true
+)"
+if [[ "${container_running}" != "true" ]]; then
+  echo "Docker container ${CONTAINER_ID} does not exist or is not running." >&2
+  echo "Check it with: docker ps --no-trunc" >&2
+  exit 1
+fi
+
 if tmux has-session -t "${SESSION_NAME}" 2>/dev/null; then
-  echo "Attaching to existing tmux session: ${SESSION_NAME}"
-  exec tmux attach-session -t "${SESSION_NAME}"
+  if [[ "${recreate}" == "true" ]]; then
+    tmux kill-session -t "${SESSION_NAME}"
+  else
+    echo "Attaching to existing tmux session: ${SESSION_NAME}"
+    echo "Use --recreate to discard it and build a fresh layout."
+    exec tmux attach-session -t "${SESSION_NAME}"
+  fi
 fi
 
 tmux new-session -d -s "${SESSION_NAME}" -n navigation
@@ -53,17 +77,20 @@ read -r -a left_panes <<< "$(split_column "${left_0}")"
 read -r -a right_panes <<< "$(split_column "${right_0}")"
 
 tmux set-option -t "${SESSION_NAME}" mouse on
-tmux set-option -t "${SESSION_NAME}" pane-border-status top
-tmux set-option -t "${SESSION_NAME}" pane-border-format \
+tmux set-window-option -t "${SESSION_NAME}:navigation" remain-on-exit on
+tmux set-window-option -t "${SESSION_NAME}:navigation" pane-border-status top
+tmux set-window-option -t "${SESSION_NAME}:navigation" pane-border-format \
   ' #[fg=cyan]#{pane_title} #[default]'
 
 for index in "${!left_panes[@]}"; do
   tmux select-pane -t "${left_panes[index]}" -T "${LEFT_TITLES[index]}"
   tmux select-pane -t "${right_panes[index]}" -T "host_$((index + 1))"
 
-  # Enter the container first.  C-m is Enter for this command only.
-  tmux send-keys -t "${left_panes[index]}" \
-    "docker exec -it ${CONTAINER_ID} bash" C-m
+  # Run Docker directly as the pane process instead of typing a command into
+  # an intermediate host shell.  This guarantees that each left pane is
+  # attached to the container before it receives its prepared ROS command.
+  tmux respawn-pane -k -t "${left_panes[index]}" \
+    "docker exec -it ${CONTAINER_ID} /bin/bash"
 done
 
 # Give Docker time to present the container shell, then insert the four

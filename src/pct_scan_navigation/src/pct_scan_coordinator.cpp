@@ -25,6 +25,11 @@ double distance3D(const geometry_msgs::msg::Point &a, const geometry_msgs::msg::
   return std::hypot(std::hypot(a.x - b.x, a.y - b.y), a.z - b.z);
 }
 
+double distance2D(const geometry_msgs::msg::Point &a, const geometry_msgs::msg::Point &b)
+{
+  return std::hypot(a.x - b.x, a.y - b.y);
+}
+
 class PctScanCoordinator : public rclcpp::Node
 {
 public:
@@ -38,14 +43,18 @@ public:
         declare_parameter<std::string>("waypoints_topic", "/scan_planner/waypoints");
     waypoint_spacing_ = declare_parameter<double>("waypoint_spacing", 1.0);
     waypoint_z_offset_ = declare_parameter<double>("waypoint_z_offset", 0.0);
+    goal_tolerance_ = declare_parameter<double>("goal_tolerance", 0.15);
 
     if (mode_ == 3)
       throw std::runtime_error("navigation mode 3 is not implemented");
     if (mode_ != 1 && mode_ != 2)
       throw std::runtime_error("mode must be 1 or 2");
     if (!std::isfinite(waypoint_spacing_) || waypoint_spacing_ <= 0.0 ||
-        !std::isfinite(waypoint_z_offset_))
-      throw std::runtime_error("waypoint_spacing must be positive and waypoint_z_offset finite");
+        !std::isfinite(waypoint_z_offset_) || !std::isfinite(goal_tolerance_) ||
+        goal_tolerance_ < 0.0)
+      throw std::runtime_error(
+          "waypoint_spacing must be positive; waypoint_z_offset must be finite; "
+          "goal_tolerance must be finite and non-negative");
 
     if (mode_ == 1)
     {
@@ -100,6 +109,7 @@ private:
     consumed_waypoints_ = 0;
     accumulated_distance_ = 0.0;
     route_active_ = true;
+    route_completed_ = false;
     have_route_odom_ = have_odom_;
     if (have_odom_)
       last_route_odom_ = latest_odom_;
@@ -116,8 +126,16 @@ private:
 
     latest_odom_ = message->pose.pose.position;
     have_odom_ = true;
-    if (!route_active_)
+    if (!route_active_ || route_completed_)
       return;
+
+    const auto &goal = sampled_waypoints_.poses.back().pose.position;
+    if (distance2D(latest_odom_, goal) <= goal_tolerance_)
+    {
+      route_completed_ = true;
+      RCLCPP_INFO(get_logger(), "Global waypoint goal reached; stop rolling waypoints");
+      return;
+    }
     if (!have_route_odom_)
     {
       last_route_odom_ = latest_odom_;
@@ -162,6 +180,7 @@ private:
   void clearRoute(const std::string &reason)
   {
     route_active_ = false;
+    route_completed_ = false;
     sampled_waypoints_ = nav_msgs::msg::Path();
     path_signature_ = 0;
     consumed_waypoints_ = 0;
@@ -173,7 +192,7 @@ private:
 
   int mode_{2};
   std::string global_frame_, path_topic_, odom_topic_, waypoints_topic_;
-  double waypoint_spacing_{1.0}, waypoint_z_offset_{0.0};
+  double waypoint_spacing_{1.0}, waypoint_z_offset_{0.0}, goal_tolerance_{0.15};
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr waypoints_pub_;
@@ -183,6 +202,7 @@ private:
   std::size_t consumed_waypoints_{0};
   double accumulated_distance_{0.0};
   bool have_odom_{false}, have_route_odom_{false}, route_active_{false};
+  bool route_completed_{false};
 };
 
 }  // namespace

@@ -5,6 +5,8 @@ scan_planner_node:
     fsm.thresh_no_replan: 0.1
     fsm.planning_horizon: 3.5
     fsm.emergency_time: 1.0
+    fsm.finish_dist: 0.15
+    fsm.finish_yaw: 0.10
     fsm.fail_safe: true
     fsm.max_replan_fail_count: 100
     grid_map.sensor_type: lidar
@@ -74,3 +76,4 @@ closed_loop_controller:
     max_vy: 0.30
     max_vyaw: 0.50
     finish_dist: 0.15
+    finish_yaw: 0.10

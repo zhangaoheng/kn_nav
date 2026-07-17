@@ -24,6 +24,7 @@ namespace scan_planner
     have_target_ = false;
     have_odom_ = false;
     have_new_target_ = false;
+    have_end_yaw_ = false;
     rviz_height_ready_ = false;
     go2_execution_frozen_ = false;
     flag_escape_emergency_ = true;
@@ -37,6 +38,8 @@ namespace scan_planner
     no_replan_thresh_ = load_parameter<double>(node_, "fsm.thresh_no_replan", -1.0);
     planning_horizon_ = load_parameter<double>(node_, "fsm.planning_horizon", -1.0);
     emergency_time_ = load_parameter<double>(node_, "fsm.emergency_time", 1.0);
+    finish_dist_ = load_parameter<double>(node_, "fsm.finish_dist", 0.15);
+    finish_yaw_ = load_parameter<double>(node_, "fsm.finish_yaw", 0.10);
     enable_fail_safe_ = load_parameter<bool>(node_, "fsm.fail_safe", true);
     max_replan_fail_count_ = load_parameter<int>(node_, "fsm.max_replan_fail_count", 1000);
     self_inflation_z_up_ = load_parameter<double>(node_, "grid_map.obstacles_inflation_z_up", 0.0);
@@ -115,6 +118,7 @@ namespace scan_planner
     cout << "Triggered!" << endl;
     trigger_ = true;
     init_pt_ = odom_pos_;
+    updateGoalYaw(msg->poses[0].pose.orientation, "RViz goal");
 
     bool success = false;
     end_pt_ << msg->poses[0].pose.position.x, msg->poses[0].pose.position.y, rviz_goal_height_;
@@ -293,6 +297,7 @@ namespace scan_planner
 
     trigger_ = true;
     init_pt_ = odom_pos_;
+    updateGoalYaw(path.poses.back().pose.orientation, label);
     active_waypoints_ = waypoints;
     if (!planGlobalTrajByWaypoints(waypoints))
     {
@@ -317,6 +322,7 @@ namespace scan_planner
     trigger_ = false;
     replan_fail_count_ = 0;
     need_hover_stop_ = false;
+    have_end_yaw_ = false;
     if (have_odom_)
       callEmergencyStop(odom_pos_);
     changeFSMExecState(WAIT_TARGET, "WAYPOINT_CANCEL");
@@ -382,6 +388,39 @@ namespace scan_planner
     if (heading.head<2>().squaredNorm() < 1e-8)
       return 0.0;
     return std::atan2(heading(1), heading(0));
+  }
+
+  void SCANReplanFSM::updateGoalYaw(const geometry_msgs::msg::Quaternion &orientation,
+                                    const std::string &label)
+  {
+    const double norm = std::hypot(std::hypot(orientation.x, orientation.y),
+                                   std::hypot(orientation.z, orientation.w));
+    if (!std::isfinite(norm) || norm < 1e-6)
+    {
+      have_end_yaw_ = false;
+      RCLCPP_WARN(node_->get_logger(), "%s has invalid orientation; use position-only finish",
+                  label.c_str());
+      return;
+    }
+
+    const double x = orientation.x / norm;
+    const double y = orientation.y / norm;
+    const double z = orientation.z / norm;
+    const double w = orientation.w / norm;
+    end_yaw_ = std::atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z));
+    have_end_yaw_ = std::isfinite(end_yaw_);
+  }
+
+  bool SCANReplanFSM::goalReached() const
+  {
+    if ((odom_pos_ - end_pt_).head<2>().norm() > finish_dist_)
+      return false;
+    if (!have_end_yaw_)
+      return true;
+
+    const double yaw_error = std::atan2(std::sin(end_yaw_ - getOdomYaw()),
+                                        std::cos(end_yaw_ - getOdomYaw()));
+    return std::abs(yaw_error) <= finish_yaw_;
   }
 
   double SCANReplanFSM::estimateYawFromSegment(const Eigen::Vector3d &from, const Eigen::Vector3d &to) const
@@ -564,8 +603,17 @@ namespace scan_planner
       /* && (end_pt_ - pos).norm() < 0.5 */
       if (t_cur > info->duration_ - 1e-2)
       {
+        if ((odom_pos_ - end_pt_).head<2>().norm() > finish_dist_)
+        {
+          changeFSMExecState(REPLAN_TRAJ, "FSM");
+          return;
+        }
+        if (!goalReached())
+          return;
+
         active_waypoints_.clear();
         have_target_ = false;
+        have_end_yaw_ = false;
 
         changeFSMExecState(WAIT_TARGET, "FSM");
         return;
@@ -796,6 +844,9 @@ namespace scan_planner
       {
         bspline.knots.push_back(knots(i));
       }
+
+      if (have_end_yaw_)
+        bspline.yaw_pts.push_back(end_yaw_);
 
       bspline_pub_->publish(bspline);
 
