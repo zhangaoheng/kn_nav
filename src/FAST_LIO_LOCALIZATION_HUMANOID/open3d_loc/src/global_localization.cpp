@@ -832,8 +832,12 @@ bool GloabalLocalization::LocalizationInitialize()
         return false;
     }
 
-    RCLCPP_INFO(this->get_logger(), "\n---------------------------------------------------------");
-    RCLCPP_INFO(this->get_logger(), "localization initialize success");
+    RCLCPP_INFO(this->get_logger(), "\n---------------------------------------------------------\n");
+    RCLCPP_INFO(this->get_logger(), "---------------------------------------------------------\n");
+    RCLCPP_INFO(this->get_logger(), "---------------------------------------------------------\n");
+    RCLCPP_INFO(this->get_logger(), "localization initialize success\n");
+    RCLCPP_INFO(this->get_logger(), "---------------------------------------------------------\n");
+    RCLCPP_INFO(this->get_logger(), "---------------------------------------------------------\n");
     RCLCPP_INFO(this->get_logger(), "---------------------------------------------------------\n");
 
     return true;
