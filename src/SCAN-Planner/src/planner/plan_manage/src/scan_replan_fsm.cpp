@@ -639,7 +639,8 @@ namespace scan_planner
 
     case FINAL_YAW_ALIGN:
     {
-      if ((odom_pos_ - end_pt_).head<2>().norm() > finish_dist_)
+      const double position_error = (odom_pos_ - end_pt_).head<2>().norm();
+      if (position_error > finish_dist_ + no_replan_thresh_)
       {
         changeFSMExecState(REPLAN_TRAJ, "FSM");
         return;
