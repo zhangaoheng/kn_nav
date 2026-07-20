@@ -37,6 +37,11 @@ def _workspace_log_root():
 
 
 def _prepare_log_directory(context):
+    # launch configures its console log before executing this OpaqueFunction.
+    # Preserve that path so stdout/stderr (including std::cout and printf) can
+    # be reached from the per-run workspace log directory as well.
+    launch_log_file = Path(launch.logging.launch_config.log_dir).resolve() / 'launch.log'
+
     log_root = _workspace_log_root()
     log_root.mkdir(parents=True, exist_ok=True)
 
@@ -46,6 +51,18 @@ def _prepare_log_directory(context):
         suffix += 1
         run_dir = log_root / f"{time.strftime('run_%Y%m%d_%H%M%S')}_{suffix}"
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    console_log_link = run_dir / 'launch.log'
+    try:
+        # The target may not exist yet; launch creates/writes it as processes
+        # start, and the symlink becomes usable immediately afterwards.
+        console_log_link.symlink_to(launch_log_file)
+        print(
+            f"[pct_scan_navigation] Full console log: "
+            f"{console_log_link} -> {launch_log_file}"
+        )
+    except OSError as error:
+        print(f"[pct_scan_navigation] Unable to link full console log: {error}")
 
     runs = sorted(
         [path for path in log_root.iterdir() if path.is_dir() and path.name.startswith('run_')],

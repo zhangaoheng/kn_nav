@@ -121,6 +121,7 @@ def test_goal_completion_is_latched_without_new_status_topics():
     controller = (SCAN_MANAGE / 'src/closed_loop_controller.cpp').read_text()
     assert 'route_completed_' in coordinator
     assert 'goalReached()' in fsm
+    assert 'position_error > finish_dist_ + no_replan_thresh_' in fsm
     assert 'bspline.yaw_pts.push_back(end_yaw_)' in fsm
     assert 'task_completed_' in controller
     assert 'final_yaw_ - odom_yaw_' in controller
