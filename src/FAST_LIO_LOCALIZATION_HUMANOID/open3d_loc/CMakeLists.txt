@@ -110,6 +110,8 @@ include_directories(
 rosidl_generate_interfaces(${PROJECT_NAME}
         "srv/Relocalize.srv"
         "srv/PoseDeviation.srv"
+        "srv/GetPose.srv"
+        "srv/PublishGoal.srv"
         DEPENDENCIES geometry_msgs
 )
 

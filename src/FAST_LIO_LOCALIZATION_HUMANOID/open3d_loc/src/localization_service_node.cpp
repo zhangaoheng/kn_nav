@@ -6,17 +6,20 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 
 #include <geometry_msgs/msg/pose.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
-#include <std_msgs/msg/float32.hpp>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
 
+#include "open3d_loc/srv/get_pose.hpp"
 #include "open3d_loc/srv/pose_deviation.hpp"
+#include "open3d_loc/srv/publish_goal.hpp"
 #include "open3d_loc/srv/relocalize.hpp"
 
 class LocalizationServiceNode : public rclcpp::Node
@@ -26,15 +29,17 @@ public:
     {
         this->declare_parameter<std::string>("initialpose_topic", "/initialpose");
         this->declare_parameter<std::string>("current_pose_topic", "/Odometry_open3d");
-        this->declare_parameter<std::string>("confidence_topic", "/localization_3d_confidence");
-        this->declare_parameter<double>("default_timeout_sec", 10.0);
-        this->declare_parameter<double>("default_min_confidence", 0.5);
+        this->declare_parameter<std::string>("goal_topic", "/goal_pose");
+        this->declare_parameter<double>("relocalize_timeout_sec", 10.0);
 
         this->get_parameter("initialpose_topic", initialpose_topic_);
         this->get_parameter("current_pose_topic", current_pose_topic_);
-        this->get_parameter("confidence_topic", confidence_topic_);
-        this->get_parameter("default_timeout_sec", default_timeout_sec_);
-        this->get_parameter("default_min_confidence", default_min_confidence_);
+        this->get_parameter("goal_topic", goal_topic_);
+        this->get_parameter("relocalize_timeout_sec", relocalize_timeout_sec_);
+        if (!std::isfinite(relocalize_timeout_sec_) || relocalize_timeout_sec_ <= 0.0)
+        {
+            throw std::invalid_argument("relocalize_timeout_sec must be finite and positive");
+        }
 
         subscription_group_ = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
         service_group_ = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
@@ -44,13 +49,10 @@ public:
 
         initialpose_pub_ =
             this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(initialpose_topic_, 10);
+        goal_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(goal_topic_, 10);
         current_pose_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
             current_pose_topic_, 20,
             std::bind(&LocalizationServiceNode::currentPoseCallback, this, std::placeholders::_1),
-            sub_options);
-        confidence_sub_ = this->create_subscription<std_msgs::msg::Float32>(
-            confidence_topic_, 20,
-            std::bind(&LocalizationServiceNode::confidenceCallback, this, std::placeholders::_1),
             sub_options);
 
         relocalize_srv_ = this->create_service<open3d_loc::srv::Relocalize>(
@@ -63,10 +65,22 @@ public:
             std::bind(&LocalizationServiceNode::handlePoseDeviation, this,
                       std::placeholders::_1, std::placeholders::_2),
             rmw_qos_profile_services_default, service_group_);
+        get_pose_srv_ = this->create_service<open3d_loc::srv::GetPose>(
+            "/open3d_loc/get_pose",
+            std::bind(&LocalizationServiceNode::handleGetPose, this,
+                      std::placeholders::_1, std::placeholders::_2),
+            rmw_qos_profile_services_default, service_group_);
+        publish_goal_srv_ = this->create_service<open3d_loc::srv::PublishGoal>(
+            "/open3d_loc/publish_goal",
+            std::bind(&LocalizationServiceNode::handlePublishGoal, this,
+                      std::placeholders::_1, std::placeholders::_2),
+            rmw_qos_profile_services_default, service_group_);
 
         RCLCPP_INFO(this->get_logger(),
-                    "localization services ready: relocalize=/open3d_loc/relocalize, pose_deviation=/open3d_loc/pose_deviation, current_pose_topic=%s, confidence_topic=%s",
-                    current_pose_topic_.c_str(), confidence_topic_.c_str());
+                    "navigation services ready: relocalize=/open3d_loc/relocalize, "
+                    "get_pose=/open3d_loc/get_pose, publish_goal=/open3d_loc/publish_goal, "
+                    "pose_deviation=/open3d_loc/pose_deviation, current_pose_topic=%s, goal_topic=%s",
+                    current_pose_topic_.c_str(), goal_topic_.c_str());
     }
 
 private:
@@ -79,11 +93,8 @@ private:
     struct PoseSnapshot
     {
         bool pose_valid = false;
-        bool confidence_valid = false;
         geometry_msgs::msg::Pose pose;
-        double confidence = 0.0;
         uint64_t pose_count = 0;
-        uint64_t confidence_count = 0;
     };
 
     struct Deviation
@@ -201,32 +212,31 @@ private:
         std::lock_guard<std::mutex> lock(state_mutex_);
         PoseSnapshot snapshot;
         snapshot.pose_valid = current_pose_valid_;
-        snapshot.confidence_valid = confidence_valid_;
         snapshot.pose = current_pose_;
-        snapshot.confidence = confidence_;
         snapshot.pose_count = pose_update_count_;
-        snapshot.confidence_count = confidence_update_count_;
         return snapshot;
     }
 
     void currentPoseCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
     {
+        ReferencePose normalized;
+        std::string message;
+        const auto &position = msg->pose.pose.position;
+        const auto &orientation = msg->pose.pose.orientation;
+        if (!buildReference(position.x, position.y, position.z,
+                            orientation.x, orientation.y, orientation.z, orientation.w,
+                            normalized, message))
+        {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                 "ignore invalid /Odometry_open3d pose: %s", message.c_str());
+            return;
+        }
+
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            current_pose_ = msg->pose.pose;
+            current_pose_ = normalized.pose;
             current_pose_valid_ = true;
             ++pose_update_count_;
-        }
-        state_cv_.notify_all();
-    }
-
-    void confidenceCallback(const std_msgs::msg::Float32::SharedPtr msg)
-    {
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            confidence_ = static_cast<double>(msg->data);
-            confidence_valid_ = true;
-            ++confidence_update_count_;
         }
         state_cv_.notify_all();
     }
@@ -262,28 +272,6 @@ private:
         response.message = "ok";
     }
 
-    bool fillRelocalizeDeviation(const PoseSnapshot &snapshot, const ReferencePose &reference,
-                                  open3d_loc::srv::Relocalize::Response &response)
-    {
-        response.current_pose = snapshot.pose;
-        response.confidence = snapshot.confidence;
-        Deviation deviation;
-        std::string message;
-        if (!computeDeviation(reference, snapshot.pose, deviation, message))
-        {
-            response.success = false;
-            response.message = message;
-            return false;
-        }
-
-        response.error_x = deviation.error_x;
-        response.error_y = deviation.error_y;
-        response.distance_xy = deviation.distance_xy;
-        response.yaw_error_rad = deviation.yaw_error_rad;
-        response.yaw_error_deg = deviation.yaw_error_deg;
-        return true;
-    }
-
     void handleRelocalize(const std::shared_ptr<open3d_loc::srv::Relocalize::Request> request,
                           std::shared_ptr<open3d_loc::srv::Relocalize::Response> response)
     {
@@ -307,69 +295,30 @@ private:
             return;
         }
 
-        const double timeout_sec =
-            request->timeout_sec > 0.0 ? request->timeout_sec : default_timeout_sec_;
-        const double min_confidence =
-            request->min_confidence > 0.0 ? request->min_confidence : default_min_confidence_;
-
-        PoseSnapshot start_snapshot = getSnapshot();
+        std::uint64_t start_pose_count = 0;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            start_pose_count = pose_update_count_;
+            current_pose_valid_ = false;
+        }
         publishInitialPose(reference);
 
         const auto timeout = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-            std::chrono::duration<double>(timeout_sec));
+            std::chrono::duration<double>(relocalize_timeout_sec_));
         const auto deadline = std::chrono::steady_clock::now() + timeout;
 
-        PoseSnapshot latest_snapshot;
         bool success = false;
         {
             std::unique_lock<std::mutex> lock(state_mutex_);
-            while (std::chrono::steady_clock::now() < deadline)
-            {
-                const bool got_new_pose = current_pose_valid_ &&
-                                          pose_update_count_ > start_snapshot.pose_count;
-                const bool got_new_confidence = confidence_valid_ &&
-                                                confidence_update_count_ > start_snapshot.confidence_count;
-                if (got_new_pose && got_new_confidence && confidence_ >= min_confidence)
-                {
-                    latest_snapshot.pose_valid = current_pose_valid_;
-                    latest_snapshot.confidence_valid = confidence_valid_;
-                    latest_snapshot.pose = current_pose_;
-                    latest_snapshot.confidence = confidence_;
-                    latest_snapshot.pose_count = pose_update_count_;
-                    latest_snapshot.confidence_count = confidence_update_count_;
-                    success = true;
-                    break;
-                }
-                state_cv_.wait_until(lock, deadline);
-            }
-
-            if (!success)
-            {
-                latest_snapshot.pose_valid = current_pose_valid_;
-                latest_snapshot.confidence_valid = confidence_valid_;
-                latest_snapshot.pose = current_pose_;
-                latest_snapshot.confidence = confidence_;
-                latest_snapshot.pose_count = pose_update_count_;
-                latest_snapshot.confidence_count = confidence_update_count_;
-            }
+            success = state_cv_.wait_until(lock, deadline, [this, start_pose_count]() {
+                return current_pose_valid_ && pose_update_count_ > start_pose_count;
+            });
         }
 
-        if (!latest_snapshot.pose_valid)
-        {
-            response->success = false;
-            response->confidence = latest_snapshot.confidence;
-            response->message = "timeout waiting for /Odometry_open3d";
-            return;
-        }
-
-        if (!fillRelocalizeDeviation(latest_snapshot, reference, *response))
-        {
-            return;
-        }
         if (!success)
         {
             response->success = false;
-            response->message = "timeout waiting for relocalization result with required confidence";
+            response->message = "timeout waiting for relocalization result on /Odometry_open3d";
             return;
         }
 
@@ -402,28 +351,92 @@ private:
         fillDeviationResponse(snapshot, reference, *response);
     }
 
+    void handleGetPose(const std::shared_ptr<open3d_loc::srv::GetPose::Request>,
+                       std::shared_ptr<open3d_loc::srv::GetPose::Response> response)
+    {
+        if (relocalize_running_.load())
+        {
+            response->success = false;
+            response->message = "relocalization is running";
+            return;
+        }
+
+        PoseSnapshot snapshot = getSnapshot();
+        if (!snapshot.pose_valid)
+        {
+            response->success = false;
+            response->message = "no current base_link pose from /Odometry_open3d";
+            return;
+        }
+
+        ReferencePose normalized;
+        std::string message;
+        const auto &position = snapshot.pose.position;
+        const auto &orientation = snapshot.pose.orientation;
+        if (!buildReference(position.x, position.y, position.z,
+                            orientation.x, orientation.y, orientation.z, orientation.w,
+                            normalized, message))
+        {
+            response->success = false;
+            response->message = "invalid pose from /Odometry_open3d: " + message;
+            return;
+        }
+
+        response->success = true;
+        response->x = normalized.pose.position.x;
+        response->y = normalized.pose.position.y;
+        response->z = normalized.pose.position.z;
+        response->qx = normalized.pose.orientation.x;
+        response->qy = normalized.pose.orientation.y;
+        response->qz = normalized.pose.orientation.z;
+        response->qw = normalized.pose.orientation.w;
+        response->message = "ok";
+    }
+
+    void handlePublishGoal(const std::shared_ptr<open3d_loc::srv::PublishGoal::Request> request,
+                           std::shared_ptr<open3d_loc::srv::PublishGoal::Response> response)
+    {
+        ReferencePose goal;
+        std::string message;
+        if (!buildReference(request->x, request->y, request->z,
+                            request->qx, request->qy, request->qz, request->qw,
+                            goal, message))
+        {
+            response->success = false;
+            response->message = message;
+            return;
+        }
+
+        geometry_msgs::msg::PoseStamped goal_message;
+        goal_message.header.frame_id = "map";
+        goal_message.header.stamp = this->now();
+        goal_message.pose = goal.pose;
+        goal_pub_->publish(goal_message);
+
+        response->success = true;
+        response->message = "goal published on " + goal_topic_;
+    }
+
     std::string initialpose_topic_;
     std::string current_pose_topic_;
-    std::string confidence_topic_;
-    double default_timeout_sec_ = 10.0;
-    double default_min_confidence_ = 0.5;
+    std::string goal_topic_;
+    double relocalize_timeout_sec_ = 10.0;
 
     rclcpp::CallbackGroup::SharedPtr subscription_group_;
     rclcpp::CallbackGroup::SharedPtr service_group_;
     rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initialpose_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr current_pose_sub_;
-    rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr confidence_sub_;
     rclcpp::Service<open3d_loc::srv::Relocalize>::SharedPtr relocalize_srv_;
     rclcpp::Service<open3d_loc::srv::PoseDeviation>::SharedPtr pose_deviation_srv_;
+    rclcpp::Service<open3d_loc::srv::GetPose>::SharedPtr get_pose_srv_;
+    rclcpp::Service<open3d_loc::srv::PublishGoal>::SharedPtr publish_goal_srv_;
 
     std::mutex state_mutex_;
     std::condition_variable state_cv_;
     geometry_msgs::msg::Pose current_pose_;
     bool current_pose_valid_ = false;
-    double confidence_ = 0.0;
-    bool confidence_valid_ = false;
     uint64_t pose_update_count_ = 0;
-    uint64_t confidence_update_count_ = 0;
     std::atomic_bool relocalize_running_{false};
 };
 

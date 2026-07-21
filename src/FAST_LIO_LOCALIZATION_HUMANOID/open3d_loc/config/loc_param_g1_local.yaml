@@ -36,6 +36,5 @@ localization_service_node:
   ros__parameters:
     initialpose_topic: "/initialpose"
     current_pose_topic: "/Odometry_open3d"
-    confidence_topic: "/localization_3d_confidence"
-    default_timeout_sec: 10.0
-    default_min_confidence: 0.5
+    goal_topic: "/goal_pose"
+    relocalize_timeout_sec: 10.0
