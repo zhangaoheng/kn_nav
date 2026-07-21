@@ -24,11 +24,12 @@ scan_planner_node:
     grid_map.local_update_range_z: 3.0
     grid_map.map_sliding_en: true
     grid_map.map_sliding_thresh: 0.2
+
     grid_map.double_cylinder_radius: 0.28
     grid_map.double_cylinder_offset: 0.23
     grid_map.body_height: 0.4
     grid_map.obstacles_inflation_z_up: 0.1
-    grid_map.obstacles_inflation_z_down: 0.4
+    grid_map.obstacles_inflation_z_down: 0.57
 
     grid_map.cx: 317.19183349609375
     grid_map.cy: 256.4806823730469
@@ -72,8 +73,8 @@ closed_loop_controller:
     heading_error_threshold: 0.80
     kp_pos: 0.8
     kp_yaw: 1.5
-    max_vx: 0.75
-    max_vy: 0.35
+    max_vx: 1.0
+    max_vy: 0.4
     max_vyaw: 1.0
     finish_dist: 0.15
     finish_yaw: 0.10

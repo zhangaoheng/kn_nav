@@ -13,12 +13,18 @@ global_localization_node:
     fitness_eval_threshold: 0.15
     normal_search_radius: 0.4
 
+    # 跟踪定位的icp阈值，越小越容易接受本次icp结果
     threshold_fitness: 0.7
-    threshold_fitness_init: 0.7
 
+    # 初始冲定位的icp阈值，越小越容易接受本次icp结果
+    threshold_fitness_init: 0.7
+    # 单次icp的最大位移距离
     max_icp_translation: 0.4
+    # 单次icp的最大旋转角度
     max_icp_yaw_deg: 2.0
+    # 初始冲定位的最大位移距离
     max_init_icp_translation: 2.0
+    # 初始冲定位的最大旋转角度
     max_init_icp_yaw_deg: 20.0
     min_init_fitness_improvement: 0.02
     min_source_points: 500

@@ -42,6 +42,29 @@ SCAN 默认使用 `0.15` m 位置容差和 `0.10` rad 朝向容差。
 
 Mode 3 尚未实现，选择 `navigation_mode:=3` 会使启动立即失败并关闭导航。
 
+## Navigation services
+
+使用 `map` 下的 XYZ 和四元数触发重定位。服务会等待新的
+`/Odometry_open3d`，默认最多等待 10 秒：
+
+```bash
+ros2 service call /open3d_loc/relocalize open3d_loc/srv/Relocalize \
+  "{x: 1.0, y: 2.0, z: 0.4, qx: 0.0, qy: 0.0, qz: 0.0, qw: 1.0}"
+```
+
+获取 `base_link` 在 `map` 下的最新位姿：
+
+```bash
+ros2 service call /open3d_loc/get_pose open3d_loc/srv/GetPose "{}"
+```
+
+向 `/goal_pose` 发布一个导航点。返回成功仅表示消息已经发布，不表示导航完成：
+
+```bash
+ros2 service call /open3d_loc/publish_goal open3d_loc/srv/PublishGoal \
+  "{x: 3.0, y: 1.0, z: 0.4, qx: 0.0, qy: 0.0, qz: 0.0, qw: 1.0}"
+```
+
 ## Robot profiles
 
 配置位于 `config/local`、`config/unitree_go2` 和 `config/unitree_go2w`。

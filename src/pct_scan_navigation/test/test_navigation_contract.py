@@ -5,6 +5,9 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 SCAN_MANAGE = ROOT.parent / 'SCAN-Planner' / 'src' / 'planner' / 'plan_manage'
+OPEN3D_LOC = (
+    ROOT.parent / 'FAST_LIO_LOCALIZATION_HUMANOID' / 'open3d_loc'
+)
 
 
 def load(profile, name):
@@ -80,6 +83,59 @@ def test_robot_launches_forward_navigation_mode():
         assert "DeclareLaunchArgument('navigation_mode', default_value='2')" in text
         assert "'navigation_mode': LaunchConfiguration('navigation_mode')" in text
         assert f"'config_profile': '{robot}'" in text
+
+
+def test_navigation_service_interfaces_are_minimal_and_direct():
+    expected = {
+        'Relocalize.srv': [
+            'float64 x', 'float64 y', 'float64 z',
+            'float64 qx', 'float64 qy', 'float64 qz', 'float64 qw',
+            '---', 'bool success', 'string message',
+        ],
+        'GetPose.srv': [
+            '---', 'bool success',
+            'float64 x', 'float64 y', 'float64 z',
+            'float64 qx', 'float64 qy', 'float64 qz', 'float64 qw',
+            'string message',
+        ],
+        'PublishGoal.srv': [
+            'float64 x', 'float64 y', 'float64 z',
+            'float64 qx', 'float64 qy', 'float64 qz', 'float64 qw',
+            '---', 'bool success', 'string message',
+        ],
+    }
+    for name, fields in expected.items():
+        text = (OPEN3D_LOC / 'srv' / name).read_text()
+        assert [line.strip() for line in text.splitlines() if line.strip()] == fields
+
+    cmake = (OPEN3D_LOC / 'CMakeLists.txt').read_text()
+    for name in expected:
+        assert f'"srv/{name}"' in cmake
+
+
+def test_navigation_service_node_uses_pose_topics_without_confidence():
+    source = (OPEN3D_LOC / 'src/localization_service_node.cpp').read_text()
+    for service_name in (
+        '/open3d_loc/relocalize',
+        '/open3d_loc/get_pose',
+        '/open3d_loc/publish_goal',
+        '/open3d_loc/pose_deviation',
+    ):
+        assert service_name in source
+    assert 'current_pose_valid_ = false' in source
+    assert 'pose_update_count_ > start_pose_count' in source
+    assert 'goal_message.header.frame_id = "map"' in source
+    assert 'confidence_topic' not in source
+    assert 'min_confidence' not in source
+
+    for profile in ('A2', 'local', 'unitree_go2', 'unitree_go2w'):
+        params = load(profile, 'open3d_loc.yaml')['localization_service_node']['ros__parameters']
+        assert params == {
+            'initialpose_topic': '/initialpose',
+            'current_pose_topic': '/Odometry_open3d',
+            'goal_topic': '/goal_pose',
+            'relocalize_timeout_sec': 10.0,
+        }
 
 
 def test_old_task_protocol_and_status_interface_are_removed():
