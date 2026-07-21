@@ -26,10 +26,10 @@ scan_planner_node:
     grid_map.map_sliding_thresh: 0.2
 
     grid_map.double_cylinder_radius: 0.28
-    grid_map.double_cylinder_offset: 0.23
+    grid_map.double_cylinder_offset: 0.44
     grid_map.body_height: 0.4
-    grid_map.obstacles_inflation_z_up: 0.1
-    grid_map.obstacles_inflation_z_down: 0.57
+    grid_map.obstacles_inflation_z_up: 0.27
+    grid_map.obstacles_inflation_z_down: 0.44
 
     grid_map.cx: 317.19183349609375
     grid_map.cy: 256.4806823730469
