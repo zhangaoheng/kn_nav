@@ -22,7 +22,7 @@ def generate_launch_description():
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(base_launch),
             launch_arguments={
-                'config_profile': 'unitree_go2w',
+                'config_profile': 'A2',
                 'navigation_mode': LaunchConfiguration('navigation_mode'),
                 'start_go2_bridge': 'true',
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
