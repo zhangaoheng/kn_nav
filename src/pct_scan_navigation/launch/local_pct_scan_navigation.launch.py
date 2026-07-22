@@ -102,7 +102,8 @@ def generate_launch_description():
     navigation_mode = LaunchConfiguration('navigation_mode')
     navigation_mode_value = ParameterValue(navigation_mode, value_type=int)
 
-    navigation_share = FindPackageShare('pct_scan_navigation')
+    # navigation_share = FindPackageShare('pct_scan_navigation')
+    navigation_share = '/home/nav_map'
 
     def navigation_config(name):
         return PathJoinSubstitution([navigation_share, 'config', config_profile, name])
