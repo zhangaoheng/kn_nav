@@ -18,8 +18,10 @@ import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import hmac
+import json
 import math
 import os
+from pathlib import Path
 import threading
 from typing import Any, Dict, Optional
 
@@ -40,6 +42,7 @@ class Settings:
     port: int = 8000
     service_timeout: float = 30.0
     service_wait_timeout: float = 1.0
+    points_file: str = str(Path(__file__).with_name("goal_points.json"))
     api_key: str = ""
 
     @classmethod
@@ -50,6 +53,10 @@ class Settings:
             service_timeout=float(os.environ.get("KN_NAV_SERVICE_TIMEOUT", "30.0")),
             service_wait_timeout=float(
                 os.environ.get("KN_NAV_SERVICE_WAIT_TIMEOUT", "1.0")
+            ),
+            points_file=os.environ.get(
+                "KN_NAV_POINTS_FILE",
+                str(Path(__file__).with_name("goal_points.json")),
             ),
             api_key=os.environ.get("KN_NAV_API_KEY", ""),
         )
@@ -67,11 +74,17 @@ class QuaternionPose(BaseModel):
     qw: float = 1.0
 
 
-class NavigationGoal(BaseModel):
-    """Convenient planar navigation target for HTTP clients."""
+class SavePointRequest(BaseModel):
+    name: str = Field(..., description="Unique navigation point name")
+    overwrite: bool = Field(False, description="Replace an existing point")
 
-    x: float = Field(..., description="Map-frame X position in metres")
-    y: float = Field(..., description="Map-frame Y position in metres")
+
+class NavigationGoalRequest(BaseModel):
+    """A saved point name, or a direct planar map-frame goal."""
+
+    name: Optional[str] = Field(None, description="Saved navigation point name")
+    x: Optional[float] = Field(None, description="Map-frame X position in metres")
+    y: Optional[float] = Field(None, description="Map-frame Y position in metres")
     z: float = Field(0.0, description="Map-frame Z position in metres")
     yaw: float = Field(0.0, description="Target yaw in radians")
 
@@ -104,28 +117,110 @@ def _fill_pose_request(request: Any, pose: QuaternionPose) -> None:
         setattr(request, name, float(value))
 
 
-def _pose_to_dict(pose: Any) -> Dict[str, Any]:
-    orientation = pose.orientation
-    siny_cosp = 2.0 * (
-        orientation.w * orientation.z + orientation.x * orientation.y
-    )
-    cosy_cosp = 1.0 - 2.0 * (
-        orientation.y * orientation.y + orientation.z * orientation.z
-    )
+def _quaternion_to_rpy(
+    qx: float, qy: float, qz: float, qw: float
+) -> Dict[str, float]:
+    sinr_cosp = 2.0 * (qw * qx + qy * qz)
+    cosr_cosp = 1.0 - 2.0 * (qx * qx + qy * qy)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+
+    sinp = 2.0 * (qw * qy - qz * qx)
+    if abs(sinp) >= 1.0:
+        pitch = math.copysign(math.pi / 2.0, sinp)
+    else:
+        pitch = math.asin(sinp)
+
+    siny_cosp = 2.0 * (qw * qz + qx * qy)
+    cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
     return {
-        "position": {
-            "x": pose.position.x,
-            "y": pose.position.y,
-            "z": pose.position.z,
-        },
-        "orientation": {
-            "qx": orientation.x,
-            "qy": orientation.y,
-            "qz": orientation.z,
-            "qw": orientation.w,
-        },
+        "roll": roll,
+        "pitch": pitch,
         "yaw": math.atan2(siny_cosp, cosy_cosp),
     }
+
+
+def _normalise_point_name(name: str) -> str:
+    normalised = name.strip()
+    if not normalised:
+        raise HTTPException(status_code=422, detail="Point name must not be empty")
+    if len(normalised) > 128:
+        raise HTTPException(
+            status_code=422, detail="Point name must not exceed 128 characters"
+        )
+    if any(ord(character) < 32 for character in normalised):
+        raise HTTPException(
+            status_code=422, detail="Point name must not contain control characters"
+        )
+    return normalised
+
+
+class NavigationPointStore:
+    """Thread-safe JSON storage compatible with goal_points_cli.py."""
+
+    def __init__(self, file_path: str):
+        self.path = Path(file_path).expanduser().resolve()
+        self._lock = threading.Lock()
+
+    def _load_unlocked(self) -> Dict[str, Dict[str, Any]]:
+        if not self.path.exists():
+            return {}
+        try:
+            with self.path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError) as error:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Unable to read navigation points file: {error}",
+            ) from error
+        if not isinstance(data, dict):
+            raise HTTPException(
+                status_code=500,
+                detail="Navigation points file must contain a JSON object",
+            )
+        invalid = [name for name, point in data.items() if not isinstance(point, dict)]
+        if invalid:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Navigation points must be JSON objects; invalid entries: "
+                    + ", ".join(str(name) for name in invalid)
+                ),
+            )
+        return data
+
+    def list_points(self) -> Dict[str, Dict[str, Any]]:
+        with self._lock:
+            points = self._load_unlocked()
+            return {name: dict(points[name]) for name in sorted(points)}
+
+    def get_point(self, name: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            point = self._load_unlocked().get(name)
+            return dict(point) if isinstance(point, dict) else None
+
+    def save_point(
+        self, name: str, point: Dict[str, Any], overwrite: bool
+    ) -> None:
+        with self._lock:
+            points = self._load_unlocked()
+            if name in points and not overwrite:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Navigation point already exists: {name}",
+                )
+            points[name] = point
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+                with temporary.open("w", encoding="utf-8") as handle:
+                    json.dump(points, handle, indent=2, sort_keys=True)
+                    handle.write("\n")
+                temporary.replace(self.path)
+            except OSError as error:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Unable to write navigation points file: {error}",
+                ) from error
 
 
 class RosServiceGateway:
@@ -135,19 +230,17 @@ class RosServiceGateway:
         "relocalize": "/open3d_loc/relocalize",
         "get_pose": "/open3d_loc/get_pose",
         "publish_goal": "/open3d_loc/publish_goal",
-        "pose_deviation": "/open3d_loc/pose_deviation",
-        "map_save": "/map_save",
         "bridge_enable": "/go2_cmd_vel_bridge/enable",
     }
 
     def __init__(self, settings: Settings):
         try:
             import rclpy
-            from open3d_loc.srv import GetPose, PoseDeviation, PublishGoal, Relocalize
+            from open3d_loc.srv import GetPose, PublishGoal, Relocalize
             from rclpy.context import Context
             from rclpy.executors import SingleThreadedExecutor
             from rclpy.node import Node
-            from std_srvs.srv import SetBool, Trigger
+            from std_srvs.srv import SetBool
         except ImportError as error:
             raise RuntimeError(
                 "ROS 2 Python interfaces are unavailable. Source /opt/ros/humble/"
@@ -174,8 +267,6 @@ class RosServiceGateway:
             "relocalize": Relocalize,
             "get_pose": GetPose,
             "publish_goal": PublishGoal,
-            "pose_deviation": PoseDeviation,
-            "map_save": Trigger,
             "bridge_enable": SetBool,
         }
         self.clients = {
@@ -265,6 +356,7 @@ def create_app(settings: Settings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         gateway = RosServiceGateway(settings)
+        application.state.point_store = NavigationPointStore(settings.points_file)
         gateway.start()
         application.state.ros_gateway = gateway
         try:
@@ -274,16 +366,20 @@ def create_app(settings: Settings) -> FastAPI:
 
     application = FastAPI(
         title="KN Navigation ROS 2 Service API",
-        version="1.0.0",
+        version="2.0.0",
         description=(
-            "HTTP facade for the navigation services documented in src/service.md. "
-            "All poses use the map coordinate frame and yaw values use radians."
+            "Five core APIs: relocalize, save a navigation point, publish a goal, "
+            "enable the velocity bridge, and list saved navigation points. "
+            "All poses use the map frame and yaw values use radians."
         ),
         lifespan=lifespan,
     )
 
     def gateway() -> RosServiceGateway:
         return application.state.ros_gateway
+
+    def point_store() -> NavigationPointStore:
+        return application.state.point_store
 
     def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
         if settings.api_key and (
@@ -300,6 +396,13 @@ def create_app(settings: Settings) -> FastAPI:
             "name": "KN Navigation ROS 2 Service API",
             "docs": "/docs",
             "health": "/api/health",
+            "functions": [
+                "relocalize",
+                "save_navigation_point",
+                "publish_navigation_goal",
+                "enable_velocity_bridge",
+                "list_navigation_points",
+            ],
         }
 
     @router.get("/health", tags=["system"], summary="Check ROS gateway health")
@@ -313,49 +416,10 @@ def create_app(settings: Settings) -> FastAPI:
         status = ros.status()
         return {"success": status["success"], "services": status["services"]}
 
-    async def call_publish_goal(
-        pose: QuaternionPose, ros: RosServiceGateway
-    ) -> Dict[str, Any]:
-        request = ros.request("publish_goal")
-        _fill_pose_request(request, pose)
-        response = await ros.call("publish_goal", request)
-        return {"success": response.success, "message": response.message}
-
-    @router.post(
-        "/navigation/goal",
-        tags=["navigation"],
-        summary="Send a map-frame navigation goal using XYZ and yaw",
-    )
-    async def navigation_goal(
-        goal: NavigationGoal, ros: RosServiceGateway = Depends(gateway)
-    ) -> Dict[str, Any]:
-        _ensure_finite({"x": goal.x, "y": goal.y, "z": goal.z, "yaw": goal.yaw})
-        half_yaw = 0.5 * goal.yaw
-        pose = QuaternionPose(
-            x=goal.x,
-            y=goal.y,
-            z=goal.z,
-            qx=0.0,
-            qy=0.0,
-            qz=math.sin(half_yaw),
-            qw=math.cos(half_yaw),
-        )
-        return await call_publish_goal(pose, ros)
-
-    @router.post(
-        "/open3d_loc/publish_goal",
-        tags=["navigation"],
-        summary="Send a navigation goal using a quaternion pose",
-    )
-    async def publish_goal(
-        pose: QuaternionPose, ros: RosServiceGateway = Depends(gateway)
-    ) -> Dict[str, Any]:
-        return await call_publish_goal(pose, ros)
-
     @router.post(
         "/open3d_loc/relocalize",
         tags=["localization"],
-        summary="Trigger Open3D relocalization from an initial pose",
+        summary="1. Relocalize and return success or failure",
     )
     async def relocalize(
         pose: QuaternionPose, ros: RosServiceGateway = Depends(gateway)
@@ -365,77 +429,140 @@ def create_app(settings: Settings) -> FastAPI:
         response = await ros.call("relocalize", request)
         return {"success": response.success, "message": response.message}
 
-    @router.get(
-        "/open3d_loc/get_pose",
-        tags=["localization"],
-        summary="Get the latest Open3D localization pose",
+    @router.post(
+        "/navigation/points",
+        tags=["navigation"],
+        summary="2. Save the current localization pose as a named JSON point",
     )
-    async def get_pose(
+    async def save_navigation_point(
+        command: SavePointRequest,
         ros: RosServiceGateway = Depends(gateway),
+        store: NavigationPointStore = Depends(point_store),
     ) -> Dict[str, Any]:
+        name = _normalise_point_name(command.name)
         response = await ros.call("get_pose", ros.request("get_pose"))
-        result: Dict[str, Any] = {
-            "success": response.success,
-            "message": response.message,
-        }
-        if response.success:
-            siny_cosp = 2.0 * (response.qw * response.qz + response.qx * response.qy)
-            cosy_cosp = 1.0 - 2.0 * (
-                response.qy * response.qy + response.qz * response.qz
-            )
-            result["pose"] = {
-                "x": response.x,
-                "y": response.y,
-                "z": response.z,
-                "qx": response.qx,
-                "qy": response.qy,
-                "qz": response.qz,
-                "qw": response.qw,
-                "yaw": math.atan2(siny_cosp, cosy_cosp),
-            }
-        return result
+        if not response.success:
+            return {"success": False, "message": response.message}
 
-    @router.post(
-        "/open3d_loc/pose_deviation",
-        tags=["localization"],
-        summary="Compare the current localization pose with a reference pose",
+        values = {
+            "x": response.x,
+            "y": response.y,
+            "z": response.z,
+            "qx": response.qx,
+            "qy": response.qy,
+            "qz": response.qz,
+            "qw": response.qw,
+        }
+        _ensure_finite(values)
+        rpy = _quaternion_to_rpy(
+            response.qx, response.qy, response.qz, response.qw
+        )
+        point: Dict[str, Any] = {
+            "frame_id": "map",
+            "child_frame_id": "base_link",
+            **values,
+            **rpy,
+        }
+        store.save_point(name, point, command.overwrite)
+        return {
+            "success": True,
+            "message": f"Navigation point saved: {name}",
+            "point": {"name": name, **point},
+        }
+
+    @router.get(
+        "/navigation/points",
+        tags=["navigation"],
+        summary="5. Return all saved navigation points",
     )
-    async def pose_deviation(
-        pose: QuaternionPose, ros: RosServiceGateway = Depends(gateway)
+    async def list_navigation_points(
+        store: NavigationPointStore = Depends(point_store),
     ) -> Dict[str, Any]:
-        request = ros.request("pose_deviation")
-        _fill_pose_request(request, pose)
-        response = await ros.call("pose_deviation", request)
-        result: Dict[str, Any] = {
-            "success": response.success,
-            "message": response.message,
-        }
-        if response.success:
-            result.update(
-                {
-                    "current_pose": _pose_to_dict(response.current_pose),
-                    "error_x": response.error_x,
-                    "error_y": response.error_y,
-                    "distance_xy": response.distance_xy,
-                    "yaw_error_rad": response.yaw_error_rad,
-                    "yaw_error_deg": response.yaw_error_deg,
-                }
-            )
-        return result
+        stored_points = store.list_points()
+        points = []
+        for name, point in stored_points.items():
+            item = dict(point)
+            item["name"] = name
+            points.append(item)
+        return {"success": True, "count": len(points), "points": points}
 
     @router.post(
-        "/map/save", tags=["map"], summary="Request FAST-LIO to save its map"
+        "/navigation/goal",
+        tags=["navigation"],
+        summary="3. Publish a saved point or direct XYZ/yaw navigation goal",
     )
-    async def save_map(
+    async def publish_navigation_goal(
+        goal: NavigationGoalRequest,
         ros: RosServiceGateway = Depends(gateway),
+        store: NavigationPointStore = Depends(point_store),
     ) -> Dict[str, Any]:
-        response = await ros.call("map_save", ros.request("map_save"))
-        return {"success": response.success, "message": response.message}
+        point_name: Optional[str] = None
+        source = "coordinates"
+        if goal.name is not None:
+            if goal.x is not None or goal.y is not None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Provide either name or coordinates, not both",
+                )
+            point_name = _normalise_point_name(goal.name)
+            point = store.get_point(point_name)
+            if point is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Navigation point not found: {point_name}",
+                )
+            try:
+                x = float(point["x"])
+                y = float(point["y"])
+                z = float(point.get("z", 0.0))
+                yaw = float(point["yaw"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Saved navigation point is invalid: {point_name}",
+                ) from error
+            source = "saved_point"
+        else:
+            if goal.x is None or goal.y is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="x and y are required when name is not provided",
+                )
+            x, y, z, yaw = goal.x, goal.y, goal.z, goal.yaw
+
+        _ensure_finite({"x": x, "y": y, "z": z, "yaw": yaw})
+        half_yaw = 0.5 * yaw
+        pose = QuaternionPose(
+            x=x,
+            y=y,
+            z=z,
+            qx=0.0,
+            qy=0.0,
+            qz=math.sin(half_yaw),
+            qw=math.cos(half_yaw),
+        )
+        request = ros.request("publish_goal")
+        _fill_pose_request(request, pose)
+        response = await ros.call("publish_goal", request)
+        goal_result: Dict[str, Any] = {
+            "source": source,
+            "x": x,
+            "y": y,
+            "z": z,
+            "yaw": yaw,
+        }
+        if point_name is not None:
+            goal_result["name"] = point_name
+        return {
+            "success": response.success,
+            "message": response.message,
+            "goal": goal_result,
+        }
 
     @router.post(
         "/go2_cmd_vel_bridge/enable",
         tags=["robot"],
-        summary="Arm or disarm the Unitree velocity bridge",
+        summary="4. Enable or disable robot motion through the velocity bridge",
     )
     async def bridge_enable(
         command: BridgeEnableRequest,
@@ -463,6 +590,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--service-wait-timeout", type=float, default=defaults.service_wait_timeout
     )
+    parser.add_argument(
+        "--points-file",
+        default=defaults.points_file,
+        help="JSON file used to store named navigation points",
+    )
     parser.add_argument("--log-level", default="info")
     return parser.parse_args()
 
@@ -473,6 +605,8 @@ def main() -> None:
         raise SystemExit("--port must be between 1 and 65535")
     if args.service_timeout <= 0.0 or args.service_wait_timeout <= 0.0:
         raise SystemExit("service timeouts must be greater than zero")
+    if not args.points_file.strip():
+        raise SystemExit("--points-file must not be empty")
 
     environment = Settings.from_environment()
     settings = Settings(
@@ -480,6 +614,7 @@ def main() -> None:
         port=args.port,
         service_timeout=args.service_timeout,
         service_wait_timeout=args.service_wait_timeout,
+        points_file=args.points_file,
         api_key=environment.api_key,
     )
     if settings.host not in ("127.0.0.1", "localhost", "::1") and not settings.api_key:
