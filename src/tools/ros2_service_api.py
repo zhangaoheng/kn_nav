@@ -23,7 +23,7 @@ import math
 import os
 from pathlib import Path
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 try:
     import uvicorn
@@ -42,7 +42,7 @@ class Settings:
     port: int = 8000
     service_timeout: float = 30.0
     service_wait_timeout: float = 1.0
-    points_file: str = str(Path(__file__).with_name("goal_points.json"))
+    points_file: str = str(Path(__file__).with_name("cache.json"))
     api_key: str = ""
 
     @classmethod
@@ -56,7 +56,7 @@ class Settings:
             ),
             points_file=os.environ.get(
                 "KN_NAV_POINTS_FILE",
-                str(Path(__file__).with_name("goal_points.json")),
+                str(Path(__file__).with_name("cache.json")),
             ),
             api_key=os.environ.get("KN_NAV_API_KEY", ""),
         )
@@ -67,11 +67,11 @@ class QuaternionPose(BaseModel):
 
     x: float = Field(..., description="Map-frame X position in metres")
     y: float = Field(..., description="Map-frame Y position in metres")
-    z: float = Field(0.0, description="Map-frame Z position in metres")
-    qx: float = 0.0
-    qy: float = 0.0
-    qz: float = 0.0
-    qw: float = 1.0
+    z: float = Field(..., description="Map-frame Z position in metres")
+    qx: float = Field(..., description="Quaternion X")
+    qy: float = Field(..., description="Quaternion Y")
+    qz: float = Field(..., description="Quaternion Z")
+    qw: float = Field(..., description="Quaternion W")
 
 
 class SavePointRequest(BaseModel):
@@ -117,6 +117,53 @@ def _fill_pose_request(request: Any, pose: QuaternionPose) -> None:
         setattr(request, name, float(value))
 
 
+def _normalise_quaternion_pose(
+    pose: QuaternionPose,
+) -> Tuple[QuaternionPose, float]:
+    values = {
+        "x": pose.x,
+        "y": pose.y,
+        "z": pose.z,
+        "qx": pose.qx,
+        "qy": pose.qy,
+        "qz": pose.qz,
+        "qw": pose.qw,
+    }
+    _ensure_finite(values)
+    norm = math.sqrt(
+        pose.qx * pose.qx
+        + pose.qy * pose.qy
+        + pose.qz * pose.qz
+        + pose.qw * pose.qw
+    )
+    if norm < 1e-6:
+        raise HTTPException(status_code=422, detail="Quaternion norm is too small")
+    return (
+        QuaternionPose(
+            x=pose.x,
+            y=pose.y,
+            z=pose.z,
+            qx=pose.qx / norm,
+            qy=pose.qy / norm,
+            qz=pose.qz / norm,
+            qw=pose.qw / norm,
+        ),
+        norm,
+    )
+
+
+def _quaternion_pose_to_dict(pose: QuaternionPose) -> Dict[str, float]:
+    return {
+        "x": pose.x,
+        "y": pose.y,
+        "z": pose.z,
+        "qx": pose.qx,
+        "qy": pose.qy,
+        "qz": pose.qz,
+        "qw": pose.qw,
+    }
+
+
 def _quaternion_to_rpy(
     qx: float, qy: float, qz: float, qw: float
 ) -> Dict[str, float]:
@@ -155,11 +202,34 @@ def _normalise_point_name(name: str) -> str:
 
 
 class NavigationPointStore:
-    """Thread-safe JSON storage compatible with goal_points_cli.py."""
+    """Thread-safe JSON storage for named navigation points."""
 
     def __init__(self, file_path: str):
         self.path = Path(file_path).expanduser().resolve()
         self._lock = threading.Lock()
+        self._initialise_file()
+
+    def _initialise_file(self) -> None:
+        """Create a missing store and repair an empty store as an empty object."""
+        with self._lock:
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    with self.path.open("x", encoding="utf-8") as handle:
+                        handle.write("{}\n")
+                    return
+                except FileExistsError:
+                    pass
+
+                with self.path.open("r", encoding="utf-8") as handle:
+                    content = handle.read()
+                if not content.strip():
+                    with self.path.open("w", encoding="utf-8") as handle:
+                        handle.write("{}\n")
+            except OSError as error:
+                raise RuntimeError(
+                    f"Unable to initialise navigation points file {self.path}: {error}"
+                ) from error
 
     def _load_unlocked(self) -> Dict[str, Dict[str, Any]]:
         if not self.path.exists():
@@ -357,6 +427,7 @@ def create_app(settings: Settings) -> FastAPI:
     async def lifespan(application: FastAPI):
         gateway = RosServiceGateway(settings)
         application.state.point_store = NavigationPointStore(settings.points_file)
+        application.state.relocalize_lock = asyncio.Lock()
         gateway.start()
         application.state.ros_gateway = gateway
         try:
@@ -380,6 +451,9 @@ def create_app(settings: Settings) -> FastAPI:
 
     def point_store() -> NavigationPointStore:
         return application.state.point_store
+
+    def relocalize_lock() -> Any:
+        return application.state.relocalize_lock
 
     def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
         if settings.api_key and (
@@ -422,12 +496,32 @@ def create_app(settings: Settings) -> FastAPI:
         summary="1. Relocalize and return success or failure",
     )
     async def relocalize(
-        pose: QuaternionPose, ros: RosServiceGateway = Depends(gateway)
+        pose: QuaternionPose,
+        ros: RosServiceGateway = Depends(gateway),
+        lock: Any = Depends(relocalize_lock),
     ) -> Dict[str, Any]:
+        normalised_pose, original_norm = _normalise_quaternion_pose(pose)
+        sent_pose = _quaternion_pose_to_dict(normalised_pose)
+        if lock.locked():
+            return {
+                "success": False,
+                "message": "another relocalize request is running",
+                "pose": sent_pose,
+            }
+
         request = ros.request("relocalize")
-        _fill_pose_request(request, pose)
-        response = await ros.call("relocalize", request)
-        return {"success": response.success, "message": response.message}
+        _fill_pose_request(request, normalised_pose)
+        async with lock:
+            response = await ros.call("relocalize", request)
+        return {
+            "success": response.success,
+            "message": response.message,
+            "pose": sent_pose,
+            "input_quaternion_norm": original_norm,
+            "quaternion_normalized": not math.isclose(
+                original_norm, 1.0, rel_tol=1e-9, abs_tol=1e-9
+            ),
+        }
 
     @router.post(
         "/navigation/points",
