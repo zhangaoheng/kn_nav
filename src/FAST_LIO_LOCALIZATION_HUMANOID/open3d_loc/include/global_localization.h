@@ -140,11 +140,6 @@ private:
     /// @brief 定位频率(定位间隔时间，多少秒1次)
     double loc_frequence_;
 
-    /// @brief source点云最大点数量
-    int maxpoints_source_ = 50000;
-    /// @brief target点云最大点数量
-    int maxpoints_target_ = 200000;
-
     /// @brief 初始化成功标志
     std::atomic_bool loc_initialized_{false};
 

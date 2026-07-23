@@ -117,9 +117,6 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
 
     // 队列最大数量
     this->declare_parameter<int>("pcd_queue_maxsize", 5);
-    /// 最大点数量限制
-    this->declare_parameter<int>("maxpoints_source", 50000);
-    this->declare_parameter<int>("maxpoints_target", 200000);
 
     // 定位间隔时间
     this->declare_parameter<double>("loc_frequence", 2.0);
@@ -150,8 +147,6 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
         RCLCPP_WARN(this->get_logger(), "pcd_queue_maxsize=%d is invalid, use 1", queue_maxsize_);
         queue_maxsize_ = 1;
     }
-    this->get_parameter("maxpoints_source", maxpoints_source_);
-    this->get_parameter("maxpoints_target", maxpoints_target_);
     this->get_parameter("loc_frequence", loc_frequence_);
     this->get_parameter("voxelsize_coarse", voxelsize_coarse_);
     this->get_parameter("voxel_downsample_size", voxel_downsample_size_);
@@ -179,13 +174,11 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
                 "icp_distance_threshold=%.3f, fitness_eval_threshold=%.3f, "
                 "normal_search_radius=%.3f, threshold_fitness=%.3f, threshold_fitness_init=%.3f, "
                 "max_icp_translation=%.3f, max_icp_yaw_deg=%.3f, max_init_icp_translation=%.3f, "
-                "max_init_icp_yaw_deg=%.3f, min_init_fitness_improvement=%.3f, min_source_points=%d, min_target_points=%d, "
-                "maxpoints_source=%d, maxpoints_target=%d",
+                "max_init_icp_yaw_deg=%.3f, min_init_fitness_improvement=%.3f, min_source_points=%d, min_target_points=%d",
                 voxelsize_coarse_, voxel_downsample_size_, icp_distance_threshold_,
                 fitness_eval_threshold_, normal_search_radius_, threshold_fitness_, threshold_fitness_init_,
                 max_icp_translation_, max_icp_yaw_deg_, max_init_icp_translation_, max_init_icp_yaw_deg_,
-                min_init_fitness_improvement_, min_source_points_, min_target_points_,
-                maxpoints_source_, maxpoints_target_);
+                min_init_fitness_improvement_, min_source_points_, min_target_points_);
 
     if (initialpose_.size() != 6)
     {
@@ -727,25 +720,13 @@ bool GloabalLocalization::LocalizationInitialize()
 
             /// 配准计时
             target = map_fine_crop;
-            const size_t target_before_sample_size = target->points_.size();
-            if (target->points_.size() > static_cast<size_t>(maxpoints_target_))
-            {
-                target = target->RandomDownSample(double(maxpoints_target_) / target->points_.size());
-            }
-            const size_t target_after_sample_size = target->points_.size();
 
             source = pcd_scan->Crop(*OBB_scan);
             const size_t source_before_voxel_size = source->points_.size();
             source = source->VoxelDownSample(voxel_downsample_size_);
-            const size_t source_after_voxel_size = source->points_.size();
-            if (source->points_.size() > static_cast<size_t>(maxpoints_source_))
-            {
-                source = source->RandomDownSample(double(maxpoints_source_) / source->points_.size());
-            }
             RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                                  "init preprocess: target=%zu->%zu, source=%zu->%zu->%zu, target_has_normal=%s, source_has_normal=%s",
-                                  target_before_sample_size, target_after_sample_size,
-                                  source_before_voxel_size, source_after_voxel_size, source->points_.size(),
+                                  "init preprocess: target=%zu, source=%zu->%zu, target_has_normal=%s, source_has_normal=%s",
+                                  target->points_.size(), source_before_voxel_size, source->points_.size(),
                                   target->HasNormals() ? "true" : "false", source->HasNormals() ? "true" : "false");
 
             if (source->points_.size() < static_cast<size_t>(min_source_points_) ||
@@ -1030,25 +1011,13 @@ void GloabalLocalization::Localization()
             OBB_scan->R_ = mat_baselink2odom_cur.block<3, 3>(0, 0);
 
             target = map_fine_crop;
-            const size_t target_before_sample_size = target->points_.size();
-            if (target->points_.size() > static_cast<size_t>(maxpoints_target_))
-            {
-                target = target->RandomDownSample(double(maxpoints_target_) / target->points_.size());
-            }
-            const size_t target_after_sample_size = target->points_.size();
 
             source = pcd_scan->Crop(*OBB_scan);
             const size_t source_before_voxel_size = source->points_.size();
             source = source->VoxelDownSample(voxel_downsample_size_);
-            const size_t source_after_voxel_size = source->points_.size();
-            if (source->points_.size() > static_cast<size_t>(maxpoints_source_))
-            {
-                source = source->RandomDownSample(double(maxpoints_source_) / source->points_.size());
-            }
             RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                                  "tracking preprocess: target=%zu->%zu, source=%zu->%zu->%zu, voxel=%.3f",
-                                  target_before_sample_size, target_after_sample_size,
-                                  source_before_voxel_size, source_after_voxel_size, source->points_.size(),
+                                  "tracking preprocess: target=%zu, source=%zu->%zu, voxel=%.3f",
+                                  target->points_.size(), source_before_voxel_size, source->points_.size(),
                                   voxel_downsample_size_);
 
             if (source->points_.size() < static_cast<size_t>(min_source_points_) ||
