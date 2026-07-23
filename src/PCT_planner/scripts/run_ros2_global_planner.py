@@ -3,8 +3,8 @@
 PCT Global Planner — standalone ROS2 online node.
 
 Workflow:
-  1. Loads PCD + existing tomogram pickle.
-  2. Publishes point cloud + tomogram layers to RViz2.
+  1. Loads an existing tomogram pickle.
+  2. Publishes tomogram layers to RViz2.
   3. Waits for a single goal point:
        - /goal_pose   (geometry_msgs/PoseStamped)  — RViz "2D Goal Pose" tool
        - /clicked_point (geometry_msgs/PointStamped) — RViz "Publish Point" tool
@@ -18,14 +18,12 @@ Usage:
   source /opt/ros/humble/setup.bash
   python3 run_ros2_global_planner.py \
       --ros-args \
-      -p pcd_path:=/path/to/map.pcd \
       -p tomo_path:=/path/to/tomogram.pickle
 """
 
 import os, sys, argparse, pickle, time, math
 import ctypes
 import numpy as np
-import open3d as o3d
 
 
 def _find_project_root():
@@ -214,8 +212,6 @@ class PctGlobalPlannerNode(Node):
         super().__init__('pct_global_planner')
 
         # ── parameters ──────────────────────────────────────────────────
-        self.declare_parameter('pcd_path',
-                               ROOT + '/rsc/pcd/clinic.pcd')
         self.declare_parameter('tomo_path',
                                ROOT + '/rsc/tomogram/clinic.pickle')
         self.declare_parameter('global_frame', 'map')
@@ -237,9 +233,7 @@ class PctGlobalPlannerNode(Node):
         self.declare_parameter('allow_new_goal_during_planning', True)
 
         # Resolve parameter values
-        pcd_path_raw = self.get_parameter('pcd_path').value
         tomo_path_raw = self.get_parameter('tomo_path').value
-        self.pcd_path = os.path.abspath(pcd_path_raw)
         self.tomo_path = os.path.abspath(tomo_path_raw)
         self.global_frame = self.get_parameter('global_frame').value
         self.robot_frame = self.get_parameter('robot_frame').value
@@ -277,7 +271,6 @@ class PctGlobalPlannerNode(Node):
         path_qos = QoSProfile(depth=1)
         path_qos.reliability = ReliabilityPolicy.RELIABLE
         path_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
-        self.pc_pub = self.create_publisher(PointCloud2, '/global_points', 1)
         self.tomo_pub = self.create_publisher(PointCloud2, '/tomogram', 1)
         self.path_pub = self.create_publisher(Path, self.path_topic, path_qos)
         self.astar_path_pub = self.create_publisher(Path, self.astar_path_topic, path_qos)
@@ -291,7 +284,6 @@ class PctGlobalPlannerNode(Node):
         self._tomo_data = None
         self._tomo_msg = None
         self._tomo_points_count = 0
-        self._pts_raw = None
 
         # ── Step 1: load planner ────────────────────────────────────────
         self.get_logger().info(f'Loading tomogram: {self.tomo_path}')
@@ -304,7 +296,6 @@ class PctGlobalPlannerNode(Node):
         self.get_logger().info('Planner ready.')
 
         # ── Step 2: publish visualization ───────────────────────────────
-        self._publish_pcd()
         if self.publish_tomo:
             self._publish_tomo()
             self.create_timer(self.tomo_period, self._republish_tomo)
@@ -655,16 +646,6 @@ class PctGlobalPlannerNode(Node):
         return 0 <= ix < dim_x and 0 <= iy < dim_y
 
     # ── visualization publishers ────────────────────────────────────────────
-
-    def _publish_pcd(self):
-        if not os.path.exists(self.pcd_path):
-            self.get_logger().warn(f'PCD not found: {self.pcd_path}')
-            return
-        pcd = o3d.io.read_point_cloud(self.pcd_path)
-        self._pts_raw = np.asarray(pcd.points).astype(np.float32)
-        pts_sub = self._pts_raw[::10]
-        self.pc_pub.publish(make_pc2(self, pts_sub, frame=self.global_frame))
-        self.get_logger().info(f'Published {len(pts_sub)} raw PCD points')
 
     def _build_tomo_msg(self):
         with open(self.tomo_path, 'rb') as f:
