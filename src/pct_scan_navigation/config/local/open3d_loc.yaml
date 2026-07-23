@@ -1,7 +1,8 @@
 global_localization_node:
   ros__parameters:
-    path_map: "/home/kangneng/xq/map/pcd/cross-floor-kn/global_map_downsize.pcd"
-    path_imu_to_base: "/home/kangneng/xq/map/pcd/cross-floor-kn/imu_to_base.txt"
+    # path_map: "/home/kangneng/xq/map/pcd/cross-floor-kn/global_map_downsize.pcd"
+    path_map: "/home/kangneng/xq/map/pcd/outdoor/outdoor_global_voxel02.pcd"
+    path_imu_to_base: "/home/kangneng/xq/map/pcd/outdoor/imu_to_base.txt"
 
     pcd_queue_maxsize: 10
     loc_frequence: 20.0
@@ -13,7 +14,7 @@ global_localization_node:
     fitness_eval_threshold: 0.15
     normal_search_radius: 0.4
 
-    threshold_fitness: 0.5
+    threshold_fitness: 0.7
     threshold_fitness_init: 0.7
 
     max_icp_translation: 0.4
@@ -23,8 +24,6 @@ global_localization_node:
     min_init_fitness_improvement: 0.02
     min_source_points: 500
     min_target_points: 500
-    maxpoints_source: 80000
-    maxpoints_target: 400000
 
     dis_updatemap: 3.5
     initialpose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]

@@ -188,7 +188,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument('start_open3d_loc', default_value='true'),
         DeclareLaunchArgument('start_pct_planner', default_value='true'),
-        DeclareLaunchArgument('start_go2_bridge', default_value='true'),
+        DeclareLaunchArgument('start_go2_bridge', default_value='false'),
         DeclareLaunchArgument('network_interface', default_value='enp2s0'),
         DeclareLaunchArgument('scan_params_file', default_value=navigation_config('scan_planner.yaml')),
         DeclareLaunchArgument('coordinator_params_file', default_value=navigation_config('coordinator.yaml')),

@@ -8,10 +8,31 @@ SCAN_MANAGE = ROOT.parent / 'SCAN-Planner' / 'src' / 'planner' / 'plan_manage'
 OPEN3D_LOC = (
     ROOT.parent / 'FAST_LIO_LOCALIZATION_HUMANOID' / 'open3d_loc'
 )
+PCT_PLANNER = ROOT.parent / 'PCT_planner'
 
 
 def load(profile, name):
     return yaml.safe_load((ROOT / 'config' / profile / name).read_text())
+
+
+def test_pct_online_planner_does_not_require_raw_pcd():
+    source = (PCT_PLANNER / 'scripts/run_ros2_global_planner.py').read_text()
+    for legacy in ('pcd_path', '/global_points', '_publish_pcd', 'import open3d'):
+        assert legacy not in source
+
+    config_paths = [
+        PCT_PLANNER / 'params/pct_global_planner.yaml',
+        *(
+            ROOT / 'config' / profile / 'pct_global_planner.yaml'
+            for profile in ('A2', 'local', 'unitree_go2', 'unitree_go2w')
+        ),
+    ]
+    for config_path in config_paths:
+        params = yaml.safe_load(config_path.read_text())[
+            'pct_global_planner'
+        ]['ros__parameters']
+        assert 'pcd_path' not in params
+        assert params['tomo_path']
 
 
 def test_coordinator_profiles_use_lightweight_mode2_contract():

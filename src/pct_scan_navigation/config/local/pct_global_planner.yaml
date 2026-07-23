@@ -8,13 +8,10 @@
 pct_global_planner:
   ros__parameters:
 
-    # ── Map files ──────────────────────────────────────────────────────────
-    # Absolute path to the source PCD point cloud
-    pcd_path: "/home/kangneng/xq/map/pcd/cross-floor-kn/global_map_downsize.pcd"
-
+    # ── Planning map ───────────────────────────────────────────────────────
     # Absolute path to the pre-built tomogram pickle
-    tomo_path: "/home/kangneng/xq/code/work_space/kn_nav_ws/src/PCT_planner/rsc/tomogram/liuxing_ground_voxel005_radius015.pickle"
-
+    # tomo_path: "/home/kangneng/xq/code/work_space/kn_nav_ws/src/PCT_planner/rsc/tomogram/liuxing_ground_voxel005_radius015.pickle"
+    tomo_path: "/home/code/work_space/kn_nav/src/PCT_planner/rsc/tomogram/outdoor_global_voxel002_ground.pickle"
     # ── TF frames ──────────────────────────────────────────────────────────
     # Planning frame (must match /pct_path frame_id and tomogram coordinates)
     global_frame: "map"
