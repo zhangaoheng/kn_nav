@@ -87,14 +87,14 @@ RUN cmake \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_INSTALL_PREFIX=/opt/unitree_robotics \
       -DBUILD_EXAMPLES=OFF && \
-    cmake --build /home/code/thirdparty/unitree_sdk2/build --parallel && \
+    cmake --build /home/code/thirdparty/unitree_sdk2/build --parallel 4 && \
     cmake --install /home/code/thirdparty/unitree_sdk2/build
 
 RUN cmake \
       -S /home/code/thirdparty/Livox-SDK2 \
       -B /home/code/thirdparty/Livox-SDK2/build \
       -DCMAKE_BUILD_TYPE=Release && \
-    cmake --build /home/code/thirdparty/Livox-SDK2/build --parallel && \
+    cmake --build /home/code/thirdparty/Livox-SDK2/build --parallel 4 && \
     cmake --install /home/code/thirdparty/Livox-SDK2/build && \
     ldconfig
 
@@ -108,11 +108,6 @@ RUN source /opt/ros/humble/setup.bash && \
         -DROS_EDITION=ROS2 \
         -DDISTRO_ROS=humble
 
-RUN pct_cmake=/home/code/work_space/kn_nav/src/PCT_planner/planner/lib/CMakeLists.txt && \
-    test "$(grep -F -c -- '-march=native' "${pct_cmake}")" -eq 1 && \
-    sed -i 's/-march=native/-march=x86-64 -mtune=generic/' "${pct_cmake}" && \
-    test "$(grep -F -c -- '-march=x86-64 -mtune=generic' "${pct_cmake}")" -eq 1 && \
-    ! grep -F -- '-march=native' "${pct_cmake}"
 
 RUN cd /home/code/work_space/kn_nav/src/PCT_planner/planner && \
     bash build_thirdparty.sh && \
