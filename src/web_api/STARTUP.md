@@ -136,10 +136,10 @@ python3 src/web_api/ros2_service_api.py \
 python3 -m pip install fastapi uvicorn
 ```
 
-API 启动时会在脚本目录自动创建并初始化：
+API 启动时读取 `/global_localization_node` 的 `path_map` 参数，并以当前离线地图文件名创建或复用导航点文件。例如地图为 `global_map_downsize.pcd` 时：
 
 ```text
-/home/code/work_space/kn_nav/src/web_api/cache.json
+/home/code/work_space/kn_nav/src/web_api/global_map_downsize.json
 ```
 
 服务端日志出现以下内容表示启动成功：
@@ -197,7 +197,7 @@ X-API-Key: 替换为实际密钥
 
 ## 8. 自定义导航点文件
 
-默认使用 `src/web_api/cache.json`。
+默认根据当前离线地图自动选择 JSON 文件，一般不需要指定 `--points-file`。
 
 指定其他文件：
 
@@ -205,13 +205,13 @@ X-API-Key: 替换为实际密钥
 python3 src/web_api/ros2_service_api.py \
   --host 0.0.0.0 \
   --port 8000 \
-  --points-file /home/code/work_space/kn_nav/src/web_api/cache.json
+  --points-file /home/code/work_space/kn_nav/src/web_api/debug_points.json
 ```
 
 也可以使用环境变量：
 
 ```bash
-export KN_NAV_POINTS_FILE=/home/code/work_space/kn_nav/src/web_api/cache.json
+export KN_NAV_POINTS_FILE=/home/code/work_space/kn_nav/src/web_api/debug_points.json
 ```
 
 ## 9. 启动后快速检查
@@ -414,12 +414,12 @@ python3 src/web_api/ros2_service_api.py \
   --port 8001
 ```
 
-### cache.json 检查
+### 导航点 JSON 检查
 
 ```bash
 cd /home/code/work_space/kn_nav/src/web_api
-ls -l cache.json
-python3 -m json.tool cache.json
+ls -l *.json
+python3 -m json.tool global_map_downsize.json
 ```
 
 ### ROS Service 不可用

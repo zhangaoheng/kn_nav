@@ -119,6 +119,10 @@ HTTP 200 只表示 HTTP 请求和 ROS Service 调用已经完成，不保证业�
 | 3 | `POST` | `/api/navigation/goal` | 发布保存点或直接坐标作为导航目标 |
 | 4 | `POST` | `/api/go2_cmd_vel_bridge/enable` | 开启或关闭底盘速度桥 |
 | 5 | `GET` | `/api/navigation/points` | 获取全部导航点 |
+| 6 | `PATCH` | `/api/navigation/points/rename` | 只修改导航点名称 |
+| 7 | `POST` | `/api/navigation/queue` | 将一个导航目标加入顺序执行队列 |
+| 8 | `GET` | `/api/navigation/queue` | 查询当前任务、等待队列和历史记录 |
+| 9 | `GET` | `/api/robot/status` | 获取机器狗当前位置、四元数、速度和时间戳 |
 | 诊断 | `GET` | `/api/health` | 获取 API 和 ROS 网关状态 |
 | 诊断 | `GET` | `/api/services` | 获取底层 ROS Service 就绪状态 |
 
@@ -253,7 +257,7 @@ HTTP/1.1 422 Unprocessable Entity
 
 该接口获取机器人当前定位，并将其保存为具有唯一名称的导航点。
 
-底层定位成功后才会写入 `cache.json`。定位失败不会写入文件。
+底层定位成功后才会写入当前离线地图对应的 JSON 文件。定位失败不会写入文件。每个导航点都会获得一个唯一的六位字符串编码。
 
 ### 5.1 请求
 
@@ -302,8 +306,10 @@ false
 {
   "success": true,
   "message": "Navigation point saved: office",
+  "map_name": "global_map_downsize",
   "point": {
     "name": "office",
+    "code": "483271",
     "frame_id": "map",
     "child_frame_id": "base_link",
     "x": 1.520143605688493,
@@ -356,10 +362,10 @@ HTTP/1.1 409 Conflict
 
 ### 5.6 导航点存储
 
-默认存储文件是 API 脚本同目录的：
+默认存储文件位于 API 脚本同目录，文件名取当前 `/global_localization_node` 的 `path_map` 参数中的地图文件名。例如：
 
 ```text
-cache.json
+global_map_downsize.json
 ```
 
 API 启动时：
@@ -367,11 +373,12 @@ API 启动时：
 - 文件不存在：自动创建并初始化为 `{}`；
 - 文件为空：自动初始化为 `{}`；
 - 文件包含合法 JSON：保留原内容；
+- 旧导航点没有六位编码或编码重复：启动时自动补齐唯一编码；
 - 文件非空但 JSON 损坏：不会覆盖，接口返回 HTTP 500。
 
 ## 6. 获取全部导航点
 
-返回 `cache.json` 中当前保存的全部导航点，按名称排序。
+返回当前离线地图 JSON 中保存的全部导航点，按名称排序。
 
 ### 6.1 请求
 
@@ -386,10 +393,13 @@ GET /api/navigation/points
 ```json
 {
   "success": true,
+  "map_name": "global_map_downsize",
+  "map_path": "/home/nav_map/cross-floor-kn/global_map_downsize.pcd",
   "count": 2,
   "points": [
     {
       "name": "office",
+      "code": "483271",
       "frame_id": "map",
       "child_frame_id": "base_link",
       "x": 1.520143605688493,
@@ -405,6 +415,7 @@ GET /api/navigation/points
     },
     {
       "name": "start",
+      "code": "906154",
       "frame_id": "map",
       "child_frame_id": "base_link",
       "x": 1.2327408046653152,
@@ -427,6 +438,8 @@ GET /api/navigation/points
 ```json
 {
   "success": true,
+  "map_name": "global_map_downsize",
+  "map_path": "/home/nav_map/cross-floor-kn/global_map_downsize.pcd",
   "count": 0,
   "points": []
 }
