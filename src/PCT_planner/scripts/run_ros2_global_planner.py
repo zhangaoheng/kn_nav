@@ -298,7 +298,7 @@ class PctGlobalPlannerNode(Node):
         # ── Step 2: publish visualization ───────────────────────────────
         if self.publish_tomo:
             self._publish_tomo()
-            self.create_timer(self.tomo_period, self._republish_tomo)
+            self.tomo_timer = self.create_timer(self.tomo_period, self._republish_tomo)
             self.get_logger().info(
                 f'Republishing /tomogram every {self.tomo_period}s for RViz.')
 
