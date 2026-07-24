@@ -882,6 +882,30 @@ GET /api/navigation/queue
 - 队列和历史记录保存在API进程内存中，API重启后清空；
 - 当前目标长期无法到达时，后续目标会继续等待。
 
+### 10.4 返回机制与当前限制
+
+`POST /api/navigation/queue` 每次只能加入一个导航目标。如果需要依次导航三个点，调用方需要连续发送三次POST请求，而不是在一个Body中发送三个点。
+
+每次POST只返回该目标已经进入队列以及对应的`task_id`。HTTP请求返回后连接即结束，因此第一个目标完成时，服务端不会通过原POST请求再次返回消息，也不会主动向调用方推送完成通知。
+
+调用方必须定时请求：
+
+```http
+GET /api/navigation/queue
+```
+
+例如三个任务中的第一个完成后，查询结果中的状态关系为：
+
+```text
+第一个目标：位于 history，status=completed，message=navigation goal reached
+第二个目标：位于 active，通常为 status=navigating
+第三个目标：位于 queued，status=queued
+```
+
+前端建议每500毫秒到1秒查询一次队列状态，并通过`task_id`判断指定任务是否完成。不要根据数组下标长期绑定任务，因为任务完成后会从`queued`移动到`active`，最后移动到`history`。
+
+当前接口未提供WebSocket、SSE或HTTP回调，因此不支持服务端主动推送。如果后续需要实时完成通知，需要另外增加WebSocket或SSE接口。
+
 ## 11. 获取机器狗实时状态
 
 该接口返回 `/Odometry_open3d` 最新一帧里程计中的位置、四元数、速度和时间戳。
