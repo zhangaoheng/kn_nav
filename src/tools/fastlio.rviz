@@ -4,9 +4,16 @@ Panels:
     Name: Displays
     Property Tree Widget:
       Expanded:
+        - /TF1
         - /TF1/Frames1
+        - /TF1/Tree1
+        - /map1
+        - /map1/Topic1
         - //local_path1/Topic1
         - //local_path1/Offset1
+        - //grid_map/occupancy_inflate1
+        - //grid_map/occupancy_inflate1/Status1
+        - //grid_map/occupancy_inflate1/Topic1
         - //self_inflation1/Topic1
       Splitter Ratio: 0.5667870044708252
     Tree Height: 625
@@ -36,24 +43,24 @@ Visualization Manager:
       Enabled: true
       Frame Timeout: 15
       Frames:
-        All Enabled: true
+        All Enabled: false
         base_link:
           Value: true
         imu_link:
-          Value: true
+          Value: false
         map:
           Value: true
         motion_link:
-          Value: true
+          Value: false
         odom:
           Value: true
         scan_sliding_map:
-          Value: true
+          Value: false
       Marker Scale: 5
       Name: TF
       Show Arrows: true
       Show Axes: true
-      Show Names: false
+      Show Names: true
       Tree:
         map:
           odom:
@@ -112,7 +119,7 @@ Visualization Manager:
       Color: 255; 255; 255
       Color Transformer: RGB8
       Decay Time: 0
-      Enabled: false
+      Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Max Intensity: 4096
@@ -122,7 +129,7 @@ Visualization Manager:
       Position Transformer: XYZ
       Selectable: true
       Size (Pixels): 3
-      Size (m): 0.05000000074505806
+      Size (m): 0.10000000149011612
       Style: Flat Squares
       Topic:
         Depth: 5
@@ -133,7 +140,7 @@ Visualization Manager:
         Value: /map_3d
       Use Fixed Frame: true
       Use rainbow: true
-      Value: false
+      Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -146,7 +153,7 @@ Visualization Manager:
       Color: 255; 0; 0
       Color Transformer: FlatColor
       Decay Time: 0
-      Enabled: false
+      Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Max Intensity: 4096
@@ -167,7 +174,7 @@ Visualization Manager:
         Value: /scan_base_link
       Use Fixed Frame: true
       Use rainbow: true
-      Value: false
+      Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -224,7 +231,7 @@ Visualization Manager:
       Position Transformer: XYZ
       Selectable: true
       Size (Pixels): 3
-      Size (m): 0.10000000149011612
+      Size (m): 0.4000000059604645
       Style: Boxes
       Topic:
         Depth: 5
@@ -343,8 +350,8 @@ Visualization Manager:
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: -0.25
-        Min Value: -1.25
+        Max Value: -0.05000000074505806
+        Min Value: -1.149999976158142
         Value: true
       Axis: Z
       Channel Name: intensity
@@ -369,7 +376,7 @@ Visualization Manager:
         Durability Policy: Volatile
         Filter size: 10
         History Policy: Keep Last
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         Value: /grid_map/occupancy
       Use Fixed Frame: true
       Use rainbow: true
@@ -377,7 +384,7 @@ Visualization Manager:
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: -0.25
+        Max Value: -0.05000000074505806
         Min Value: -1.5499999523162842
         Value: true
       Axis: Z
@@ -403,7 +410,7 @@ Visualization Manager:
         Durability Policy: Volatile
         Filter size: 10
         History Policy: Keep Last
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         Value: /grid_map/occupancy_inflate
       Use Fixed Frame: true
       Use rainbow: true
@@ -446,7 +453,7 @@ Visualization Manager:
       Enabled: true
       Name: /optimal_list
       Namespaces:
-        {}
+        "": true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -459,7 +466,7 @@ Visualization Manager:
       Enabled: true
       Name: /self_inflation
       Namespaces:
-        {}
+        self_inflation: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -527,25 +534,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 18.689048767089844
+      Distance: 21.850555419921875
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 3.1037964820861816
-        Y: 1.4991512298583984
-        Z: -4.6156792640686035
+        X: -0.047836001962423325
+        Y: 2.245326519012451
+        Z: -0.6088443994522095
       Focal Shape Fixed Size: false
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.5697963237762451
-      Target Frame: <Fixed Frame>
+      Pitch: 0.8397981524467468
+      Target Frame: base_link
       Value: Orbit (rviz_default_plugins)
-      Yaw: 1.1062194108963013
+      Yaw: 4.899414539337158
     Saved: ~
 Window Geometry:
   Displays:
