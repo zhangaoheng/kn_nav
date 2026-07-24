@@ -54,6 +54,42 @@ bool TransformFloat3Fields(sensor_msgs::msg::PointCloud2 &cloud,
     }
     return true;
 }
+
+void FilterNearOrigin(sensor_msgs::msg::PointCloud2 &cloud, double filter_radius)
+{
+    if (filter_radius <= 0.0)
+    {
+        return;
+    }
+
+    const double radius2 = filter_radius * filter_radius;
+    std::vector<uint8_t> filtered;
+    filtered.reserve(cloud.data.size());
+
+    sensor_msgs::PointCloud2Iterator<float> x(cloud, "x");
+    sensor_msgs::PointCloud2Iterator<float> y(cloud, "y");
+    sensor_msgs::PointCloud2Iterator<float> z(cloud, "z");
+    for (size_t point_offset = 0; x != x.end(); ++x, ++y, ++z, point_offset += cloud.point_step)
+    {
+        const double distance2 =
+            static_cast<double>(*x) * static_cast<double>(*x) +
+            static_cast<double>(*y) * static_cast<double>(*y) +
+            static_cast<double>(*z) * static_cast<double>(*z);
+        if (std::isfinite(distance2) && distance2 < radius2)
+        {
+            continue;
+        }
+        filtered.insert(filtered.end(),
+                        cloud.data.begin() + point_offset,
+                        cloud.data.begin() + point_offset + cloud.point_step);
+    }
+
+    cloud.height = 1;
+    cloud.width = static_cast<uint32_t>(filtered.size() / cloud.point_step);
+    cloud.row_step = cloud.width * cloud.point_step;
+    cloud.data = std::move(filtered);
+    cloud.is_dense = false;
+}
 } // namespace
 
 GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
@@ -132,6 +168,7 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
     this->declare_parameter<double>("max_init_icp_translation", 2.0);
     this->declare_parameter<double>("max_init_icp_yaw_deg", 15.0);
     this->declare_parameter<double>("min_init_fitness_improvement", 0.02);
+    this->declare_parameter<double>("scan_map_filter_radius", 0.0);
     this->declare_parameter<int>("min_source_points", 2500);
     this->declare_parameter<int>("min_target_points", 50000);
     this->declare_parameter<double>("threshold_fitness_init", 0.9);
@@ -158,6 +195,7 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
     this->get_parameter("max_init_icp_translation", max_init_icp_translation_);
     this->get_parameter("max_init_icp_yaw_deg", max_init_icp_yaw_deg_);
     this->get_parameter("min_init_fitness_improvement", min_init_fitness_improvement_);
+    this->get_parameter("scan_map_filter_radius", scan_map_filter_radius_);
     this->get_parameter("min_source_points", min_source_points_);
     this->get_parameter("min_target_points", min_target_points_);
     this->get_parameter("threshold_fitness_init", threshold_fitness_init_);
@@ -174,11 +212,12 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
                 "icp_distance_threshold=%.3f, fitness_eval_threshold=%.3f, "
                 "normal_search_radius=%.3f, threshold_fitness=%.3f, threshold_fitness_init=%.3f, "
                 "max_icp_translation=%.3f, max_icp_yaw_deg=%.3f, max_init_icp_translation=%.3f, "
-                "max_init_icp_yaw_deg=%.3f, min_init_fitness_improvement=%.3f, min_source_points=%d, min_target_points=%d",
+                "max_init_icp_yaw_deg=%.3f, min_init_fitness_improvement=%.3f, scan_map_filter_radius=%.3f, "
+                "min_source_points=%d, min_target_points=%d",
                 voxelsize_coarse_, voxel_downsample_size_, icp_distance_threshold_,
                 fitness_eval_threshold_, normal_search_radius_, threshold_fitness_, threshold_fitness_init_,
                 max_icp_translation_, max_icp_yaw_deg_, max_init_icp_translation_, max_init_icp_yaw_deg_,
-                min_init_fitness_improvement_, min_source_points_, min_target_points_);
+                min_init_fitness_improvement_, scan_map_filter_radius_, min_source_points_, min_target_points_);
 
     if (initialpose_.size() != 6)
     {
@@ -601,20 +640,25 @@ void GloabalLocalization::CallbackScanBody(
         scan_map.header.frame_id = "map";
         scan_map.header.stamp = latest_odom_stamp;
 
-        const Eigen::Matrix4d mat_imulink2map =
-            mat_odom2map_snapshot * mat_baselink2odom_snapshot * mat_imulink2baselink_;
-        const Eigen::Matrix3d rotation = mat_imulink2map.block<3, 3>(0, 0);
-        const Eigen::Vector3d translation = mat_imulink2map.block<3, 1>(0, 3);
+        const Eigen::Matrix4d mat_baselink2map = mat_odom2map_snapshot * mat_baselink2odom_snapshot;
+        const Eigen::Matrix3d imu_to_base_rotation = mat_imulink2baselink_.block<3, 3>(0, 0);
+        const Eigen::Vector3d imu_to_base_translation = mat_imulink2baselink_.block<3, 1>(0, 3);
+        const Eigen::Matrix3d base_to_map_rotation = mat_baselink2map.block<3, 3>(0, 0);
+        const Eigen::Vector3d base_to_map_translation = mat_baselink2map.block<3, 1>(0, 3);
         try
         {
-            if (!TransformFloat3Fields(scan_map, rotation, translation, "x", "y", "z", true))
+            if (!TransformFloat3Fields(scan_map, imu_to_base_rotation, imu_to_base_translation, "x", "y", "z", true))
             {
                 RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                                      "skip /scan_map publish: /cloud_registered_body_1 has no float32 x/y/z fields");
             }
             else
             {
-                TransformFloat3Fields(scan_map, rotation, Eigen::Vector3d::Zero(),
+                TransformFloat3Fields(scan_map, imu_to_base_rotation, Eigen::Vector3d::Zero(),
+                                      "normal_x", "normal_y", "normal_z", false);
+                FilterNearOrigin(scan_map, scan_map_filter_radius_);
+                TransformFloat3Fields(scan_map, base_to_map_rotation, base_to_map_translation, "x", "y", "z", true);
+                TransformFloat3Fields(scan_map, base_to_map_rotation, Eigen::Vector3d::Zero(),
                                       "normal_x", "normal_y", "normal_z", false);
                 pub_scan_map_->publish(scan_map);
             }

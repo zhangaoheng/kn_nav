@@ -12,6 +12,7 @@ global_localization_node:
     icp_distance_threshold: 0.15
     fitness_eval_threshold: 0.15
     normal_search_radius: 0.4
+    scan_map_filter_radius: 1.0
 
     threshold_fitness: 0.5
     threshold_fitness_init: 0.5

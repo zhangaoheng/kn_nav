@@ -105,6 +105,7 @@ private:
     double max_init_icp_translation_ = 2.0;
     double max_init_icp_yaw_deg_ = 15.0;
     double min_init_fitness_improvement_ = 0.02;
+    double scan_map_filter_radius_ = 0.0;
     int min_source_points_ = 2500;
     int min_target_points_ = 50000;
 
