@@ -198,14 +198,13 @@ rviz2 -d rsc/rviz/pct_ros2.rviz
 
 ## Online Global Planner Mode (NEW)
 
-A self-contained ROS2 node that runs continuously: loads a PCD/tomogram once, then waits for goal inputs and publishes global paths automatically. The robot's current position (via TF) is always used as the start point.
+A self-contained ROS2 node that runs continuously: loads a pre-built tomogram once, then waits for goal inputs and publishes global paths automatically. The robot's current position (via TF) is always used as the start point.
 
 ### Quick Start
 
 ```bash
 ./run_global_planner.sh \
     --ros-args \
-    -p pcd_path:=/path/to/map.pcd \
     -p tomo_path:=/path/to/map.pickle
 ```
 
@@ -235,7 +234,6 @@ TF: map → base_link  (robot pose, every goal arrival)
          /pct_path (nav_msgs/Path, smoothed trajectory)
          /pct_astar_path (nav_msgs/Path, raw A* debug)
          /pct_marker (Marker, goal sphere + path lines)
-         /global_points (PointCloud2, subsampled PCD)
          /tomogram (PointCloud2, traversability layers)
 ```
 
@@ -245,7 +243,6 @@ This node **only** outputs paths. It does **not** output `/cmd_vel` or control t
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `pcd_path` | `rsc/pcd/clinic.pcd` | Source PCD file |
 | `tomo_path` | `rsc/tomogram/clinic.pickle` | Pre-built tomogram pickle |
 | `global_frame` | `map` | Planning frame |
 | `robot_frame` | `base_link` | Robot base frame for TF lookup |
@@ -277,7 +274,6 @@ When planning fails, the node publishes an empty `/pct_path` (header correct, `p
 
 - `map → base_link` TF must be available (from FAST-LIO / open3d_loc).
 - Tomogram must be pre-built via `tomography/scripts/run_standalone.py`.
-- PCD coordinate system must align with the `map` frame.
 
 ---
 

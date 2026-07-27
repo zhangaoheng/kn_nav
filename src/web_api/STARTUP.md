@@ -1,5 +1,11 @@
 # KN 导航与 Web API 启动命令速查
 
+```bash
+python3 src/web_api/ros2_service_api.py \
+  --host 0.0.0.0 \
+  --port 8000
+```
+
 本文档用于个人记录常用启动、检查和停止命令。
 
 接口字段和响应格式见同目录的 `API.md`。

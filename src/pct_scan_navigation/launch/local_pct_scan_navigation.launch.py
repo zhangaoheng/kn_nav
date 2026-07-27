@@ -98,11 +98,14 @@ def generate_launch_description():
     scan_params_file = LaunchConfiguration('scan_params_file')
     coordinator_params_file = LaunchConfiguration('coordinator_params_file')
     pct_params_file = LaunchConfiguration('pct_params_file')
+    map_profiles_file = LaunchConfiguration('map_profiles_file')
+    full_restart_command = LaunchConfiguration('full_restart_command')
     config_profile = LaunchConfiguration('config_profile')
     navigation_mode = LaunchConfiguration('navigation_mode')
     navigation_mode_value = ParameterValue(navigation_mode, value_type=int)
 
-    navigation_share = FindPackageShare('pct_scan_navigation')
+    # navigation_share = FindPackageShare('pct_scan_navigation')
+    navigation_share = '/home/nav_map'
 
     def navigation_config(name):
         return PathJoinSubstitution([navigation_share, 'config', config_profile, name])
@@ -165,6 +168,16 @@ def generate_launch_description():
         }],
         on_exit=Shutdown(reason='pct_scan_coordinator exited'),
     )
+    nav_manager = Node(
+        package='pct_scan_navigation', executable='nav_manager_node.py',
+        name='nav_manager_node', output='both',
+        parameters=[{
+            'map_profiles_path': map_profiles_file,
+            'initial_map_name': 'outdoor',
+            'full_restart_command': full_restart_command,
+            'use_sim_time': use_sim_time,
+        }],
+    )
     bridge = Node(
         package='pure_pursuit_planner', executable='go2_cmd_vel_bridge',
         name='go2_cmd_vel_bridge', output='both',
@@ -187,11 +200,13 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument('start_open3d_loc', default_value='true'),
         DeclareLaunchArgument('start_pct_planner', default_value='true'),
-        DeclareLaunchArgument('start_go2_bridge', default_value='true'),
+        DeclareLaunchArgument('start_go2_bridge', default_value='false'),
         DeclareLaunchArgument('network_interface', default_value='enp2s0'),
         DeclareLaunchArgument('scan_params_file', default_value=navigation_config('scan_planner.yaml')),
         DeclareLaunchArgument('coordinator_params_file', default_value=navigation_config('coordinator.yaml')),
         DeclareLaunchArgument('pct_params_file', default_value=navigation_config('pct_global_planner.yaml')),
+        DeclareLaunchArgument('map_profiles_file', default_value=navigation_config('map_profiles.yaml')),
+        DeclareLaunchArgument('full_restart_command', default_value=''),
         OpaqueFunction(function=_prepare_log_directory),
         SetEnvironmentVariable('LD_LIBRARY_PATH', [
             '/opt/unitree_robotics/lib:',
@@ -204,5 +219,6 @@ def generate_launch_description():
         scan_planner,
         controller,
         coordinator,
+        nav_manager,
         bridge,
     ])

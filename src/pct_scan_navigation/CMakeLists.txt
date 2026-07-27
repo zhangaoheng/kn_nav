@@ -11,6 +11,19 @@ find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+find_package(std_msgs REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/LocalizationStatus.msg"
+  "msg/NavigationStatus.msg"
+  "msg/MapStatus.msg"
+  "srv/SwitchMap.srv"
+  "srv/RestartNavigation.srv"
+  "srv/LoadLocalizationMap.srv"
+  "srv/LoadTomogram.srv"
+  DEPENDENCIES std_msgs
+)
 
 add_library(waypoint_utils src/waypoint_utils.cpp)
 target_include_directories(waypoint_utils PUBLIC
@@ -31,6 +44,10 @@ install(TARGETS pct_scan_coordinator waypoint_utils
 install(DIRECTORY include/ DESTINATION include)
 install(PROGRAMS
   scripts/global_path_follow_coordinator_node.py
+  scripts/nav_manager_node.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+install(PROGRAMS scripts/global_path_follow_coordinator_node.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME pct_global_path_follow_coordinator
 )
@@ -45,4 +62,5 @@ if(BUILD_TESTING)
   ament_add_pytest_test(test_navigation_contract test/test_navigation_contract.py)
 endif()
 
+ament_export_dependencies(rosidl_default_runtime)
 ament_package()

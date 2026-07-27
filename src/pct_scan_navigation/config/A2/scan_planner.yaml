@@ -1,5 +1,6 @@
 scan_planner_node:
   ros__parameters:
+    map_name: "outdoor"
     fsm.navi_mode: 2
     fsm.thresh_replan: 1.0
     fsm.thresh_no_replan: 0.1

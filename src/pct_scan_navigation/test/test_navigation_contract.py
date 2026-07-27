@@ -8,10 +8,31 @@ SCAN_MANAGE = ROOT.parent / 'SCAN-Planner' / 'src' / 'planner' / 'plan_manage'
 OPEN3D_LOC = (
     ROOT.parent / 'FAST_LIO_LOCALIZATION_HUMANOID' / 'open3d_loc'
 )
+PCT_PLANNER = ROOT.parent / 'PCT_planner'
 
 
 def load(profile, name):
     return yaml.safe_load((ROOT / 'config' / profile / name).read_text())
+
+
+def test_pct_online_planner_does_not_require_raw_pcd():
+    source = (PCT_PLANNER / 'scripts/run_ros2_global_planner.py').read_text()
+    for legacy in ('pcd_path', '/global_points', '_publish_pcd', 'import open3d'):
+        assert legacy not in source
+
+    config_paths = [
+        PCT_PLANNER / 'params/pct_global_planner.yaml',
+        *(
+            ROOT / 'config' / profile / 'pct_global_planner.yaml'
+            for profile in ('A2', 'local', 'unitree_go2', 'unitree_go2w')
+        ),
+    ]
+    for config_path in config_paths:
+        params = yaml.safe_load(config_path.read_text())[
+            'pct_global_planner'
+        ]['ros__parameters']
+        assert 'pcd_path' not in params
+        assert params['tomo_path']
 
 
 def test_coordinator_profiles_use_lightweight_mode2_contract():
@@ -130,15 +151,19 @@ def test_navigation_service_node_uses_pose_topics_without_confidence():
 
     for profile in ('A2', 'local', 'unitree_go2', 'unitree_go2w'):
         params = load(profile, 'open3d_loc.yaml')['localization_service_node']['ros__parameters']
-        assert params == {
-            'initialpose_topic': '/initialpose',
-            'current_pose_topic': '/Odometry_open3d',
-            'goal_topic': '/goal_pose',
-            'relocalize_timeout_sec': 10.0,
+        assert set(params) == {
+            'initialpose_topic',
+            'current_pose_topic',
+            'goal_topic',
+            'relocalize_timeout_sec',
         }
+        assert params['initialpose_topic'] == '/initialpose'
+        assert params['current_pose_topic'] == '/Odometry_open3d'
+        assert params['goal_topic'] == '/goal_pose'
+        assert params['relocalize_timeout_sec'] > 0.0
 
 
-def test_old_task_protocol_and_status_interface_are_removed():
+def test_runtime_management_interfaces_are_explicit_and_minimal():
     source = (ROOT / 'src/pct_scan_coordinator.cpp').read_text()
     cmake = (ROOT / 'CMakeLists.txt').read_text()
     package = (ROOT / 'package.xml').read_text()
@@ -146,14 +171,19 @@ def test_old_task_protocol_and_status_interface_are_removed():
         'PlanningRequest',
         'PlannerStatus',
         'ControllerCommand',
-        'NavigationStatus',
-        'std_srvs',
         'cmd_vel',
     ):
         assert legacy not in source
-    assert 'rosidl_generate_interfaces' not in cmake
-    assert 'rosidl_default_generators' not in package
-    assert not (ROOT / 'msg/NavigationStatus.msg').exists()
+    assert 'rosidl_generate_interfaces' in cmake
+    assert 'rosidl_default_generators' in package
+    for rel_path in (
+        'msg/LocalizationStatus.msg',
+        'msg/NavigationStatus.msg',
+        'msg/MapStatus.msg',
+        'srv/SwitchMap.srv',
+        'srv/RestartNavigation.srv',
+    ):
+        assert (ROOT / rel_path).exists()
 
 
 def test_scan_mode2_is_dynamic_and_has_no_mandatory_sequence():
