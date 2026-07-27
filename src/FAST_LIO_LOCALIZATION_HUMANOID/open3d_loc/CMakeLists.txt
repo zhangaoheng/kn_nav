@@ -31,6 +31,7 @@ find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(urdf REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(pct_scan_navigation REQUIRED)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(YAMLCPP REQUIRED yaml-cpp)
@@ -158,6 +159,7 @@ ament_target_dependencies(global_localization_node
         tf2_eigen
         pcl_ros
         pcl_conversions
+        pct_scan_navigation
 )
 
 # Build localization service node

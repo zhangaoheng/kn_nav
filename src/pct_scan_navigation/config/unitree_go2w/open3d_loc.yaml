@@ -1,5 +1,6 @@
 global_localization_node:
   ros__parameters:
+    map_name: "outdoor"
     path_map: "/home/nav_map/cross-floor-kn/global_map_downsize.pcd"
     path_imu_to_base: "/home/nav_map/cross-floor-kn/imu_to_base.txt"
 
@@ -13,6 +14,7 @@ global_localization_node:
     fitness_eval_threshold: 0.15
     normal_search_radius: 0.4
     scan_map_filter_radius: 1.0
+    localization_lost_fail_count: 3
 
     threshold_fitness: 0.7
     threshold_fitness_init: 0.7

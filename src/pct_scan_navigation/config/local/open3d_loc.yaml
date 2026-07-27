@@ -1,5 +1,6 @@
 global_localization_node:
   ros__parameters:
+    map_name: "outdoor"
     # path_map: "/home/kangneng/xq/map/pcd/cross-floor-kn/global_map_downsize.pcd"
     path_map: "/home/kangneng/xq/map/pcd/outdoor/outdoor_global_voxel02.pcd"
     path_imu_to_base: "/home/kangneng/xq/map/pcd/outdoor/imu_to_base.txt"
@@ -14,6 +15,7 @@ global_localization_node:
     fitness_eval_threshold: 0.2
     normal_search_radius: 0.4
     scan_map_filter_radius: 1.0
+    localization_lost_fail_count: 3
 
     threshold_fitness: 0.9
     threshold_fitness_init: 0.9

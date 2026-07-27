@@ -48,6 +48,7 @@ namespace scan_planner
     self_double_cylinder_offset_ = load_parameter<double>(node_, "grid_map.double_cylinder_offset", 0.0);
     body_height_ = load_parameter<double>(node_, "grid_map.body_height", 0.4);
     self_inflation_frame_id_ = load_parameter<std::string>(node_, "grid_map.frame_id", "world");
+    current_map_name_ = load_parameter<std::string>(node_, "map_name", "");
 
     /* initialize main modules */
     visualization_.reset(new PlanningVisualization(node_));
@@ -65,11 +66,23 @@ namespace scan_planner
     go2_execution_frozen_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
         "planning/go2_execution_frozen", 10,
         std::bind(&SCANReplanFSM::go2ExecutionFrozenCallback, this, std::placeholders::_1));
+    current_map_sub_ = node_->create_subscription<pct_scan_navigation::msg::MapStatus>(
+        "/current_map", rclcpp::QoS(1).reliable().transient_local(),
+        std::bind(&SCANReplanFSM::currentMapCallback, this, std::placeholders::_1));
 
     bspline_pub_ = node_->create_publisher<scan_planner_msgs::msg::Bspline>("planning/bspline", 10);
     data_disp_pub_ = node_->create_publisher<scan_planner_msgs::msg::DataDisp>("planning/data_display", 100);
     self_inflation_pub_ = node_->create_publisher<visualization_msgs::msg::Marker>(
         "self_inflation", rclcpp::QoS(1).reliable().transient_local());
+    navigation_status_pub_ =
+        node_->create_publisher<pct_scan_navigation::msg::NavigationStatus>("/navigation_status", 10);
+    navigation_status_timer_ = node_->create_wall_timer(
+        std::chrono::milliseconds(250),
+        std::bind(&SCANReplanFSM::publishNavigationStatus, this));
+    reset_navigation_srv_ = node_->create_service<std_srvs::srv::Trigger>(
+        "~/reset_navigation",
+        std::bind(&SCANReplanFSM::handleResetNavigation, this,
+                  std::placeholders::_1, std::placeholders::_2));
 
     if (navi_mode_ == NAVI_MODE::MANUAL_TARGET)
       goal_sub_ = node_->create_subscription<geometry_msgs::msg::PoseStamped>(
@@ -116,6 +129,7 @@ namespace scan_planner
       return;
 
     cout << "Triggered!" << endl;
+    navigation_status_reason_ = "ok";
     trigger_ = true;
     init_pt_ = odom_pos_;
     updateGoalYaw(msg->poses[0].pose.orientation, "RViz goal");
@@ -296,6 +310,7 @@ namespace scan_planner
     }
 
     trigger_ = true;
+    navigation_status_reason_ = "ok";
     init_pt_ = odom_pos_;
     updateGoalYaw(path.poses.back().pose.orientation, label);
     active_waypoints_ = waypoints;
@@ -317,16 +332,7 @@ namespace scan_planner
 
   void SCANReplanFSM::cancelWaypointNavigation()
   {
-    active_waypoints_.clear();
-    have_target_ = false;
-    have_new_target_ = false;
-    trigger_ = false;
-    replan_fail_count_ = 0;
-    need_hover_stop_ = false;
-    have_end_yaw_ = false;
-    if (have_odom_)
-      callEmergencyStop(odom_pos_);
-    changeFSMExecState(WAIT_TARGET, "WAYPOINT_CANCEL");
+    resetNavigation("canceled");
     RCLCPP_INFO(node_->get_logger(), "Dynamic waypoint path cleared; navigation stopped");
   }
 
@@ -367,6 +373,26 @@ namespace scan_planner
   void SCANReplanFSM::go2ExecutionFrozenCallback(const std_msgs::msg::Bool::ConstSharedPtr &msg)
   {
     go2_execution_frozen_ = msg->data;
+  }
+
+  void SCANReplanFSM::currentMapCallback(
+      const pct_scan_navigation::msg::MapStatus::ConstSharedPtr &msg)
+  {
+    if (!msg)
+      return;
+
+    current_map_name_ = msg->map_name;
+    current_map_state_ = msg->state;
+    if (msg->state == pct_scan_navigation::msg::MapStatus::LOADING)
+      navigation_status_reason_ = "map_switching";
+    else if (msg->state == pct_scan_navigation::msg::MapStatus::FAILED)
+      navigation_status_reason_ = "map_failed";
+    else if (msg->state == pct_scan_navigation::msg::MapStatus::LOADED)
+      navigation_status_reason_ = "map_loaded";
+    else
+      navigation_status_reason_ = msg->reason.empty() ? "map_unloaded" : msg->reason;
+
+    publishNavigationStatus();
   }
 
   void SCANReplanFSM::updateLocalTrajTimeFreeze()
@@ -488,6 +514,7 @@ namespace scan_planner
     int pre_s = int(exec_state_);
     exec_state_ = new_state;
     cout << "[" + pos_call + "]: from " + state_str[pre_s] + " to " + state_str[int(new_state)] << endl;
+    publishNavigationStatus();
   }
 
   std::pair<int, SCANReplanFSM::FSM_EXEC_STATE> SCANReplanFSM::timesOfConsecutiveStateCalls()
@@ -648,6 +675,8 @@ namespace scan_planner
       if (!goalReached())
         return;
 
+      navigation_status_reason_ = "goal_reached";
+      publishNavigationStatus();
       active_waypoints_.clear();
       have_target_ = false;
       have_end_yaw_ = false;
@@ -697,8 +726,99 @@ namespace scan_planner
       replan_fail_count_ = 0;
       need_hover_stop_ = true;
       flag_escape_emergency_ = true;
+      navigation_status_reason_ = "replan_failed";
       changeFSMExecState(EMERGENCY_STOP, "finishProcess");
     }
+  }
+
+  uint8_t SCANReplanFSM::navigationStateFromFSM() const
+  {
+    using Status = pct_scan_navigation::msg::NavigationStatus;
+    if (current_map_state_ == pct_scan_navigation::msg::MapStatus::LOADING)
+      return Status::MAP_SWITCHING;
+    if (current_map_state_ == pct_scan_navigation::msg::MapStatus::FAILED)
+      return Status::FAILED;
+    if (navigation_status_reason_ == "goal_reached")
+      return Status::GOAL_REACHED;
+    if (navigation_status_reason_ == "canceled")
+      return Status::CANCELED;
+
+    switch (exec_state_)
+    {
+    case INIT:
+      return Status::IDLE;
+    case WAIT_TARGET:
+      return have_target_ ? Status::PLANNING_LOCAL : Status::WAITING_GOAL;
+    case GEN_NEW_TRAJ:
+      return Status::PLANNING_LOCAL;
+    case REPLAN_TRAJ:
+      return Status::AVOIDING;
+    case EXEC_TRAJ:
+    case FINAL_YAW_ALIGN:
+      return Status::NAVIGATING;
+    case EMERGENCY_STOP:
+      return Status::BLOCKED;
+    }
+    return Status::FAILED;
+  }
+
+  double SCANReplanFSM::distanceToGoal() const
+  {
+    if (!have_target_ && active_waypoints_.empty())
+      return 0.0;
+    return (odom_pos_ - end_pt_).head<2>().norm();
+  }
+
+  void SCANReplanFSM::publishNavigationStatus()
+  {
+    if (!navigation_status_pub_)
+      return;
+    pct_scan_navigation::msg::NavigationStatus msg;
+    msg.header.stamp = node_->now();
+    msg.header.frame_id = self_inflation_frame_id_.empty() ? "map" : self_inflation_frame_id_;
+    msg.state = navigationStateFromFSM();
+    msg.map_name = current_map_name_;
+    msg.goal_active = have_target_;
+    msg.distance_to_goal = static_cast<float>(distanceToGoal());
+    msg.remaining_waypoints = static_cast<uint32_t>(active_waypoints_.size());
+    if (current_map_state_ == pct_scan_navigation::msg::MapStatus::LOADING)
+      msg.reason = "map_switching";
+    else if (current_map_state_ == pct_scan_navigation::msg::MapStatus::FAILED)
+      msg.reason = navigation_status_reason_.empty() ? "map_failed" : navigation_status_reason_;
+    else if (navigation_status_reason_.empty() || navigation_status_reason_ == "goal_reached")
+      msg.reason = navigation_status_reason_.empty() ? "ok" : navigation_status_reason_;
+    else
+      msg.reason = navigation_status_reason_;
+    navigation_status_pub_->publish(msg);
+
+    if (navigation_status_reason_ == "goal_reached" && !have_target_)
+      navigation_status_reason_ = "ok";
+  }
+
+  void SCANReplanFSM::resetNavigation(const std::string &reason)
+  {
+    active_waypoints_.clear();
+    pending_waypoint_path_.reset();
+    have_target_ = false;
+    have_new_target_ = false;
+    trigger_ = false;
+    replan_fail_count_ = 0;
+    need_hover_stop_ = false;
+    have_end_yaw_ = false;
+    navigation_status_reason_ = reason;
+    if (have_odom_)
+      callEmergencyStop(odom_pos_);
+    changeFSMExecState(WAIT_TARGET, "RESET");
+    publishNavigationStatus();
+  }
+
+  void SCANReplanFSM::handleResetNavigation(
+      const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+      std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+  {
+    resetNavigation("soft_reset");
+    response->success = true;
+    response->message = "navigation reset";
   }
 
   bool SCANReplanFSM::planFromCurrentTraj()

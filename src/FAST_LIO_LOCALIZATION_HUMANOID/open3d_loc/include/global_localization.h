@@ -11,6 +11,8 @@
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <std_msgs/msg/float32.hpp>
+#include <pct_scan_navigation/msg/localization_status.hpp>
+#include <pct_scan_navigation/srv/load_localization_map.hpp>
 #include <tf2_eigen/tf2_eigen.hpp>
 #include <Eigen/Core>
 #include <Eigen/Dense>
@@ -55,6 +57,15 @@ public:
     double ComputeMotionDis(const Eigen::Vector3d &a, const Eigen::Vector3d &b);
 
 private:
+    using LoadLocalizationMap = pct_scan_navigation::srv::LoadLocalizationMap;
+    using LocalizationStatus = pct_scan_navigation::msg::LocalizationStatus;
+
+    bool LoadMapFromPath(const std::string &path_map, const std::string &map_name, std::string *message);
+    void PublishLocalizationStatus();
+    void SetLocalizationStatus(uint8_t state, const std::string &reason);
+    void HandleLoadMap(const std::shared_ptr<LoadLocalizationMap::Request> request,
+                       std::shared_ptr<LoadLocalizationMap::Response> response);
+
     rclcpp::CallbackGroup::SharedPtr state_callback_group_;
     rclcpp::CallbackGroup::SharedPtr scan_callback_group_;
 
@@ -92,6 +103,7 @@ private:
     std::shared_ptr<open3d::geometry::PointCloud> pcd_map_ori_;
     std::shared_ptr<open3d::geometry::PointCloud> pcd_map_fine_;
     std::shared_ptr<open3d::geometry::PointCloud> pcd_scan_cur_;
+    std::mutex lock_map_;
 
     std::deque<std::shared_ptr<open3d::geometry::PointCloud>> que_pcd_scan_;
     int queue_maxsize_;
@@ -106,6 +118,8 @@ private:
     double max_init_icp_yaw_deg_ = 15.0;
     double min_init_fitness_improvement_ = 0.02;
     double scan_map_filter_radius_ = 0.0;
+    int localization_lost_fail_count_ = 3;
+    int tracking_fail_count_ = 0;
     int min_source_points_ = 2500;
     int min_target_points_ = 50000;
 
@@ -130,6 +144,9 @@ private:
     rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr pub_localization_3d_confidence_;
     rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr pub_localization_3d_delay_ms_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_open3d_odometry_;
+    rclcpp::Publisher<LocalizationStatus>::SharedPtr pub_localization_status_;
+    rclcpp::TimerBase::SharedPtr localization_status_timer_;
+    rclcpp::Service<LoadLocalizationMap>::SharedPtr load_map_srv_;
 
     geometry_msgs::msg::PoseStamped localization_3d_;
     std_msgs::msg::Float32 localization_3d_confidence_;
@@ -137,6 +154,12 @@ private:
 
     std::shared_ptr<tf2_ros::TransformBroadcaster> br_odom2map_;
     std::shared_ptr<tf2_ros::StaticTransformBroadcaster> static_broadcaster_;
+
+    std::string current_map_name_;
+    std::string current_map_path_;
+    std::atomic<uint8_t> localization_state_{LocalizationStatus::UNINITIALIZED};
+    std::string localization_reason_{"startup"};
+    std::mutex lock_localization_status_;
 
     /// @brief 定位频率(定位间隔时间，多少秒1次)
     double loc_frequence_;

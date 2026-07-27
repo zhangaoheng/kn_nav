@@ -1,5 +1,6 @@
 global_localization_node:
   ros__parameters:
+    map_name: "outdoor"
     path_map: "/home/nav_map/outdoor/global_map_downsize.pcd"
     path_imu_to_base: "/home/nav_map/outdoor/imu_to_base.txt"
 
@@ -13,6 +14,7 @@ global_localization_node:
     fitness_eval_threshold: 0.2
     normal_search_radius: 0.4
     scan_map_filter_radius: 1.0
+    localization_lost_fail_count: 3
 
     # 跟踪定位的icp阈值，越小越容易接受本次icp结果
     threshold_fitness: 0.7

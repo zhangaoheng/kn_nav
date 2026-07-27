@@ -9,8 +9,11 @@
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include <vector>
 #include <visualization_msgs/msg/marker.hpp>
+#include <pct_scan_navigation/msg/map_status.hpp>
+#include <pct_scan_navigation/msg/navigation_status.hpp>
 
 #include <bspline_opt/bspline_optimizer.h>
 #include <plan_env/grid_map.h>
@@ -84,6 +87,9 @@ namespace scan_planner
     Eigen::Vector3d local_target_pt_, local_target_vel_;                     // local target state
     std::vector<Eigen::Vector3d> active_waypoints_;
     nav_msgs::msg::Path::SharedPtr pending_waypoint_path_;
+    std::string current_map_name_;
+    uint8_t current_map_state_{pct_scan_navigation::msg::MapStatus::UNLOADED};
+    std::string navigation_status_reason_{"startup"};
 
     bool flag_escape_emergency_;
 
@@ -94,9 +100,13 @@ namespace scan_planner
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr waypoint_sub_, path_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr go2_execution_frozen_sub_;
+    rclcpp::Subscription<pct_scan_navigation::msg::MapStatus>::SharedPtr current_map_sub_;
     rclcpp::Publisher<scan_planner_msgs::msg::Bspline>::SharedPtr bspline_pub_;
     rclcpp::Publisher<scan_planner_msgs::msg::DataDisp>::SharedPtr data_disp_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr self_inflation_pub_;
+    rclcpp::Publisher<pct_scan_navigation::msg::NavigationStatus>::SharedPtr navigation_status_pub_;
+    rclcpp::TimerBase::SharedPtr navigation_status_timer_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_navigation_srv_;
 
     /* helper functions */
     bool callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj); // front-end and back-end method
@@ -123,6 +133,12 @@ namespace scan_planner
     double getOdomYaw() const;
     double estimateYawFromSegment(const Eigen::Vector3d &from, const Eigen::Vector3d &to) const;
     void updateLocalTrajTimeFreeze();
+    void publishNavigationStatus();
+    uint8_t navigationStateFromFSM() const;
+    double distanceToGoal() const;
+    void resetNavigation(const std::string &reason);
+    void handleResetNavigation(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                               std::shared_ptr<std_srvs::srv::Trigger::Response> response);
 
     /* ROS functions */
     void execFSMCallback();
@@ -133,6 +149,7 @@ namespace scan_planner
     void pathCallback(const nav_msgs::msg::Path::ConstSharedPtr &msg);
     void odometryCallback(const nav_msgs::msg::Odometry::ConstSharedPtr &msg);
     void go2ExecutionFrozenCallback(const std_msgs::msg::Bool::ConstSharedPtr &msg);
+    void currentMapCallback(const pct_scan_navigation::msg::MapStatus::ConstSharedPtr &msg);
 
     bool checkCollision();
 

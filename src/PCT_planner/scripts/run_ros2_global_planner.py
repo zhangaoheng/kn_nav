@@ -21,7 +21,7 @@ Usage:
       -p tomo_path:=/path/to/tomogram.pickle
 """
 
-import os, sys, argparse, pickle, time, math
+import os, sys, argparse, pickle, time, math, threading
 import ctypes
 import numpy as np
 
@@ -69,6 +69,7 @@ from nav_msgs.msg import Path, Odometry
 from visualization_msgs.msg import Marker
 from tf2_ros import Buffer, TransformListener, TransformException
 from tf2_geometry_msgs import do_transform_pose_stamped
+from pct_scan_navigation.srv import LoadTomogram
 
 import importlib.util as _ilu
 
@@ -275,24 +276,22 @@ class PctGlobalPlannerNode(Node):
         self.path_pub = self.create_publisher(Path, self.path_topic, path_qos)
         self.astar_path_pub = self.create_publisher(Path, self.astar_path_topic, path_qos)
         self.marker_pub = self.create_publisher(Marker, '/pct_marker', 1)
+        self.load_tomo_srv = self.create_service(
+            LoadTomogram, '~/load_tomogram', self._on_load_tomogram)
 
         # ── concurrent goal state ───────────────────────────────────────
         self._planning = False
         self._pending_goal = None   # (goal_x, goal_y, goal_z, goal_yaw)
 
         # ── tomo cache ──────────────────────────────────────────────────
+        self._planner_lock = threading.RLock()
         self._tomo_data = None
         self._tomo_msg = None
         self._tomo_points_count = 0
 
         # ── Step 1: load planner ────────────────────────────────────────
         self.get_logger().info(f'Loading tomogram: {self.tomo_path}')
-        plan_cfg = PlanCfg()
-        self.planner = TomogramPlanner(plan_cfg)
-        tomo_dir = os.path.dirname(self.tomo_path) + os.sep
-        tomo_name = os.path.splitext(os.path.basename(self.tomo_path))[0]
-        self.planner.tomo_dir = tomo_dir
-        self.planner.loadTomogram(tomo_name)
+        self.planner = self._create_planner_for_tomogram(self.tomo_path)
         self.get_logger().info('Planner ready.')
 
         # ── Step 2: publish visualization ───────────────────────────────
@@ -326,6 +325,50 @@ class PctGlobalPlannerNode(Node):
 
     def _odom_cb(self, msg: Odometry):
         self._latest_odom = msg
+
+    def _create_planner_for_tomogram(self, tomo_path):
+        tomo_path = os.path.abspath(tomo_path)
+        tomo_dir = os.path.dirname(tomo_path) + os.sep
+        tomo_name = os.path.splitext(os.path.basename(tomo_path))[0]
+        planner = TomogramPlanner(PlanCfg())
+        planner.tomo_dir = tomo_dir
+        planner.loadTomogram(tomo_name)
+        return planner
+
+    def _replace_tomogram(self, tomo_path, planner):
+        with self._planner_lock:
+            self.planner = planner
+            self.tomo_path = os.path.abspath(tomo_path)
+            self._tomo_data = None
+            self._tomo_msg = None
+            self._tomo_points_count = 0
+
+    def _on_load_tomogram(self, request, response):
+        if not request.tomo_path:
+            response.success = False
+            response.message = 'tomo_path is empty'
+            return response
+        if not os.path.exists(request.tomo_path):
+            response.success = False
+            response.message = f'tomo_path does not exist: {request.tomo_path}'
+            return response
+
+        try:
+            self.get_logger().info(
+                f'Reloading tomogram for map={request.map_name}: {request.tomo_path}')
+            new_planner = self._create_planner_for_tomogram(request.tomo_path)
+            self._replace_tomogram(request.tomo_path, new_planner)
+            if self.publish_tomo:
+                self._publish_tomo(log=True)
+            self._publish_empty_path('tomogram reloaded')
+        except Exception as exc:
+            response.success = False
+            response.message = f'load tomogram failed: {exc}'
+            return response
+
+        response.success = True
+        response.message = f'loaded tomogram for map: {request.map_name}'
+        return response
 
     # ── goal callbacks ──────────────────────────────────────────────────────
 
@@ -415,66 +458,68 @@ class PctGlobalPlannerNode(Node):
         sx, sy = start_xy
         self.get_logger().info(f'  Start: ({sx:.2f}, {sy:.2f}, z={start_z:.2f})')
 
-        # ── compute slices ───────────────────────────────────────────────
-        # RViz 2D goals often arrive with z=0 even when the target floor is
-        # represented in the tomogram. Prefer the tomogram height at goal XY
-        # so descending to a floor near z=0 does not get collapsed to start_z.
-        effective_gz = gz
-        if abs(gz) < self.goal_z_epsilon:
-            inferred_gz = None
-            if self.infer_goal_z_from_tomogram:
-                inferred_gz = self._infer_goal_z_from_tomogram(gx, gy, gz)
-            if inferred_gz is not None:
-                effective_gz = inferred_gz
-                self.get_logger().info(
-                    f'  Goal z ≈ 0, inferred tomogram z={effective_gz:.2f} '
-                    'for slice lookup.')
-            else:
-                effective_gz = start_z
-                self.get_logger().info(
-                    f'  Goal z ≈ 0, using start z={start_z:.2f} '
-                    'for slice lookup.')
+        with self._planner_lock:
+            # ── compute slices ───────────────────────────────────────────
+            # RViz 2D goals often arrive with z=0 even when the target floor is
+            # represented in the tomogram. Prefer the tomogram height at goal XY
+            # so descending to a floor near z=0 does not get collapsed to start_z.
+            effective_gz = gz
+            if abs(gz) < self.goal_z_epsilon:
+                inferred_gz = None
+                if self.infer_goal_z_from_tomogram:
+                    inferred_gz = self._infer_goal_z_from_tomogram(gx, gy, gz)
+                if inferred_gz is not None:
+                    effective_gz = inferred_gz
+                    self.get_logger().info(
+                        f'  Goal z ≈ 0, inferred tomogram z={effective_gz:.2f} '
+                        'for slice lookup.')
+                else:
+                    effective_gz = start_z
+                    self.get_logger().info(
+                        f'  Goal z ≈ 0, using start z={start_z:.2f} '
+                        'for slice lookup.')
 
-        start_pos = np.array([sx, sy, start_z], dtype=np.float32)
-        end_pos = np.array([gx, gy, effective_gz], dtype=np.float32)
-        try:
-            start_slice = self.planner.pos2layer(start_pos)
-        except Exception:
-            start_slice = 0
-        try:
-            end_slice = self.planner.pos2layer(end_pos)
-        except Exception:
-            end_slice = start_slice
+            start_pos = np.array([sx, sy, start_z], dtype=np.float32)
+            end_pos = np.array([gx, gy, effective_gz], dtype=np.float32)
+            try:
+                start_slice = self.planner.pos2layer(start_pos)
+            except Exception:
+                start_slice = 0
+            try:
+                end_slice = self.planner.pos2layer(end_pos)
+            except Exception:
+                end_slice = start_slice
 
-        self.get_logger().info(f'  Slices: start={start_slice}, goal={end_slice}')
+            self.get_logger().info(f'  Slices: start={start_slice}, goal={end_slice}')
 
-        # ── bounds check ─────────────────────────────────────────────────
-        if not self._point_in_bounds(sx, sy) or not self._point_in_bounds(gx, gy):
-            self.get_logger().error(
-                f'Point out of tomogram bounds: start=({sx:.1f},{sy:.1f}), '
-                f'goal=({gx:.1f},{gy:.1f})')
-            self._publish_empty_path('point out of tomogram bounds')
-            self._finish_planning()
-            return
+            # ── bounds check ─────────────────────────────────────────────
+            if not self._point_in_bounds(sx, sy) or not self._point_in_bounds(gx, gy):
+                self.get_logger().error(
+                    f'Point out of tomogram bounds: start=({sx:.1f},{sy:.1f}), '
+                    f'goal=({gx:.1f},{gy:.1f})')
+                self._publish_empty_path('point out of tomogram bounds')
+                self._finish_planning()
+                return
 
-        # ── run planner ──────────────────────────────────────────────────
-        t0 = time.time()
-        traj = self.planner.plan(start_pos, end_pos)
-        elapsed = time.time() - t0
+            # ── run planner ──────────────────────────────────────────────
+            t0 = time.time()
+            traj = self.planner.plan(start_pos, end_pos)
+            elapsed = time.time() - t0
 
-        if traj is None:
-            self.get_logger().error(
-                f'PCT found no path. Tried {elapsed:.1f}s. '
-                'Check start/goal positions and tomogram coverage.')
-            self._publish_empty_path('PCT no path found')
-            self._finish_planning()
-            return
+            if traj is None:
+                self.get_logger().error(
+                    f'PCT found no path. Tried {elapsed:.1f}s. '
+                    'Check start/goal positions and tomogram coverage.')
+                self._publish_empty_path('PCT no path found')
+                self._finish_planning()
+                return
+
+            astar_path = self.planner.getLastAstarPath()
 
         self.get_logger().info(
             f'Path found: {traj.shape[0]} waypoints in {elapsed:.1f}s')
 
         # ── publish A* raw path ──────────────────────────────────────────
-        astar_path = self.planner.getLastAstarPath()
         if astar_path is not None and len(astar_path) > 0:
             self.astar_path_pub.publish(
                 traj_to_path(astar_path, self, frame=self.global_frame))
@@ -691,12 +736,13 @@ class PctGlobalPlannerNode(Node):
         self._tomo_msg = make_pc2(self, pts4, fields_xyz=False, frame=self.global_frame)
 
     def _publish_tomo(self, log=True):
-        if self._tomo_msg is None:
-            self._build_tomo_msg()
-        self._tomo_msg.header.stamp = self.get_clock().now().to_msg()
-        self.tomo_pub.publish(self._tomo_msg)
-        if log:
-            self.get_logger().info(f'Published {self._tomo_points_count} tomogram points')
+        with self._planner_lock:
+            if self._tomo_msg is None:
+                self._build_tomo_msg()
+            self._tomo_msg.header.stamp = self.get_clock().now().to_msg()
+            self.tomo_pub.publish(self._tomo_msg)
+            if log:
+                self.get_logger().info(f'Published {self._tomo_points_count} tomogram points')
 
     def _republish_tomo(self):
         self._publish_tomo(log=False)

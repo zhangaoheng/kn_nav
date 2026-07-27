@@ -18,6 +18,8 @@ find_package(rclcpp REQUIRED)
 find_package(scan_planner_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
+find_package(pct_scan_navigation REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
@@ -27,7 +29,7 @@ find_package(visualization_msgs REQUIRED)
 set(scan_planner_dependencies
   ament_index_cpp bspline_opt geometry_msgs nav_msgs path_searching plan_env
   rclcpp scan_planner_msgs sensor_msgs std_msgs tf2 tf2_geometry_msgs tf2_ros
-  traj_utils visualization_msgs)
+  traj_utils visualization_msgs std_srvs pct_scan_navigation)
 
 add_executable(scan_planner_node
   src/scan_planner_node.cpp

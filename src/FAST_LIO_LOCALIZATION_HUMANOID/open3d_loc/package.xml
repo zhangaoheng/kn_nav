@@ -36,6 +36,7 @@
   <depend>cv_bridge</depend>
   <depend>image_transport</depend>
   <depend>urdf</depend>
+  <depend>pct_scan_navigation</depend>
 
   <build_depend>message_runtime</build_depend>
 

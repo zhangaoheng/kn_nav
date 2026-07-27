@@ -92,6 +92,147 @@ void FilterNearOrigin(sensor_msgs::msg::PointCloud2 &cloud, double filter_radius
 }
 } // namespace
 
+bool GloabalLocalization::LoadMapFromPath(const std::string &path_map,
+                                          const std::string &map_name,
+                                          std::string *message)
+{
+    if (path_map.empty())
+    {
+        if (message)
+            *message = "path_map is empty";
+        return false;
+    }
+
+    auto map_ori = std::make_shared<open3d::geometry::PointCloud>();
+    if (!open3d::io::ReadPointCloud(path_map, *map_ori) || map_ori->IsEmpty())
+    {
+        if (message)
+            *message = "read map from path failed: " + path_map;
+        return false;
+    }
+
+    auto map_coarse = map_ori->VoxelDownSample(voxelsize_coarse_);
+    map_coarse->EstimateNormals(open3d::geometry::KDTreeSearchParamHybrid(voxelsize_coarse_ * 2, 30));
+    if (!map_coarse->HasColors())
+    {
+        map_coarse->PaintUniformColor({1, 0, 0});
+    }
+
+    sensor_msgs::msg::PointCloud2 next_map_msg;
+    open3d_conversions::open3dToRos(*map_coarse, next_map_msg);
+    next_map_msg.header.frame_id = "map";
+    next_map_msg.header.stamp = this->now();
+
+    auto map_fine = map_ori->VoxelDownSample(voxel_downsample_size_);
+    map_fine->colors_.clear();
+    map_fine->EstimateNormals(open3d::geometry::KDTreeSearchParamHybrid(normal_search_radius_, 30));
+
+    std::string resolved_map_name = map_name;
+    if (resolved_map_name.empty())
+    {
+        const auto slash = path_map.find_last_of("/\\");
+        const std::string filename =
+            slash == std::string::npos ? path_map : path_map.substr(slash + 1);
+        const auto dot = filename.find_last_of('.');
+        resolved_map_name = dot == std::string::npos ? filename : filename.substr(0, dot);
+    }
+
+    {
+        std::lock_guard<std::mutex> map_lock(lock_map_);
+        pcd_map_fine_ = map_fine;
+        map_msg_ = next_map_msg;
+        current_map_path_ = path_map;
+    }
+    {
+        std::lock_guard<std::mutex> status_lock(lock_localization_status_);
+        current_map_name_ = resolved_map_name;
+    }
+
+    {
+        std::lock_guard<std::mutex> scan_lock(lock_scan_);
+        que_pcd_scan_.clear();
+        pcd_scan_cur_.reset(new open3d::geometry::PointCloud);
+    }
+    last_loc_ = Eigen::Vector3d(0, 0, -5000);
+    tracking_fail_count_ = 0;
+    loc_fitness_.store(0.0);
+    pub_map_->publish(next_map_msg);
+
+    if (message)
+        *message = "loaded map: " + path_map;
+    return true;
+}
+
+void GloabalLocalization::PublishLocalizationStatus()
+{
+    LocalizationStatus msg;
+    msg.header.stamp = this->now();
+    msg.header.frame_id = "map";
+    msg.state = localization_state_.load();
+    msg.fitness = static_cast<float>(loc_fitness_.load());
+    {
+        std::lock_guard<std::mutex> status_lock(lock_localization_status_);
+        msg.map_name = current_map_name_;
+        msg.reason = localization_reason_;
+    }
+    pub_localization_status_->publish(msg);
+}
+
+void GloabalLocalization::SetLocalizationStatus(uint8_t state, const std::string &reason)
+{
+    bool changed = localization_state_.load() != state;
+    localization_state_.store(state);
+    {
+        std::lock_guard<std::mutex> status_lock(lock_localization_status_);
+        changed = changed || localization_reason_ != reason;
+        localization_reason_ = reason;
+    }
+    if (changed)
+        PublishLocalizationStatus();
+}
+
+void GloabalLocalization::HandleLoadMap(
+    const std::shared_ptr<LoadLocalizationMap::Request> request,
+    std::shared_ptr<LoadLocalizationMap::Response> response)
+{
+    SetLocalizationStatus(LocalizationStatus::MAP_SWITCHING, "map_switching");
+
+    const double old_fitness_eval_threshold = fitness_eval_threshold_;
+    const double old_threshold_fitness = threshold_fitness_;
+    const double old_threshold_fitness_init = threshold_fitness_init_;
+    if (request->use_localization_thresholds)
+    {
+        if (request->fitness_eval_threshold > 0.0)
+            fitness_eval_threshold_ = request->fitness_eval_threshold;
+        if (request->threshold_fitness > 0.0)
+            threshold_fitness_ = request->threshold_fitness;
+        if (request->threshold_fitness_init > 0.0)
+            threshold_fitness_init_ = request->threshold_fitness_init;
+    }
+
+    std::string message;
+    if (!LoadMapFromPath(request->pcd_path, request->map_name, &message))
+    {
+        fitness_eval_threshold_ = old_fitness_eval_threshold;
+        threshold_fitness_ = old_threshold_fitness;
+        threshold_fitness_init_ = old_threshold_fitness_init;
+        response->success = false;
+        response->message = message;
+        SetLocalizationStatus(LocalizationStatus::UNINITIALIZED, "map_load_failed");
+        return;
+    }
+
+    loc_initialized_.store(false);
+    relocalization_requested_.store(false);
+    {
+        std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
+        mat_odom2map_ = Eigen::Matrix4d::Identity();
+    }
+    response->success = true;
+    response->message = message;
+    SetLocalizationStatus(LocalizationStatus::UNINITIALIZED, "map_loaded");
+}
+
 GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
 {
 
@@ -123,6 +264,14 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
     pub_localization_3d_confidence_ = this->create_publisher<std_msgs::msg::Float32>("/localization_3d_confidence", 1);
     pub_localization_3d_delay_ms_ = this->create_publisher<std_msgs::msg::Float32>("/localization_3d_delay_ms", 1);
     pub_open3d_odometry_ = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry_open3d", 20);
+    pub_localization_status_ = this->create_publisher<LocalizationStatus>("/localization_status", 10);
+    localization_status_timer_ = this->create_wall_timer(
+        std::chrono::milliseconds(250),
+        std::bind(&GloabalLocalization::PublishLocalizationStatus, this));
+    load_map_srv_ = this->create_service<LoadLocalizationMap>(
+        "~/load_map",
+        std::bind(&GloabalLocalization::HandleLoadMap, this,
+                  std::placeholders::_1, std::placeholders::_2));
 
     loc_frequence_ = 2.0; //
     loc_fitness_.store(0.0);
@@ -169,6 +318,7 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
     this->declare_parameter<double>("max_init_icp_yaw_deg", 15.0);
     this->declare_parameter<double>("min_init_fitness_improvement", 0.02);
     this->declare_parameter<double>("scan_map_filter_radius", 0.0);
+    this->declare_parameter<int>("localization_lost_fail_count", 3);
     this->declare_parameter<int>("min_source_points", 2500);
     this->declare_parameter<int>("min_target_points", 50000);
     this->declare_parameter<double>("threshold_fitness_init", 0.9);
@@ -177,6 +327,7 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
     this->declare_parameter<double>("dis_updatemap", 1);
     this->declare_parameter<double>("map_publish_interval", 2.0);
     this->declare_parameter<std::string>("path_imu_to_base", "");
+    this->declare_parameter<std::string>("map_name", "");
 
     this->get_parameter("pcd_queue_maxsize", queue_maxsize_);
     if (queue_maxsize_ < 1)
@@ -196,6 +347,7 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
     this->get_parameter("max_init_icp_yaw_deg", max_init_icp_yaw_deg_);
     this->get_parameter("min_init_fitness_improvement", min_init_fitness_improvement_);
     this->get_parameter("scan_map_filter_radius", scan_map_filter_radius_);
+    this->get_parameter("localization_lost_fail_count", localization_lost_fail_count_);
     this->get_parameter("min_source_points", min_source_points_);
     this->get_parameter("min_target_points", min_target_points_);
     this->get_parameter("threshold_fitness_init", threshold_fitness_init_);
@@ -204,6 +356,7 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
     this->get_parameter("dis_updatemap", dis_updatemap_);
     std::string path_imu_to_base = "";
     this->get_parameter("path_imu_to_base", path_imu_to_base);
+    this->get_parameter("map_name", current_map_name_);
     double map_publish_interval = 2.0;
     this->get_parameter("map_publish_interval", map_publish_interval);
 
@@ -238,24 +391,12 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
     std::string path_map = "";
     this->declare_parameter<std::string>("path_map", "");
     this->get_parameter("path_map", path_map);
-    open3d::io::ReadPointCloud(path_map, *pcd_map_ori_);
-    if (pcd_map_ori_ == nullptr || pcd_map_ori_->IsEmpty())
+    std::string map_load_message;
+    if (!LoadMapFromPath(path_map, current_map_name_, &map_load_message))
     {
-        RCLCPP_ERROR(this->get_logger(), "read map from path: %s failed", path_map.c_str());
+        RCLCPP_ERROR(this->get_logger(), "%s", map_load_message.c_str());
         rclcpp::shutdown();
     }
-
-    auto pcd_map_coarse = pcd_map_ori_->VoxelDownSample(voxelsize_coarse_);
-    pcd_map_coarse->EstimateNormals(open3d::geometry::KDTreeSearchParamHybrid(voxelsize_coarse_ * 2, 30));
-    if (!pcd_map_coarse->HasColors())
-    {
-        pcd_map_coarse->PaintUniformColor({1, 0, 0});
-    }
-    /// publish map, 用粗地图可视化，减少资源占用
-    open3d_conversions::open3dToRos(*pcd_map_coarse, map_msg_);
-    map_msg_.header.frame_id = "map";
-    map_msg_.header.stamp = this->now();
-    pub_map_->publish(map_msg_);
     if (map_publish_interval > 0.0)
     {
         auto map_publish_period = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -264,6 +405,7 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
             map_publish_period,
             [this]()
             {
+                std::lock_guard<std::mutex> map_lock(lock_map_);
                 map_msg_.header.stamp = this->now();
                 pub_map_->publish(map_msg_);
             });
@@ -271,11 +413,6 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
                     "map publisher uses transient_local QoS and republish interval %.3f s",
                     map_publish_interval);
     }
-
-    pcd_map_fine_ = pcd_map_ori_->VoxelDownSample(voxel_downsample_size_);
-    pcd_map_fine_->colors_.clear();
-    pcd_map_fine_->EstimateNormals(open3d::geometry::KDTreeSearchParamHybrid(normal_search_radius_, 30));
-    pcd_map_ori_.reset();
 
     static_broadcaster_ = std::make_shared<tf2_ros::StaticTransformBroadcaster>(this);
 
@@ -702,6 +839,7 @@ void GloabalLocalization::CallbackScanBody(
 
 bool GloabalLocalization::LocalizationInitialize()
 {
+    SetLocalizationStatus(LocalizationStatus::INITIALIZING, "initializing");
     /// 裁剪后的地图
     std::shared_ptr<open3d::geometry::PointCloud> map_fine_crop(new open3d::geometry::PointCloud);
 
@@ -740,6 +878,7 @@ bool GloabalLocalization::LocalizationInitialize()
         }
         if (scan_snapshot == nullptr || scan_snapshot->IsEmpty())
         {
+            SetLocalizationStatus(LocalizationStatus::INITIALIZING, "no_scan");
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             continue;
         }
@@ -760,7 +899,16 @@ bool GloabalLocalization::LocalizationInitialize()
             OBB_map->R_ = mat_baselink2map_cur.block<3, 3>(0, 0);
             OBB_scan->center_ = mat_baselink2odom_cur.block<3, 1>(0, 3);
             OBB_scan->R_ = mat_baselink2odom_cur.block<3, 3>(0, 0);
-            *map_fine_crop = *pcd_map_fine_->Crop(*OBB_map);
+            {
+                std::lock_guard<std::mutex> map_lock(lock_map_);
+                if (!pcd_map_fine_ || pcd_map_fine_->IsEmpty())
+                {
+                    SetLocalizationStatus(LocalizationStatus::UNINITIALIZED, "map_empty");
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                    continue;
+                }
+                *map_fine_crop = *pcd_map_fine_->Crop(*OBB_map);
+            }
 
             /// 配准计时
             target = map_fine_crop;
@@ -781,6 +929,7 @@ bool GloabalLocalization::LocalizationInitialize()
                                      source->points_.size(), min_source_points_, target->points_.size(), min_target_points_,
                                      OBB_map->center_.x(), OBB_map->center_.y(), OBB_map->center_.z(),
                                      OBB_scan->center_.x(), OBB_scan->center_.y(), OBB_scan->center_.z());
+                SetLocalizationStatus(LocalizationStatus::INITIALIZING, "invalid_cloud");
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
                 continue;
             }
@@ -854,6 +1003,7 @@ bool GloabalLocalization::LocalizationInitialize()
     if (!init_success)
     {
         RCLCPP_WARN(this->get_logger(), "localization initialize stopped before success");
+        SetLocalizationStatus(LocalizationStatus::UNINITIALIZED, "init_stopped");
         return false;
     }
 
@@ -865,6 +1015,8 @@ bool GloabalLocalization::LocalizationInitialize()
     RCLCPP_INFO(this->get_logger(), "---------------------------------------------------------\n");
     RCLCPP_INFO(this->get_logger(), "---------------------------------------------------------\n");
 
+    tracking_fail_count_ = 0;
+    SetLocalizationStatus(LocalizationStatus::INIT_SUCCESS, "ok");
     return true;
 }
 void GloabalLocalization::Localization()
@@ -928,6 +1080,7 @@ void GloabalLocalization::Localization()
     }
 
     loc_initialized_.store(true); /// 初始化成功
+    SetLocalizationStatus(LocalizationStatus::TRACKING, "ok");
 
     RCLCPP_INFO(this->get_logger(), "Localization initialization complete");
 
@@ -957,6 +1110,7 @@ void GloabalLocalization::Localization()
     {
         if (relocalization_requested_.exchange(false))
         {
+            SetLocalizationStatus(LocalizationStatus::INITIALIZING, "initialpose");
             loc_initialized_.store(false);
             loc_fitness_.store(0.0);
             last_loc_ = Eigen::Vector3d(0, 0, -5000);
@@ -969,11 +1123,19 @@ void GloabalLocalization::Localization()
             }
 
             loc_initialized_.store(true);
+            SetLocalizationStatus(LocalizationStatus::TRACKING, "ok");
             last_loc_ = Eigen::Vector3d(0, 0, -5000);
             map_fine_crop->Clear();
             loc_cost = 0.0;
             time_last_loc = std::chrono::high_resolution_clock::now();
             RCLCPP_INFO(this->get_logger(), "manual relocalization complete");
+            continue;
+        }
+
+        if (!loc_initialized_.load())
+        {
+            SetLocalizationStatus(LocalizationStatus::UNINITIALIZED, "waiting_initialpose");
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
         }
 
@@ -1013,6 +1175,7 @@ void GloabalLocalization::Localization()
         }
         if (scan_snapshot == nullptr || scan_snapshot->IsEmpty())
         {
+            SetLocalizationStatus(LocalizationStatus::TRACKING_WARN, "no_scan");
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             continue;
         }
@@ -1044,7 +1207,15 @@ void GloabalLocalization::Localization()
                 OBB_map->R_ = mat_baselink2map_cur.block<3, 3>(0, 0);
 
                 /// 粗地图和精地图
-                *map_fine_crop = *pcd_map_fine_->Crop(*OBB_map);
+                {
+                    std::lock_guard<std::mutex> map_lock(lock_map_);
+                    if (!pcd_map_fine_ || pcd_map_fine_->IsEmpty())
+                    {
+                        SetLocalizationStatus(LocalizationStatus::TRACKING_LOST, "map_empty");
+                        continue;
+                    }
+                    *map_fine_crop = *pcd_map_fine_->Crop(*OBB_map);
+                }
 
                 auto submap_e = std::chrono::high_resolution_clock::now();
                 auto submap_cost = std::chrono::duration_cast<std::chrono::microseconds>(submap_e - submap_s).count() / 1000.0;
@@ -1072,6 +1243,12 @@ void GloabalLocalization::Localization()
                                      source->points_.size(), min_source_points_, target->points_.size(), min_target_points_,
                                      OBB_map->center_.x(), OBB_map->center_.y(), OBB_map->center_.z(),
                                      OBB_scan->center_.x(), OBB_scan->center_.y(), OBB_scan->center_.z());
+                tracking_fail_count_++;
+                SetLocalizationStatus(
+                    tracking_fail_count_ >= localization_lost_fail_count_
+                        ? LocalizationStatus::TRACKING_LOST
+                        : LocalizationStatus::TRACKING_WARN,
+                    "invalid_cloud");
                 continue;
             }
 
@@ -1101,9 +1278,22 @@ void GloabalLocalization::Localization()
             {
                 std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
                 mat_odom2map_ = reg_matrix;
+                tracking_fail_count_ = 0;
+                SetLocalizationStatus(LocalizationStatus::TRACKING, "ok");
             }
             else
             {
+                std::string reject_reason = "fitness_low";
+                if (delta_trans > max_icp_translation_)
+                    reject_reason = "delta_too_large";
+                else if (std::abs(delta_yaw) > max_icp_yaw_deg_)
+                    reject_reason = "yaw_delta_too_large";
+                tracking_fail_count_++;
+                SetLocalizationStatus(
+                    tracking_fail_count_ >= localization_lost_fail_count_
+                        ? LocalizationStatus::TRACKING_LOST
+                        : LocalizationStatus::TRACKING_WARN,
+                    reject_reason);
                 RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                                      "reject tracking icp: eva_fitness=%f, threshold=%.3f, delta_trans=%.3f, max_delta=%.3f, delta_yaw_deg=%.3f, max_yaw_deg=%.3f, source=%zu, target=%zu",
                                      loc_fitness, threshold_fitness_, delta_trans, max_icp_translation_, delta_yaw, max_icp_yaw_deg_,
@@ -1189,8 +1379,10 @@ void GloabalLocalization::CallbackInitialPose(const geometry_msgs::msg::PoseWith
     }
     else
     {
+        relocalization_requested_.store(true);
+        SetLocalizationStatus(LocalizationStatus::INITIALIZING, "initialpose");
         RCLCPP_INFO(this->get_logger(),
-                    "manual initialpose accepted before initialization; initialization loop will use it");
+                    "manual initialpose accepted before initialization; request initialization ICP");
     }
 }
 
