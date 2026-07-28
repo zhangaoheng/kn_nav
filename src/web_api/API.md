@@ -123,6 +123,11 @@ HTTP 200 只表示 HTTP 请求和 ROS Service 调用已经完成，不保证业�
 | 7 | `POST` | `/api/navigation/queue` | 将一个导航目标加入顺序执行队列 |
 | 8 | `GET` | `/api/navigation/queue` | 查询当前任务、等待队列和历史记录 |
 | 9 | `GET` | `/api/robot/status` | 获取机器狗当前位置、四元数、速度和时间戳 |
+| 10 | `GET` | `/api/current_map` | 获取最新的当前地图状态 |
+| 11 | `GET` | `/api/localization_status` | 获取最新的Open3D定位状态 |
+| 12 | `GET` | `/api/navigation_status` | 获取最新的导航执行状态 |
+| 13 | `POST` | `/api/switch_map` | 同时切换定位PCD和规划tomogram |
+| 14 | `POST` | `/api/restart_navigation` | 软复位导航或请求完整重启 |
 | 诊断 | `GET` | `/api/health` | 获取 API 和 ROS 网关状态 |
 | 诊断 | `GET` | `/api/services` | 获取底层 ROS Service 就绪状态 |
 
@@ -984,15 +989,286 @@ API尚未收到 `/Odometry_open3d` 时返回 HTTP 503：
 }
 ```
 
-## 12. 健康检查
+## 12. 获取当前地图状态
+
+API节点持续监听ROS Topic `/current_map`，该HTTP接口返回缓存的最新一帧。前端不需要直接连接ROS。
 
 ### 12.1 请求
+
+```http
+GET /api/current_map
+```
+
+该接口没有Body。
+
+### 12.2 成功响应
+
+```json
+{
+  "success": true,
+  "topic": "/current_map",
+  "frame_id": "map",
+  "state": 2,
+  "state_name": "LOADED",
+  "map_name": "outdoor",
+  "reason": "ok",
+  "timestamp": {
+    "sec": 1785123456,
+    "nanosec": 123456789,
+    "seconds": 1785123456.1234567,
+    "received_at": "2026-07-27T06:10:00.000000+00:00",
+    "age_seconds": 0.35
+  }
+}
+```
+
+### 12.3 地图状态
+
+| `state` | `state_name` | 含义 | 前端处理 |
+|---:|---|---|---|
+| `0` | `UNLOADED` | 尚未加载地图 | 禁用导航目标发送 |
+| `1` | `LOADING` | 正在切换地图 | 禁用目标发送和重复切图 |
+| `2` | `LOADED` | 地图已加载 | 继续等待定位进入`TRACKING` |
+| `3` | `FAILED` | 地图加载失败 | 显示`reason`，禁止导航 |
+
+`/current_map`是事件触发状态，不是周期心跳。`timestamp.age_seconds`较大不一定表示异常，只要节点正常，该数据仍然是最新地图状态。
+
+API启动后尚未收到地图状态时返回HTTP 503：
+
+```json
+{
+  "detail": "ROS status is unavailable: no message received from /current_map"
+}
+```
+
+## 13. 获取定位状态
+
+API节点持续监听ROS Topic `/localization_status`。前端建议每`250～500 ms`轮询该HTTP接口。
+
+### 13.1 请求
+
+```http
+GET /api/localization_status
+```
+
+### 13.2 成功响应
+
+```json
+{
+  "success": true,
+  "topic": "/localization_status",
+  "frame_id": "map",
+  "state": 3,
+  "state_name": "TRACKING",
+  "map_name": "outdoor",
+  "reason": "ok",
+  "fitness": 0.95,
+  "timestamp": {
+    "sec": 1785123456,
+    "nanosec": 123456789,
+    "seconds": 1785123456.1234567,
+    "received_at": "2026-07-27T06:10:00.000000+00:00",
+    "age_seconds": 0.08
+  },
+  "stale_after_seconds": 1.0,
+  "stale": false
+}
+```
+
+### 13.3 定位状态
+
+| `state` | `state_name` | 含义 | 是否允许发导航目标 |
+|---:|---|---|---|
+| `0` | `UNINITIALIZED` | 未完成重定位 | 否 |
+| `1` | `INITIALIZING` | 正在执行初始定位 | 否 |
+| `2` | `INIT_SUCCESS` | 初始定位刚成功 | 建议继续等待`TRACKING` |
+| `3` | `TRACKING` | 稳定跟踪 | 是，但仍需检查地图和导航状态 |
+| `4` | `TRACKING_WARN` | 定位质量波动 | 建议暂停发新目标 |
+| `5` | `TRACKING_LOST` | 定位丢失 | 否，需要重新定位 |
+| `6` | `MAP_SWITCHING` | 定位地图切换中 | 否 |
+
+`fitness`只用于辅助显示，不建议前端使用固定fitness阈值取代`state`判断。`stale=true`表示API超过1秒未收到新状态，此时应禁止发新目标并提示状态源异常。
+
+尚未收到ROS消息时返回HTTP 503：
+
+```json
+{
+  "detail": "ROS status is unavailable: no message received from /localization_status"
+}
+```
+
+## 14. 获取导航状态
+
+API节点持续监听ROS Topic `/navigation_status`。前端建议每`250～500 ms`轮询该HTTP接口。
+
+### 14.1 请求
+
+```http
+GET /api/navigation_status
+```
+
+### 14.2 成功响应
+
+```json
+{
+  "success": true,
+  "topic": "/navigation_status",
+  "frame_id": "map",
+  "state": 5,
+  "state_name": "NAVIGATING",
+  "map_name": "outdoor",
+  "reason": "ok",
+  "goal_active": true,
+  "distance_to_goal": 1.25,
+  "remaining_waypoints": 3,
+  "timestamp": {
+    "sec": 1785123456,
+    "nanosec": 123456789,
+    "seconds": 1785123456.1234567,
+    "received_at": "2026-07-27T06:10:00.000000+00:00",
+    "age_seconds": 0.06
+  },
+  "stale_after_seconds": 1.0,
+  "stale": false
+}
+```
+
+### 14.3 响应字段
+
+| 字段 | 含义 |
+|---|---|
+| `state/state_name` | 导航状态数值和可读名称 |
+| `map_name` | 导航节点当前使用的地图名 |
+| `goal_active` | 局部规划器是否持有活动目标 |
+| `distance_to_goal` | 当前位置到最终目标的XY直线距离，单位m |
+| `remaining_waypoints` | 当前active waypoints数量 |
+| `reason` | 简短状态原因 |
+| `stale` | 是否超过1秒未收到新消息 |
+
+### 14.4 导航状态
+
+| `state` | `state_name` | 前端显示/处理 |
+|---:|---|---|
+| `0` | `IDLE` | 空闲，结合地图和定位状态判断是否可发目标 |
+| `1` | `WAITING_GOAL` | 等待目标 |
+| `2` | `PLANNING_GLOBAL` | 全局规划中 |
+| `3` | `GLOBAL_READY` | 全局路径就绪 |
+| `4` | `PLANNING_LOCAL` | 局部轨迹生成中 |
+| `5` | `NAVIGATING` | 导航中 |
+| `6` | `AVOIDING` | 避障/局部重规划中 |
+| `7` | `BLOCKED` | 受阻或急停，提示人工处理 |
+| `8` | `GOAL_REACHED` | 已抵达目标 |
+| `9` | `CANCELED` | 目标已取消 |
+| `10` | `FAILED` | 导航失败，显示`reason` |
+| `11` | `LOCALIZATION_LOST` | 定位丢失；同时以定位状态接口为准 |
+| `12` | `MAP_SWITCHING` | 地图切换中，禁止发目标 |
+
+`stale=true`或尚未收到ROS消息时，前端不应根据旧状态继续发导航目标。未收到消息时返回HTTP 503。
+
+## 15. 切换地图
+
+通过`nav_manager_node`同时切换Open3D定位PCD和PCT全局规划tomogram。这是业务上推荐的唯一切图入口。
+
+### 15.1 请求
+
+```http
+POST /api/switch_map
+Content-Type: application/json
+```
+
+```json
+{
+  "map_name": "outdoor"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `map_name` | string | 是 | `map_profiles.yaml`中`maps`下的profile名；不是PCD或pickle文件名 |
+
+### 15.2 成功响应
+
+```json
+{
+  "success": true,
+  "message": "switched to map: outdoor",
+  "map_name": "outdoor"
+}
+```
+
+`success=true`表示PCD和tomogram都已加载成功。这不表示已完成新地图上的重定位。
+
+### 15.3 业务失败
+
+```json
+{
+  "success": false,
+  "message": "localization map load failed: ...",
+  "map_name": "outdoor"
+}
+```
+
+底层Service不存在时返回HTTP 503；切图超过API的Service超时上限时返回HTTP 504。大地图可由服务端增加`--service-timeout`。
+
+### 15.4 前端调用规则
+
+1. 调用前禁用“发送目标”和“重复切图”按钮。
+2. 请求返回`success=true`后，继续等待`/api/current_map.state_name=LOADED`。
+3. 重新调用重定位接口。
+4. 等待`/api/localization_status.state_name=TRACKING`且`stale=false`。
+5. 最后才允许发新地图上的导航目标。
+
+切图前应确保HTTP顺序导航队列为空。当前API队列是独立的上层任务队列，ROS内部软复位不会自动删除尚未发布的HTTP排队任务。
+
+## 16. 导航复位
+
+### 16.1 请求
+
+```http
+POST /api/restart_navigation
+Content-Type: application/json
+```
+
+常规软复位：
+
+```json
+{
+  "mode": 0
+}
+```
+
+| `mode` | 名称 | 功能 | 使用建议 |
+|---:|---|---|---|
+| `0` | `SOFT_RESET` | 发布零速度、清空waypoint并复位局部导航 | 常规停止或异常恢复优先使用 |
+| `1` | `FULL_RESTART` | 请求执行预配置的外部重启命令 | 只在服务端已配置外部命令时使用 |
+
+`mode`只能是`0`或`1`，其他值返回HTTP 422。
+
+### 16.2 响应
+
+```json
+{
+  "success": true,
+  "accepted": true,
+  "message": "navigation soft reset completed",
+  "mode": 0,
+  "mode_name": "SOFT_RESET"
+}
+```
+
+`success`和`accepted`值相同。`accepted=false`表示请求未被底层接受，例如`mode=1`但未配置外部重启命令。
+
+`SOFT_RESET`不会重启进程、切换地图或恢复定位。如果定位已丢失，还需要调用重定位接口。复位前同样应停止向HTTP导航队列添加新任务，并确保待执行队列为空。
+
+## 17. 健康检查
+
+### 17.1 请求
 
 ```http
 GET /api/health
 ```
 
-### 12.2 响应
+### 17.2 响应
 
 ```json
 {
@@ -1004,22 +1280,29 @@ GET /api/health
     "/open3d_loc/publish_goal": true,
     "/open3d_loc/pose_deviation": true,
     "/go2_cmd_vel_bridge/enable": true,
+    "/switch_map": true,
+    "/restart_navigation": true,
     "/global_localization_node/get_parameters": true
+  },
+  "topics": {
+    "/current_map": true,
+    "/localization_status": true,
+    "/navigation_status": true
   }
 }
 ```
 
-`success=true` 只表示 API 内部 ROS 节点和 executor 正常。具体业务是否可用，必须检查每个 Service 对应的布尔值。
+`success=true` 只表示 API 内部 ROS 节点和 executor 正常。`services`表示对应Service是否就绪；`topics`表示API启动后是否至少收到过一帧对应状态。具体业务是否可用，仍要检查状态接口中的`state_name`和`stale`。
 
-## 13. ROS Service 状态
+## 18. ROS Service 状态
 
-### 13.1 请求
+### 18.1 请求
 
 ```http
 GET /api/services
 ```
 
-### 13.2 响应
+### 18.2 响应
 
 ```json
 {
@@ -1030,6 +1313,8 @@ GET /api/services
     "/open3d_loc/publish_goal": true,
     "/open3d_loc/pose_deviation": true,
     "/go2_cmd_vel_bridge/enable": false,
+    "/switch_map": true,
+    "/restart_navigation": true,
     "/global_localization_node/get_parameters": true
   }
 }
@@ -1037,7 +1322,7 @@ GET /api/services
 
 Service 为 `false` 时，对应业务接口通常返回 HTTP 503。
 
-## 14. HTTP 错误码
+## 19. HTTP 错误码
 
 | 状态码 | 含义 | 调用方处理建议 |
 |---:|---|---|
@@ -1048,7 +1333,7 @@ Service 为 `false` 时，对应业务接口通常返回 HTTP 503。
 | `422` | Body、字段或数值不合法 | 检查 JSON 对象、字段类型和必填字段 |
 | `500` | 导航点文件损坏或服务内部错误 | 记录 `detail` 并通知服务维护人员 |
 | `502` | ROS Service 调用异常 | 检查 ROS 节点日志 |
-| `503` | ROS Service 不可用 | 稍后重试并检查 `/api/services` |
+| `503` | ROS Service不可用，或API尚未收到状态Topic | 检查`/api/health`中的`services/topics` |
 | `504` | ROS Service 响应超时 | 提示超时，避免无限自动重试 |
 
 HTTP 层错误通常使用：
@@ -1074,20 +1359,23 @@ FastAPI 字段校验错误使用：
 }
 ```
 
-## 15. 建议调用流程
+## 20. 建议调用流程
 
 建议按以下顺序组织业务调用：
 
-1. 调用 `GET /api/health`，确认 API 正常；
-2. 调用 `GET /api/services`，确认所需 ROS Service 已就绪；
-3. 必要时调用重定位接口，并等待 `success=true`；
-4. 调用 `GET /api/robot/status`，确认定位、速度和数据时间正常；
-5. 调用 `GET /api/navigation/points` 获取当前地图的导航点；
-6. 需要时调用保存接口或重命名接口维护导航点；
-7. 确认场地和机器人状态安全后，开启底盘速度桥；
-8. 单个临时目标可以调用 `POST /api/navigation/goal`；连续目标统一调用 `POST /api/navigation/queue`；
-9. 连续导航期间轮询 `GET /api/navigation/queue` 查看执行进度；
-10. 任务结束、异常或人工停止时，立即关闭底盘速度桥。
+1. 调用`GET /api/health`，确认API、必要Service和三个状态Topic正常；
+2. 开始轮询`/api/current_map`、`/api/localization_status`和`/api/navigation_status`；
+3. 如果需要切图，先确保HTTP导航队列为空，再调用`POST /api/switch_map`；
+4. 等待地图状态进入`LOADED`，然后调用重定位接口；
+5. 等待定位状态进入`TRACKING`，并确认`stale=false`；
+6. 确认导航状态为`IDLE`、`WAITING_GOAL`、`GOAL_REACHED`或`CANCELED`；
+7. 调用`GET /api/robot/status`，确认位姿、速度和数据时间正常；
+8. 调用`GET /api/navigation/points`获取导航点，需要时进行保存或重命名；
+9. 确认场地和机器人状态安全后，开启底盘速度桥；
+10. 单个目标调用`POST /api/navigation/goal`；连续目标调用`POST /api/navigation/queue`；
+11. 导航期间持续查看`/api/navigation_status`，队列任务另外查看`/api/navigation/queue`；
+12. 出现`TRACKING_LOST`、`BLOCKED`或`FAILED`时停止添加目标，必要时调用`POST /api/restart_navigation`；
+13. 任务结束、异常或人工停止时，关闭底盘速度桥。
 
 关闭底盘桥请求：
 
@@ -1097,19 +1385,21 @@ FastAPI 字段校验错误使用：
 }
 ```
 
-## 16. 重试建议
+## 21. 重试建议
 
 - HTTP 422：请求数据错误，不应原样重试；
 - HTTP 401、404、409：修正请求后再调用；
-- HTTP 503：可以间隔重试，并同时查询 `/api/services`；
+- HTTP 503：可以间隔重试，并查询`/api/health`判断是Service未就绪还是Topic尚未收到；
 - HTTP 504：应提示用户，避免高频自动重试；
 - `success=false`：根据 `message` 判断原因，不要无条件循环调用；
 - 重定位接口执行期间不要再次提交重定位请求；
 - 导航队列接受请求后，不要再使用直接目标接口覆盖当前任务；
 - 机器狗状态接口返回503时，应等待新的里程计数据，不要据此发送导航目标；
+- 定位或导航状态返回`stale=true`时，不应继续发新目标；
+- 切图失败时不要高频自动重试，应显示`message`并检查地图profile；
 - 底盘桥启用失败时不要自动持续重试，应先检查定位和机器人状态心跳。
 
-## 17. 部署与浏览器调用注意事项
+## 22. 部署与浏览器调用注意事项
 
 当前 API 服务本身未配置 CORS。
 
@@ -1129,7 +1419,7 @@ http://127.0.0.1:8000
 
 或者机器人的实际网络地址。
 
-## 18. 安全注意事项
+## 23. 安全注意事项
 
 - 发布目标和开启底盘桥是两个独立动作；发布目标不会自动保证底盘桥已开启。
 - `success=true` 表示请求被相应节点接受，不表示机器人已经到达。

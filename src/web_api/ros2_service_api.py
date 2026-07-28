@@ -15,6 +15,7 @@ address.
 
 import argparse
 import asyncio
+import copy
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -131,6 +132,19 @@ class BridgeEnableRequest(BaseModel):
     data: bool = Field(..., description="True to arm, false to disarm the bridge")
 
 
+class SwitchMapRequest(BaseModel):
+    map_name: str = Field(..., description="Map profile name from map_profiles.yaml")
+
+
+class RestartNavigationRequest(BaseModel):
+    mode: int = Field(
+        0,
+        ge=0,
+        le=1,
+        description="0 performs a soft reset; 1 requests a configured full restart",
+    )
+
+
 def _ensure_finite(values: Dict[str, float]) -> None:
     invalid = [name for name, value in values.items() if not math.isfinite(value)]
     if invalid:
@@ -235,6 +249,21 @@ def _normalise_point_name(name: str) -> str:
     if any(ord(character) < 32 for character in normalised):
         raise HTTPException(
             status_code=422, detail="Point name must not contain control characters"
+        )
+    return normalised
+
+
+def _normalise_map_name(name: str) -> str:
+    normalised = name.strip()
+    if not normalised:
+        raise HTTPException(status_code=422, detail="Map name must not be empty")
+    if len(normalised) > 128:
+        raise HTTPException(
+            status_code=422, detail="Map name must not exceed 128 characters"
+        )
+    if any(ord(character) < 32 for character in normalised):
+        raise HTTPException(
+            status_code=422, detail="Map name must not contain control characters"
         )
     return normalised
 
@@ -469,6 +498,45 @@ class RosServiceGateway:
         "publish_goal": "/open3d_loc/publish_goal",
         "pose_deviation": "/open3d_loc/pose_deviation",
         "bridge_enable": "/go2_cmd_vel_bridge/enable",
+        "switch_map": "/switch_map",
+        "restart_navigation": "/restart_navigation",
+    }
+
+    STATUS_TOPICS = {
+        "current_map": "/current_map",
+        "localization_status": "/localization_status",
+        "navigation_status": "/navigation_status",
+    }
+
+    MAP_STATE_NAMES = {
+        0: "UNLOADED",
+        1: "LOADING",
+        2: "LOADED",
+        3: "FAILED",
+    }
+    LOCALIZATION_STATE_NAMES = {
+        0: "UNINITIALIZED",
+        1: "INITIALIZING",
+        2: "INIT_SUCCESS",
+        3: "TRACKING",
+        4: "TRACKING_WARN",
+        5: "TRACKING_LOST",
+        6: "MAP_SWITCHING",
+    }
+    NAVIGATION_STATE_NAMES = {
+        0: "IDLE",
+        1: "WAITING_GOAL",
+        2: "PLANNING_GLOBAL",
+        3: "GLOBAL_READY",
+        4: "PLANNING_LOCAL",
+        5: "NAVIGATING",
+        6: "AVOIDING",
+        7: "BLOCKED",
+        8: "GOAL_REACHED",
+        9: "CANCELED",
+        10: "FAILED",
+        11: "LOCALIZATION_LOST",
+        12: "MAP_SWITCHING",
     }
 
     def __init__(self, settings: Settings):
@@ -476,11 +544,22 @@ class RosServiceGateway:
             import rclpy
             from nav_msgs.msg import Odometry
             from open3d_loc.srv import GetPose, PoseDeviation, PublishGoal, Relocalize
+            from pct_scan_navigation.msg import (
+                LocalizationStatus,
+                MapStatus,
+                NavigationStatus,
+            )
+            from pct_scan_navigation.srv import RestartNavigation, SwitchMap
             from rcl_interfaces.srv import GetParameters
             from rclpy.context import Context
             from rclpy.executors import SingleThreadedExecutor
             from rclpy.node import Node
-            from rclpy.qos import qos_profile_sensor_data
+            from rclpy.qos import (
+                DurabilityPolicy,
+                QoSProfile,
+                ReliabilityPolicy,
+                qos_profile_sensor_data,
+            )
             from std_srvs.srv import SetBool
         except ImportError as error:
             raise RuntimeError(
@@ -515,6 +594,8 @@ class RosServiceGateway:
             "publish_goal": PublishGoal,
             "pose_deviation": PoseDeviation,
             "bridge_enable": SetBool,
+            "switch_map": SwitchMap,
+            "restart_navigation": RestartNavigation,
             "get_map_parameters": GetParameters,
         }
         self.clients = {
@@ -528,6 +609,31 @@ class RosServiceGateway:
             settings.odometry_topic,
             self._odometry_callback,
             qos_profile_sensor_data,
+        )
+        self._topic_status_lock = threading.Lock()
+        self._latest_topic_status: Dict[str, Dict[str, Any]] = {}
+
+        current_map_qos = QoSProfile(depth=1)
+        current_map_qos.reliability = ReliabilityPolicy.RELIABLE
+        current_map_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        periodic_status_qos = QoSProfile(depth=10)
+        self._current_map_subscription = self._node.create_subscription(
+            MapStatus,
+            self.STATUS_TOPICS["current_map"],
+            self._current_map_callback,
+            current_map_qos,
+        )
+        self._localization_status_subscription = self._node.create_subscription(
+            LocalizationStatus,
+            self.STATUS_TOPICS["localization_status"],
+            self._localization_status_callback,
+            periodic_status_qos,
+        )
+        self._navigation_status_subscription = self._node.create_subscription(
+            NavigationStatus,
+            self.STATUS_TOPICS["navigation_status"],
+            self._navigation_status_callback,
+            periodic_status_qos,
         )
 
     def start(self) -> None:
@@ -548,10 +654,16 @@ class RosServiceGateway:
             self.service_names[key]: client.service_is_ready()
             for key, client in self.clients.items()
         }
+        with self._topic_status_lock:
+            topics = {
+                topic: key in self._latest_topic_status
+                for key, topic in self.STATUS_TOPICS.items()
+            }
         return {
             "success": self._context.ok() and self._spin_thread.is_alive(),
             "node": self._node.get_name(),
             "services": services,
+            "topics": topics,
         }
 
     async def call(
@@ -646,6 +758,91 @@ class RosServiceGateway:
                 f"{self.settings.map_node}.{self.settings.map_parameter}"
             )
         return map_path
+
+    @staticmethod
+    def _message_timestamp(message: Any) -> Dict[str, Any]:
+        stamp = message.header.stamp
+        return {
+            "sec": int(stamp.sec),
+            "nanosec": int(stamp.nanosec),
+            "seconds": float(stamp.sec) + float(stamp.nanosec) / 1e9,
+            "received_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    @staticmethod
+    def _finite_status_value(value: Any) -> Optional[float]:
+        numeric = float(value)
+        return numeric if math.isfinite(numeric) else None
+
+    def _cache_topic_status(self, key: str, status: Dict[str, Any]) -> None:
+        status["_received_monotonic"] = time.monotonic()
+        with self._topic_status_lock:
+            self._latest_topic_status[key] = status
+
+    def _base_topic_status(
+        self,
+        key: str,
+        message: Any,
+        state_names: Dict[int, str],
+    ) -> Dict[str, Any]:
+        state = int(message.state)
+        return {
+            "success": True,
+            "topic": self.STATUS_TOPICS[key],
+            "frame_id": message.header.frame_id,
+            "state": state,
+            "state_name": state_names.get(state, f"UNKNOWN_{state}"),
+            "map_name": message.map_name,
+            "reason": message.reason,
+            "timestamp": self._message_timestamp(message),
+        }
+
+    def _current_map_callback(self, message: Any) -> None:
+        status = self._base_topic_status(
+            "current_map", message, self.MAP_STATE_NAMES
+        )
+        self._cache_topic_status("current_map", status)
+
+    def _localization_status_callback(self, message: Any) -> None:
+        status = self._base_topic_status(
+            "localization_status", message, self.LOCALIZATION_STATE_NAMES
+        )
+        status["fitness"] = self._finite_status_value(message.fitness)
+        self._cache_topic_status("localization_status", status)
+
+    def _navigation_status_callback(self, message: Any) -> None:
+        status = self._base_topic_status(
+            "navigation_status", message, self.NAVIGATION_STATE_NAMES
+        )
+        status.update(
+            goal_active=bool(message.goal_active),
+            distance_to_goal=self._finite_status_value(message.distance_to_goal),
+            remaining_waypoints=int(message.remaining_waypoints),
+        )
+        self._cache_topic_status("navigation_status", status)
+
+    def topic_status(self, key: str) -> Dict[str, Any]:
+        if key not in self.STATUS_TOPICS:
+            raise KeyError(f"Unknown ROS status topic key: {key}")
+        with self._topic_status_lock:
+            source = self._latest_topic_status.get(key)
+            if source is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "ROS status is unavailable: no message received from "
+                        + self.STATUS_TOPICS[key]
+                    ),
+                )
+            result = copy.deepcopy(source)
+
+        received_monotonic = float(result.pop("_received_monotonic"))
+        age_seconds = max(0.0, time.monotonic() - received_monotonic)
+        result["timestamp"]["age_seconds"] = age_seconds
+        if key in ("localization_status", "navigation_status"):
+            result["stale_after_seconds"] = 1.0
+            result["stale"] = age_seconds > 1.0
+        return result
 
     def _odometry_callback(self, message: Any) -> None:
         position = message.pose.pose.position
@@ -1094,12 +1291,13 @@ def create_app(settings: Settings) -> FastAPI:
 
     application = FastAPI(
         title="KN Navigation ROS 2 Service API",
-        version="2.4.0",
+        version="2.5.0",
         description=(
             "Five core APIs: relocalize, save a navigation point, publish a goal, "
             "enable the velocity bridge, and list saved navigation points. "
-            "A sequential navigation-goal queue is also available. All poses use "
-            "the map frame and yaw values use radians."
+            "A sequential navigation-goal queue, navigation status monitoring, map "
+            "switching, and navigation reset are also available. All poses use the "
+            "map frame and yaw values use radians."
         ),
         lifespan=lifespan,
     )
@@ -1141,6 +1339,11 @@ def create_app(settings: Settings) -> FastAPI:
                 "queue_navigation_goal",
                 "get_navigation_queue",
                 "get_robot_status",
+                "get_current_map",
+                "get_localization_status",
+                "get_navigation_status",
+                "switch_map",
+                "restart_navigation",
             ],
         }
 
@@ -1164,6 +1367,75 @@ def create_app(settings: Settings) -> FastAPI:
         ros: RosServiceGateway = Depends(gateway),
     ) -> Dict[str, Any]:
         return ros.robot_status()
+
+    @router.get(
+        "/current_map",
+        tags=["status"],
+        summary="Return the latest current-map status",
+    )
+    async def get_current_map(
+        ros: RosServiceGateway = Depends(gateway),
+    ) -> Dict[str, Any]:
+        return ros.topic_status("current_map")
+
+    @router.get(
+        "/localization_status",
+        tags=["status"],
+        summary="Return the latest Open3D localization status",
+    )
+    async def get_localization_status(
+        ros: RosServiceGateway = Depends(gateway),
+    ) -> Dict[str, Any]:
+        return ros.topic_status("localization_status")
+
+    @router.get(
+        "/navigation_status",
+        tags=["status"],
+        summary="Return the latest navigation execution status",
+    )
+    async def get_navigation_status(
+        ros: RosServiceGateway = Depends(gateway),
+    ) -> Dict[str, Any]:
+        return ros.topic_status("navigation_status")
+
+    @router.post(
+        "/switch_map",
+        tags=["navigation-control"],
+        summary="Switch the localization and planning maps through nav_manager",
+    )
+    async def switch_map(
+        command: SwitchMapRequest,
+        ros: RosServiceGateway = Depends(gateway),
+    ) -> Dict[str, Any]:
+        map_name = _normalise_map_name(command.map_name)
+        request = ros.request("switch_map")
+        request.map_name = map_name
+        response = await ros.call("switch_map", request)
+        return {
+            "success": bool(response.success),
+            "message": response.message,
+            "map_name": map_name,
+        }
+
+    @router.post(
+        "/restart_navigation",
+        tags=["navigation-control"],
+        summary="Soft-reset navigation or request a configured full restart",
+    )
+    async def restart_navigation(
+        command: RestartNavigationRequest,
+        ros: RosServiceGateway = Depends(gateway),
+    ) -> Dict[str, Any]:
+        request = ros.request("restart_navigation")
+        request.mode = command.mode
+        response = await ros.call("restart_navigation", request)
+        return {
+            "success": bool(response.accepted),
+            "accepted": bool(response.accepted),
+            "message": response.message,
+            "mode": command.mode,
+            "mode_name": "SOFT_RESET" if command.mode == 0 else "FULL_RESTART",
+        }
 
     @router.post(
         "/open3d_loc/relocalize",
