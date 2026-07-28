@@ -9,6 +9,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <std_srvs/srv/trigger.hpp>
 
 #include "pct_scan_navigation/waypoint_utils.hpp"
 
@@ -55,6 +56,11 @@ public:
       throw std::runtime_error(
           "waypoint_spacing must be positive; waypoint_z_offset must be finite; "
           "goal_tolerance must be finite and non-negative");
+
+    reset_route_srv_ = create_service<std_srvs::srv::Trigger>(
+        "~/reset_route",
+        std::bind(&PctScanCoordinator::handleResetRoute, this,
+                  std::placeholders::_1, std::placeholders::_2));
 
     if (mode_ == 1)
     {
@@ -190,12 +196,23 @@ private:
     RCLCPP_WARN(get_logger(), "%s; clear SCAN waypoint route", reason.c_str());
   }
 
+  void handleResetRoute(
+      const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+      std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+  {
+    if (mode_ == 2)
+      clearRoute("route reset requested");
+    response->success = true;
+    response->message = mode_ == 2 ? "route cleared" : "coordinator idle";
+  }
+
   int mode_{2};
   std::string global_frame_, path_topic_, odom_topic_, waypoints_topic_;
   double waypoint_spacing_{1.0}, waypoint_z_offset_{0.0}, goal_tolerance_{0.15};
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr waypoints_pub_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_route_srv_;
   nav_msgs::msg::Path sampled_waypoints_;
   geometry_msgs::msg::Point latest_odom_, last_route_odom_;
   std::uint64_t path_signature_{0};

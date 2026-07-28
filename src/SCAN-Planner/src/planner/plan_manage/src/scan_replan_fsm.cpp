@@ -797,6 +797,7 @@ namespace scan_planner
 
   void SCANReplanFSM::resetNavigation(const std::string &reason)
   {
+    const bool was_active = have_target_ || !active_waypoints_.empty();
     active_waypoints_.clear();
     pending_waypoint_path_.reset();
     have_target_ = false;
@@ -806,7 +807,7 @@ namespace scan_planner
     need_hover_stop_ = false;
     have_end_yaw_ = false;
     navigation_status_reason_ = reason;
-    if (have_odom_)
+    if (was_active && have_odom_)
       callEmergencyStop(odom_pos_);
     changeFSMExecState(WAIT_TARGET, "RESET");
     publishNavigationStatus();

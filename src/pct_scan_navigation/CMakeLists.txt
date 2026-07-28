@@ -13,6 +13,7 @@ find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/LocalizationStatus.msg"
@@ -34,7 +35,7 @@ ament_target_dependencies(waypoint_utils geometry_msgs nav_msgs)
 add_executable(pct_scan_coordinator src/pct_scan_coordinator.cpp)
 target_include_directories(pct_scan_coordinator PRIVATE include)
 ament_target_dependencies(pct_scan_coordinator
-  geometry_msgs nav_msgs rclcpp)
+  geometry_msgs nav_msgs rclcpp std_srvs)
 target_link_libraries(pct_scan_coordinator waypoint_utils)
 
 install(TARGETS pct_scan_coordinator waypoint_utils

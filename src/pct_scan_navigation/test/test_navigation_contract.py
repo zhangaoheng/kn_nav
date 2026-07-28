@@ -213,6 +213,18 @@ def test_goal_completion_is_latched_without_new_status_topics():
     assert 'final_yaw_ - odom_yaw_' in controller
 
 
+def test_soft_reset_clears_coordinator_route_and_is_idempotent():
+    coordinator = (ROOT / 'src/pct_scan_coordinator.cpp').read_text()
+    manager = (ROOT / 'scripts/nav_manager_node.py').read_text()
+    fsm = (SCAN_MANAGE / 'src/scan_replan_fsm.cpp').read_text()
+    assert '"~/reset_route"' in coordinator
+    assert 'clearRoute("route reset requested")' in coordinator
+    assert 'self.coordinator_reset_cli' in manager
+    assert 'self._call_service(self.coordinator_reset_cli, req)' in manager
+    assert 'const bool was_active = have_target_ || !active_waypoints_.empty();' in fsm
+    assert 'if (was_active && have_odom_)' in fsm
+
+
 def test_direct_global_path_follow_chain_is_preserved():
     launch_text = (ROOT / 'launch/global_path_follow_test.launch.py').read_text()
     cmake_text = (ROOT / 'CMakeLists.txt').read_text()

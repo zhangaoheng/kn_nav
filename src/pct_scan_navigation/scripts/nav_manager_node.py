@@ -36,6 +36,8 @@ class NavManagerNode(Node):
         self.declare_parameter('service_timeout_s', 8.0)
         self.declare_parameter('load_localization_service', '/global_localization_node/load_map')
         self.declare_parameter('load_tomogram_service', '/pct_global_planner/load_tomogram')
+        self.declare_parameter(
+            'coordinator_reset_service', '/pct_scan_coordinator/reset_route')
         self.declare_parameter('scan_reset_service', '/scan_planner_node/reset_navigation')
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
         self.declare_parameter('waypoints_topic', '/scan_planner/waypoints')
@@ -46,6 +48,8 @@ class NavManagerNode(Node):
         self.service_timeout_s = float(self.get_parameter('service_timeout_s').value)
         self.load_localization_service = self.get_parameter('load_localization_service').value
         self.load_tomogram_service = self.get_parameter('load_tomogram_service').value
+        self.coordinator_reset_service = self.get_parameter(
+            'coordinator_reset_service').value
         self.scan_reset_service = self.get_parameter('scan_reset_service').value
         self.cmd_vel_topic = self.get_parameter('cmd_vel_topic').value
         self.waypoints_topic = self.get_parameter('waypoints_topic').value
@@ -64,6 +68,8 @@ class NavManagerNode(Node):
         self.load_tomogram_cli = self.create_client(
             LoadTomogram, self.load_tomogram_service,
             callback_group=self.callback_group)
+        self.coordinator_reset_cli = self.create_client(
+            Trigger, self.coordinator_reset_service, callback_group=self.callback_group)
         self.scan_reset_cli = self.create_client(
             Trigger, self.scan_reset_service, callback_group=self.callback_group)
 
@@ -209,6 +215,14 @@ class NavManagerNode(Node):
 
     def _soft_reset(self, reason: str):
         self.cmd_vel_pub.publish(Twist())
+
+        req = Trigger.Request()
+        resp, error = self._call_service(self.coordinator_reset_cli, req)
+        if error:
+            self.get_logger().warn(f'coordinator reset skipped: {error}')
+        elif resp is not None and not resp.success:
+            self.get_logger().warn(f'coordinator reset failed: {resp.message}')
+
         empty_path = Path()
         empty_path.header.stamp = self.get_clock().now().to_msg()
         empty_path.header.frame_id = 'map'

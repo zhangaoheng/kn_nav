@@ -14,7 +14,7 @@ global_localization_node:
     fitness_eval_threshold: 0.2
     normal_search_radius: 0.4
     scan_map_filter_radius: 1.0
-    localization_lost_fail_count: 3
+    localization_lost_fail_count: 20
 
     # 跟踪定位的icp阈值，越小越容易接受本次icp结果
     threshold_fitness: 0.7
@@ -26,9 +26,9 @@ global_localization_node:
     # 单次icp的最大旋转角度
     max_icp_yaw_deg: 2.0
     # 初始冲定位的最大位移距离
-    max_init_icp_translation: 2.0
+    max_init_icp_translation: 10.0
     # 初始冲定位的最大旋转角度
-    max_init_icp_yaw_deg: 20.0
+    max_init_icp_yaw_deg: 180.0
     min_init_fitness_improvement: 0.02
     min_source_points: 500
     min_target_points: 500
@@ -36,7 +36,7 @@ global_localization_node:
     dis_updatemap: 3.5
     initialpose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-    static_tf_imu_link_to_base_link: [0.200000, 0.000000, 0.000000, 0.010145, 0.135211, -0.001385, 0.990764]
+    static_tf_imu_link_to_base_link: [0.200000, 0.000000, 0.000000, 0.00000, 0.25882, 0.00000, 0.96593]
     static_tf_motion_link_to_base_link: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
 
 localization_service_node:

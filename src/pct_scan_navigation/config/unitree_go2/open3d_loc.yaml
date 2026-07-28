@@ -30,7 +30,7 @@ global_localization_node:
     dis_updatemap: 3.5
     initialpose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-    static_tf_imu_link_to_base_link: [0.200000, 0.000000, 0.000000, 0.010145, 0.135211, -0.001385, 0.990764]
+    static_tf_imu_link_to_base_link: [0.200000, 0.000000, 0.000000, 0.00000, 0.25882, 0.00000, 0.96593]
     static_tf_motion_link_to_base_link: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
 
 localization_service_node:
