@@ -209,12 +209,19 @@ class TomogramPlanner(object):
 
         print("Start idx:", self.start_idx, "End idx:", self.end_idx)
 
-        self.planner.plan(self.start_idx, self.end_idx, True)
+        plan_success = self.planner.plan(self.start_idx, self.end_idx, True)
         path_finder: a_star.Astar = self.planner.get_path_finder()
         path = path_finder.get_result_matrix()
-        if len(path) == 0:
+        if not plan_success or len(path) == 0:
             return None
         self.last_astar_traj = self.astar_path_to_map(path)
+
+        if len(path) == 1:
+            start_pos = np.asarray(start_pos, dtype=np.float64)
+            end_pos = np.asarray(end_pos, dtype=np.float64)
+            if np.linalg.norm(end_pos - start_pos) <= np.finfo(np.float64).eps:
+                return end_pos.reshape(1, 3)
+            return np.stack([start_pos, end_pos])
 
         optimizer: traj_opt.GPMPOptimizer = (
             self.planner.get_trajectory_optimizer()

@@ -86,6 +86,8 @@ namespace scan_planner
     double end_yaw_{0.0};
     Eigen::Vector3d local_target_pt_, local_target_vel_;                     // local target state
     std::vector<Eigen::Vector3d> active_waypoints_;
+    std::vector<double> waypoint_arc_lengths_;
+    double progress_arc_length_{0.0};
     nav_msgs::msg::Path::SharedPtr pending_waypoint_path_;
     std::string current_map_name_;
     uint8_t current_map_state_{pct_scan_navigation::msg::MapStatus::UNLOADED};
@@ -124,7 +126,8 @@ namespace scan_planner
                             const std::string &label);
     void cancelWaypointNavigation();
     bool adjustGlobalTargetIfOccupied();
-    void getLocalTarget();
+    bool getLocalTarget();
+    uint32_t remainingWaypointCount() const;
     void finishProcess();
     void publishSelfInflationMarker();
     void updateGoalYaw(const geometry_msgs::msg::Quaternion &orientation,

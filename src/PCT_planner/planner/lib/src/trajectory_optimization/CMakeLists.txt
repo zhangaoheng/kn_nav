@@ -26,6 +26,17 @@ pybind11_add_module(traj_opt
 
 target_link_libraries(traj_opt PRIVATE gpmp_optimizer)
 
+if(BUILD_TESTING)
+  add_executable(test_short_path_guard
+    gpmp_optimizer/test_short_path_guard.cc
+  )
+  target_link_libraries(test_short_path_guard PRIVATE gpmp_optimizer)
+  add_test(NAME test_short_path_guard COMMAND test_short_path_guard)
+  set_tests_properties(test_short_path_guard PROPERTIES
+    ENVIRONMENT "LD_LIBRARY_PATH=${GTSAM_ROOT}/lib:$ENV{LD_LIBRARY_PATH}"
+  )
+endif()
+
 # add_executable(test_height_smoother
 #   height_smoother/test_height_smoother.cc
 #   height_smoother/height_smoother.cc

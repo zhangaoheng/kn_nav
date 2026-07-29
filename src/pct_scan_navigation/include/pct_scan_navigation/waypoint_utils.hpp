@@ -1,7 +1,6 @@
 #ifndef PCT_SCAN_NAVIGATION__WAYPOINT_UTILS_HPP_
 #define PCT_SCAN_NAVIGATION__WAYPOINT_UTILS_HPP_
 
-#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -18,11 +17,6 @@ bool sampleWaypoints(
     nav_msgs::msg::Path &output,
     std::uint64_t &signature,
     std::string &reason);
-
-std::size_t consumedWaypointCount(
-    double accumulated_distance,
-    double spacing,
-    std::size_t waypoint_count);
 
 }  // namespace pct_scan_navigation
 

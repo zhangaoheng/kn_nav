@@ -118,6 +118,9 @@ bool Astar::Search(const Eigen::Vector3i& start, const Eigen::Vector3i& goal) {
         search_result_.emplace_back(current_node);
         current_node = current_node->parent;
       }
+      if (search_result_.empty()) {
+        search_result_.emplace_back(current_node);
+      }
       std::reverse(search_result_.begin(), search_result_.end());
       if (debug_) ConvertClosedSetToMatrix(closed_set);
       auto duration = std::chrono::duration_cast<std::chrono::microseconds>(

@@ -192,7 +192,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument(
             'navigation_mode', default_value='2',
-            description='1: direct RViz goal to SCAN, 2: PCT rolling waypoints; 3 unsupported',
+            description='1: direct RViz goal to SCAN, 2: complete PCT reference path; 3 unsupported',
         ),
         DeclareLaunchArgument(
             'config_profile', default_value='local',

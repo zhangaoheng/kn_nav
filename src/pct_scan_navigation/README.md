@@ -20,13 +20,14 @@ ros2 launch pct_scan_navigation local_pct_scan_navigation.launch.py \
   navigation_mode:=1
 ```
 
-## Mode 2: PCT rolling waypoints
+## Mode 2: complete PCT reference path
 
 Mode 2 是默认模式。PCT 发布 `/pct_path`，coordinator 沿三维路径每隔 1 m
-提取 waypoint，并根据机器人累计移动距离滚动发布剩余 waypoint 到
-`/scan_planner/waypoints`。中间点仅用于塑造 SCAN 参考轨迹，最后一点始终是
-唯一导航终点。进入终点位置容差后 coordinator 停止滚动 waypoint，SCAN
-原地调整到路径最终姿态；位置和朝向均达标后锁定停止，手动移开不会重新返回。
+提取 waypoint，并把每条新路径的完整采样点列一次性发布到
+`/scan_planner/waypoints`。SCAN 保存完整参考路径，通过单调路径投影和三维
+弧长前视管理进度；中间点仅用于塑造参考轨迹，最后一点始终是唯一导航终点。
+到达终点后 SCAN 原地调整到路径最终姿态；位置和朝向均达标后锁定停止，手动
+移开不会重新返回。
 
 ```bash
 ros2 launch pct_scan_navigation local_pct_scan_navigation.launch.py
@@ -34,9 +35,8 @@ ros2 launch pct_scan_navigation local_pct_scan_navigation.launch.py
 
 可通过 coordinator 配置调整：
 
-- `waypoint_spacing`：采样和滚动间距，默认 `1.0` m；
+- `waypoint_spacing`：三维弧长采样间距，默认 `1.0` m；
 - `waypoint_z_offset`：发布 waypoint 的统一高度偏移，默认 `0.0` m；
-- `goal_tolerance`：停止滚动 waypoint 的 XY 终点容差，默认 `0.15` m。
 
 SCAN 默认使用 `0.15` m 位置容差和 `0.10` rad 朝向容差。
 
