@@ -1,11 +1,13 @@
 """Verify that dynamic waypoint mode starts without static fsm.waypoints."""
 
 import os
+import time
 
 import launch
 import launch_ros.actions
 import launch_testing.actions
 import pytest
+import rclpy
 
 
 @pytest.mark.launch_test
@@ -29,3 +31,22 @@ def generate_test_description():
 class TestWaypointModeStartup:
     def test_process_starts(self, proc_info, planner):
         proc_info.assertWaitForStartup(process=planner, timeout=15)
+
+    def test_local_target_marker_topic(self):
+        rclpy.init()
+        node = rclpy.create_node("local_target_topic_test")
+        try:
+            deadline = time.monotonic() + 10.0
+            topic_types = {}
+            while time.monotonic() < deadline:
+                topic_types = dict(node.get_topic_names_and_types())
+                if "/scan_planner/local_target" in topic_types:
+                    break
+                rclpy.spin_once(node, timeout_sec=0.1)
+
+            assert topic_types.get("/scan_planner/local_target") == [
+                "visualization_msgs/msg/Marker"
+            ]
+        finally:
+            node.destroy_node()
+            rclpy.shutdown()
