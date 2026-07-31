@@ -20,5 +20,4 @@ log/
 *.bag
 *.db3
 *.mcap
-read
-src/FAST_LIO_LOCALIZATION_HUMANOID/FAST_LIO/Log/mat_pre.txt
+*.txt
