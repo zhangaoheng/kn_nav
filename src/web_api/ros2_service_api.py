@@ -43,7 +43,7 @@ except ImportError as error:  # pragma: no cover - depends on the deployment hos
 
 @dataclass(frozen=True)
 class Settings:
-    host: str = "127.0.0.1"
+    host: str = "0.0.0.0"
     port: int = 8000
     service_timeout: float = 30.0
     service_wait_timeout: float = 1.0
