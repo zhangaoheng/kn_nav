@@ -44,7 +44,9 @@ install(TARGETS pct_scan_coordinator waypoint_utils
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 install(PROGRAMS
+  scripts/check_navigation_config.py
   scripts/global_path_follow_coordinator_node.py
+  scripts/migrate_navigation_config.py
   scripts/nav_manager_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
@@ -53,7 +55,7 @@ install(PROGRAMS scripts/global_path_follow_coordinator_node.py
   RENAME pct_global_path_follow_coordinator
 )
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
-install(FILES README.md DESTINATION share/${PROJECT_NAME})
+install(FILES README.md 统一配置使用指南.md DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)

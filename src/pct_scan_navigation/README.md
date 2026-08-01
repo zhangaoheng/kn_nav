@@ -2,6 +2,21 @@
 
 PCT 全局规划与 SCAN-Planner 局部导航的轻量协调和统一启动包。
 
+## Unified configuration
+
+每个机器人 profile 只维护一个 `navigation.yaml`：
+
+- A2：`config/A2/navigation.yaml`
+- Go2：`config/unitree_go2/navigation.yaml`
+- Go2-W：`config/unitree_go2w/navigation.yaml`
+- 本地测试：`config/local/navigation.yaml`
+
+文件按 `launch`、`topics`、`maps`、`nodes` 分区，包含 FAST-LIO、Open3D
+定位、PCT 全局规划、SCAN 局部规划、控制器、地图切换和底盘桥的全部运行参数。
+旧的拆分 YAML 仅作为迁移对照，统一启动文件不再逐个读取它们。
+
+详细说明见 [统一配置使用指南.md](统一配置使用指南.md)。
+
 ## Build
 
 ```bash
@@ -70,6 +85,19 @@ ros2 service call /open3d_loc/publish_goal open3d_loc/srv/PublishGoal \
 配置位于 `config/local`、`config/unitree_go2` 和 `config/unitree_go2w`。
 本地启动默认关闭底盘桥；Go2/Go2-W 实机启动文件默认启动桥，但仍需按照底盘
 桥自身的安全接口完成硬件使能。
+
+A2 实机入口默认读取 A2 的统一配置：
+
+```bash
+ros2 launch pct_scan_navigation unitree_A2_pct_scan_navigation.launch.py
+```
+
+也可指定仓库外的单一配置文件：
+
+```bash
+ros2 launch pct_scan_navigation unitree_A2_pct_scan_navigation.launch.py \
+  config_file:=/home/nav_map/navigation.yaml
+```
 
 `global_path_follow_test.launch.py` 保留为 PCT + Pure Pursuit 直接跟踪测试；该链路
 不使用 SCAN 局部规划和避障。
