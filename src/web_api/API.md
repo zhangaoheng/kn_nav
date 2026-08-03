@@ -126,8 +126,9 @@ HTTP 200 只表示 HTTP 请求和 ROS Service 调用已经完成，不保证业�
 | 10 | `GET` | `/api/current_map` | 获取最新的当前地图状态 |
 | 11 | `GET` | `/api/localization_status` | 获取最新的Open3D定位状态 |
 | 12 | `GET` | `/api/navigation_status` | 获取最新的导航执行状态 |
-| 13 | `POST` | `/api/switch_map` | 同时切换定位PCD和规划tomogram |
-| 14 | `POST` | `/api/restart_navigation` | 软复位导航或请求完整重启 |
+| 13 | `GET` | `/api/maps` | 获取统一配置中的全部可切换地图名称 |
+| 14 | `POST` | `/api/switch_map` | 同时切换定位PCD和规划tomogram |
+| 15 | `POST` | `/api/restart_navigation` | 软复位导航或请求完整重启 |
 | 诊断 | `GET` | `/api/health` | 获取 API 和 ROS 网关状态 |
 | 诊断 | `GET` | `/api/services` | 获取底层 ROS Service 就绪状态 |
 
@@ -1165,11 +1166,36 @@ GET /api/navigation_status
 
 `stale=true`或尚未收到ROS消息时，前端不应根据旧状态继续发导航目标。未收到消息时返回HTTP 503。
 
-## 15. 切换地图
+## 15. 获取可切换地图
+
+读取当前 `nav_manager_node` 使用的统一 `navigation.yaml`，返回 `maps` 下的全部地图名称。该接口只查询配置，不会切换地图或控制机械狗运动。
+
+### 15.1 请求
+
+```http
+GET /api/maps
+```
+
+### 15.2 成功响应
+
+```json
+{
+  "success": true,
+  "count": 2,
+  "maps": [
+    "cross-floor-kn",
+    "outdoor"
+  ]
+}
+```
+
+切换地图时，从 `maps` 数组中选择名称作为 `POST /api/switch_map` 的 `map_name`。
+
+## 16. 切换地图
 
 通过`nav_manager_node`同时切换Open3D定位PCD和PCT全局规划tomogram。这是业务上推荐的唯一切图入口。
 
-### 15.1 请求
+### 16.1 请求
 
 ```http
 POST /api/switch_map
@@ -1184,9 +1210,9 @@ Content-Type: application/json
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `map_name` | string | 是 | `map_profiles.yaml`中`maps`下的profile名；不是PCD或pickle文件名 |
+| `map_name` | string | 是 | `navigation.yaml` 中 `maps` 下的名称；不是PCD或pickle文件名 |
 
-### 15.2 成功响应
+### 16.2 成功响应
 
 ```json
 {
@@ -1198,7 +1224,7 @@ Content-Type: application/json
 
 `success=true`表示PCD和tomogram都已加载成功。这不表示已完成新地图上的重定位。
 
-### 15.3 业务失败
+### 16.3 业务失败
 
 ```json
 {
@@ -1210,7 +1236,7 @@ Content-Type: application/json
 
 底层Service不存在时返回HTTP 503；切图超过API的Service超时上限时返回HTTP 504。大地图可由服务端增加`--service-timeout`。
 
-### 15.4 前端调用规则
+### 16.4 前端调用规则
 
 1. 调用前禁用“发送目标”和“重复切图”按钮。
 2. 请求返回`success=true`后，继续等待`/api/current_map.state_name=LOADED`。
@@ -1220,9 +1246,9 @@ Content-Type: application/json
 
 切图前应确保HTTP顺序导航队列为空。当前API队列是独立的上层任务队列，ROS内部软复位不会自动删除尚未发布的HTTP排队任务。
 
-## 16. 导航复位
+## 17. 导航复位
 
-### 16.1 请求
+### 17.1 请求
 
 ```http
 POST /api/restart_navigation
@@ -1244,7 +1270,7 @@ Content-Type: application/json
 
 `mode`只能是`0`或`1`，其他值返回HTTP 422。
 
-### 16.2 响应
+### 17.2 响应
 
 ```json
 {
@@ -1260,15 +1286,15 @@ Content-Type: application/json
 
 `SOFT_RESET`不会重启进程、切换地图或恢复定位。如果定位已丢失，还需要调用重定位接口。复位前同样应停止向HTTP导航队列添加新任务，并确保待执行队列为空。
 
-## 17. 健康检查
+## 18. 健康检查
 
-### 17.1 请求
+### 18.1 请求
 
 ```http
 GET /api/health
 ```
 
-### 17.2 响应
+### 18.2 响应
 
 ```json
 {
@@ -1294,15 +1320,15 @@ GET /api/health
 
 `success=true` 只表示 API 内部 ROS 节点和 executor 正常。`services`表示对应Service是否就绪；`topics`表示API启动后是否至少收到过一帧对应状态。具体业务是否可用，仍要检查状态接口中的`state_name`和`stale`。
 
-## 18. ROS Service 状态
+## 19. ROS Service 状态
 
-### 18.1 请求
+### 19.1 请求
 
 ```http
 GET /api/services
 ```
 
-### 18.2 响应
+### 19.2 响应
 
 ```json
 {
@@ -1322,7 +1348,7 @@ GET /api/services
 
 Service 为 `false` 时，对应业务接口通常返回 HTTP 503。
 
-## 19. HTTP 错误码
+## 20. HTTP 错误码
 
 | 状态码 | 含义 | 调用方处理建议 |
 |---:|---|---|
@@ -1359,13 +1385,13 @@ FastAPI 字段校验错误使用：
 }
 ```
 
-## 20. 建议调用流程
+## 21. 建议调用流程
 
 建议按以下顺序组织业务调用：
 
 1. 调用`GET /api/health`，确认API、必要Service和三个状态Topic正常；
 2. 开始轮询`/api/current_map`、`/api/localization_status`和`/api/navigation_status`；
-3. 如果需要切图，先确保HTTP导航队列为空，再调用`POST /api/switch_map`；
+3. 如果需要切图，先调用 `GET /api/maps` 获取名称，并确保HTTP导航队列为空，再调用`POST /api/switch_map`；
 4. 等待地图状态进入`LOADED`，然后调用重定位接口；
 5. 等待定位状态进入`TRACKING`，并确认`stale=false`；
 6. 确认导航状态为`IDLE`、`WAITING_GOAL`、`GOAL_REACHED`或`CANCELED`；
@@ -1385,7 +1411,7 @@ FastAPI 字段校验错误使用：
 }
 ```
 
-## 21. 重试建议
+## 22. 重试建议
 
 - HTTP 422：请求数据错误，不应原样重试；
 - HTTP 401、404、409：修正请求后再调用；
@@ -1399,7 +1425,7 @@ FastAPI 字段校验错误使用：
 - 切图失败时不要高频自动重试，应显示`message`并检查地图profile；
 - 底盘桥启用失败时不要自动持续重试，应先检查定位和机器人状态心跳。
 
-## 22. 部署与浏览器调用注意事项
+## 23. 部署与浏览器调用注意事项
 
 当前 API 服务本身未配置 CORS。
 
@@ -1419,7 +1445,7 @@ http://127.0.0.1:8000
 
 或者机器人的实际网络地址。
 
-## 23. 安全注意事项
+## 24. 安全注意事项
 
 - 发布目标和开启底盘桥是两个独立动作；发布目标不会自动保证底盘桥已开启。
 - `success=true` 表示请求被相应节点接受，不表示机器人已经到达。
