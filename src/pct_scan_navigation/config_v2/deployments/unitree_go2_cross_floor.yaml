@@ -1,0 +1,52 @@
+version: 2
+
+deployment:
+  name: unitree_go2_cross_floor
+  robot_profile: unitree_go2
+  map_profile: unitree_go2
+  active_map: outdoor
+  enabled_maps: [outdoor]
+
+calibration:
+  imu_to_base_file: /home/nav_map/cross-floor-kn/imu_to_base.txt
+
+startup:
+  use_sim_time: false
+  navigation_mode: 2
+  start_localization: true
+  start_global_planner: true
+  start_velocity_bridge: false
+
+tuning:
+  localization:
+    icp_distance_threshold: 0.15
+    fitness_eval_threshold: 0.15
+    tracking_fitness: 0.5
+    initial_fitness: 0.7
+    max_tracking_translation: 0.4
+    max_tracking_yaw_deg: 2.0
+    max_initial_translation: 2.0
+    max_initial_yaw_deg: 20.0
+  local_planner:
+    planning_horizon: 3.5
+    sliding_map_size: [10.0, 10.0, 5.0]
+    local_update_range: [5.5, 5.5, 3.0]
+    map_sliding_enabled: true
+    map_sliding_threshold: 0.2
+  robot_geometry:
+    double_cylinder_radius: 0.28
+    double_cylinder_offset: 0.23
+    obstacles_inflation_z_up: 0.1
+    obstacles_inflation_z_down: 0.1
+  unitree:
+    sport_state_topic: rt/sportmodestate
+  motion:
+    max_vx: 0.4
+    max_abs_vy: 0.0
+    max_abs_vyaw: 1.0
+    max_linear_acceleration: 1.0
+    max_yaw_acceleration: 1.2
+
+safety:
+  allow_automatic_enable: false
+

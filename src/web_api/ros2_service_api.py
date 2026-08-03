@@ -5,7 +5,7 @@ Run this script from a shell where ROS 2 and this workspace have been sourced::
 
     source /opt/ros/humble/setup.bash
     source install/setup.bash
-    python3 src/tools/ros2_service_api.py --host 127.0.0.1 --port 8000
+    python3 src/tools/ros2_service_api.py --host 0.0.0.0 --port 8000
 
 FastAPI's interactive API documentation is then available at ``/docs``.
 Set ``KN_NAV_API_KEY`` to require the same value in the ``X-API-Key`` HTTP
@@ -29,6 +29,8 @@ import threading
 import time
 from typing import Any, Dict, Optional, Tuple
 import uuid
+
+import yaml
 
 try:
     import uvicorn
@@ -133,7 +135,7 @@ class BridgeEnableRequest(BaseModel):
 
 
 class SwitchMapRequest(BaseModel):
-    map_name: str = Field(..., description="Map profile name from map_profiles.yaml")
+    map_name: str = Field(..., description="Map profile name from navigation.yaml")
 
 
 class RestartNavigationRequest(BaseModel):
@@ -280,6 +282,27 @@ def _map_name_from_path(map_path: str) -> str:
     if not safe_name:
         raise RuntimeError(f"Offline map name is invalid: {map_name!r}")
     return safe_name
+
+
+def _load_map_names(config_path: str) -> list[str]:
+    """Read switchable map profile names from one unified navigation YAML."""
+    path = Path(config_path).expanduser().resolve()
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle) or {}
+    except OSError as error:
+        raise RuntimeError(f"Unable to read navigation config {path}: {error}") from error
+    except yaml.YAMLError as error:
+        raise RuntimeError(f"Invalid navigation config YAML {path}: {error}") from error
+
+    if not isinstance(config, dict):
+        raise RuntimeError(f"Navigation config root must be a dictionary: {path}")
+    maps = config.get("maps")
+    if not isinstance(maps, dict) or not maps:
+        raise RuntimeError(f'Navigation config has no non-empty "maps" section: {path}')
+    if any(not isinstance(name, str) or not name.strip() for name in maps):
+        raise RuntimeError(f"Navigation config contains an invalid map name: {path}")
+    return sorted(name.strip() for name in maps)
 
 
 def _points_file_for_map(points_directory: str, map_path: str) -> Path:
@@ -500,6 +523,7 @@ class RosServiceGateway:
         "bridge_enable": "/go2_cmd_vel_bridge/enable",
         "switch_map": "/switch_map",
         "restart_navigation": "/restart_navigation",
+        "get_navigation_parameters": "/nav_manager_node/get_parameters",
     }
 
     STATUS_TOPICS = {
@@ -597,6 +621,7 @@ class RosServiceGateway:
             "switch_map": SwitchMap,
             "restart_navigation": RestartNavigation,
             "get_map_parameters": GetParameters,
+            "get_navigation_parameters": GetParameters,
         }
         self.clients = {
             key: self._node.create_client(self.service_types[key], service_name)
@@ -758,6 +783,35 @@ class RosServiceGateway:
                 f"{self.settings.map_node}.{self.settings.map_parameter}"
             )
         return map_path
+
+    async def available_map_names(self) -> Dict[str, Any]:
+        request = self.request("get_navigation_parameters")
+        request.names = ["navigation_config_path", "map_profiles_path"]
+        response = await self.call("get_navigation_parameters", request)
+
+        config_path = ""
+        for value in response.values:
+            candidate = value.string_value.strip()
+            if candidate:
+                config_path = candidate
+                break
+        if not config_path:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "nav_manager_node has no navigation_config_path or "
+                    "map_profiles_path configured"
+                ),
+            )
+        try:
+            map_names = _load_map_names(config_path)
+        except RuntimeError as error:
+            raise HTTPException(status_code=500, detail=str(error)) from error
+        return {
+            "success": True,
+            "count": len(map_names),
+            "maps": map_names,
+        }
 
     @staticmethod
     def _message_timestamp(message: Any) -> Dict[str, Any]:
@@ -1291,7 +1345,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     application = FastAPI(
         title="KN Navigation ROS 2 Service API",
-        version="2.5.0",
+        version="2.6.0",
         description=(
             "Five core APIs: relocalize, save a navigation point, publish a goal, "
             "enable the velocity bridge, and list saved navigation points. "
@@ -1339,6 +1393,7 @@ def create_app(settings: Settings) -> FastAPI:
                 "queue_navigation_goal",
                 "get_navigation_queue",
                 "get_robot_status",
+                "list_available_maps",
                 "get_current_map",
                 "get_localization_status",
                 "get_navigation_status",
@@ -1367,6 +1422,16 @@ def create_app(settings: Settings) -> FastAPI:
         ros: RosServiceGateway = Depends(gateway),
     ) -> Dict[str, Any]:
         return ros.robot_status()
+
+    @router.get(
+        "/maps",
+        tags=["navigation-control"],
+        summary="List map profile names available for switching",
+    )
+    async def list_available_maps(
+        ros: RosServiceGateway = Depends(gateway),
+    ) -> Dict[str, Any]:
+        return await ros.available_map_names()
 
     @router.get(
         "/current_map",

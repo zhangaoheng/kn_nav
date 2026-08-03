@@ -15,6 +15,53 @@ def load(profile, name):
     return yaml.safe_load((ROOT / 'config' / profile / name).read_text())
 
 
+def load_unified(profile):
+    return load(profile, 'navigation.yaml')
+
+
+def test_unified_configs_preserve_every_legacy_parameter():
+    required_nodes = {
+        'fastlio_mapping',
+        'global_localization_node',
+        'localization_service_node',
+        'pct_global_planner',
+        'scan_planner_node',
+        'closed_loop_controller',
+        'pct_scan_coordinator',
+        'nav_manager_node',
+        'go2_cmd_vel_bridge',
+    }
+    for profile in ('A2', 'local', 'unitree_go2', 'unitree_go2w'):
+        unified = load_unified(profile)
+        assert unified['version'] == 1
+        assert set(unified) == {'version', 'launch', 'topics', 'maps', 'nodes'}
+        assert set(unified['nodes']) == required_nodes
+        assert unified['maps'] == load(profile, 'map_profiles.yaml')['maps']
+        assert unified['nodes']['fastlio_mapping'] == (
+            load(profile, 'fast_lio.yaml')['/**']['ros__parameters'])
+        assert unified['nodes']['global_localization_node'] == (
+            load(profile, 'open3d_loc.yaml')[
+                'global_localization_node']['ros__parameters'])
+        assert unified['nodes']['localization_service_node'] == (
+            load(profile, 'open3d_loc.yaml')[
+                'localization_service_node']['ros__parameters'])
+        assert unified['nodes']['pct_global_planner'] == (
+            load(profile, 'pct_global_planner.yaml')[
+                'pct_global_planner']['ros__parameters'])
+        assert unified['nodes']['scan_planner_node'] == (
+            load(profile, 'scan_planner.yaml')[
+                'scan_planner_node']['ros__parameters'])
+        assert unified['nodes']['closed_loop_controller'] == (
+            load(profile, 'scan_planner.yaml')[
+                'closed_loop_controller']['ros__parameters'])
+        assert unified['nodes']['pct_scan_coordinator'] == (
+            load(profile, 'coordinator.yaml')[
+                'pct_scan_coordinator']['ros__parameters'])
+        assert unified['nodes']['go2_cmd_vel_bridge'] == (
+            load(profile, 'go2_bridge.yaml')[
+                'go2_cmd_vel_bridge']['ros__parameters'])
+
+
 def test_pct_online_planner_does_not_require_raw_pcd():
     source = (PCT_PLANNER / 'scripts/run_ros2_global_planner.py').read_text()
     for legacy in ('pcd_path', '/global_points', '_publish_pcd', 'import open3d'):
@@ -84,23 +131,32 @@ def test_scan_profiles_select_dynamic_waypoint_mode():
 
 def test_launch_synchronizes_modes_and_current_scan_topics():
     text = (ROOT / 'launch/local_pct_scan_navigation.launch.py').read_text()
-    assert "'navigation_mode', default_value='2'" in text
-    assert "'fsm.navi_mode': navigation_mode_value" in text
-    assert "'mode': navigation_mode_value" in text
-    assert "navigation_mode, \"' == '2'" in text
-    assert "('body_pose', '/Odometry_open3d')" in text
-    assert "('sensor_pose', '/Odometry_open3d')" in text
-    assert "('cloud', '/scan_map')" in text
-    assert "('move_base_simple/goal', '/goal_pose')" in text
-    assert "('waypoints', '/scan_planner/waypoints')" in text
+    assert "DeclareLaunchArgument('config_file'" in text
+    assert "DeclareLaunchArgument('scan_params_file'" not in text
+    assert "DeclareLaunchArgument('coordinator_params_file'" not in text
+    assert "DeclareLaunchArgument('pct_params_file'" not in text
+    assert "DeclareLaunchArgument('map_profiles_file'" not in text
+    assert "_load_unified_config(config_path)" in text
+    assert "_node_parameters(config, 'fastlio_mapping')" in text
+    assert "'fsm.navi_mode': navigation_mode" in text
+    assert "'mode': navigation_mode" in text
+    assert "topics.get('body_pose', '/Odometry_open3d')" in text
+    assert "topics.get('sensor_pose', '/Odometry_open3d')" in text
+    assert "topics.get('cloud', '/scan_map')" in text
+    assert "topics.get('goal', '/goal_pose')" in text
+    assert "topics.get('waypoints', '/scan_planner/waypoints')" in text
     assert "on_exit=Shutdown" in text
 
 
 def test_robot_launches_forward_navigation_mode():
     for robot in ('unitree_go2', 'unitree_go2w'):
         text = (ROOT / 'launch' / f'{robot}_pct_scan_navigation.launch.py').read_text()
-        assert "DeclareLaunchArgument('navigation_mode', default_value='2')" in text
+        assert "DeclareLaunchArgument('config_file', default_value=default_config)" in text
+        assert "DeclareLaunchArgument('navigation_mode', default_value='')" in text
+        assert "DeclareLaunchArgument('start_go2_bridge', default_value='')" in text
+        assert "'config_file': LaunchConfiguration('config_file')" in text
         assert "'navigation_mode': LaunchConfiguration('navigation_mode')" in text
+        assert "'start_go2_bridge': LaunchConfiguration('start_go2_bridge')" in text
         assert f"'config_profile': '{robot}'" in text
 
 

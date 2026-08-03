@@ -1,0 +1,11 @@
+version: 2
+
+maps:
+  outdoor:
+    pcd: /home/nav_map/cross-floor-kn/global_map_downsize.pcd
+    tomogram: /home/code/work_space/kn_nav/src/PCT_planner/rsc/tomogram/liuxing_ground_voxel005_radius015.pickle
+    localization:
+      fitness_eval_threshold: 0.15
+      tracking_fitness: 0.5
+      initial_fitness: 0.7
+
