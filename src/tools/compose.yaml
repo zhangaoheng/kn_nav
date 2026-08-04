@@ -1,0 +1,88 @@
+# KN导航Docker Compose示例。
+#
+# 启动：docker compose -f src/tools/compose.yaml up -d
+# 状态：docker compose -f src/tools/compose.yaml ps
+# 日志：docker compose -f src/tools/compose.yaml logs -f navigation
+# 停止：docker compose -f src/tools/compose.yaml down
+
+x-nav-environment: &nav-environment
+  ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+  ROS_LOCALHOST_ONLY: "${ROS_LOCALHOST_ONLY:-0}"
+  ROS_LOG_DIR: /tmp/ros_logs
+  CMAKE_PREFIX_PATH: /opt/unitree_robotics
+  PYTHONPATH: /home/code/work_space/kn_nav/src/PCT_planner/planner/lib
+  LD_LIBRARY_PATH: /home/code/work_space/kn_nav/src/PCT_planner/planner/lib:/home/code/work_space/kn_nav/src/PCT_planner/planner/lib/build/src/a_star:/home/code/work_space/kn_nav/src/PCT_planner/planner/lib/build/src/trajectory_optimization:/home/code/work_space/kn_nav/src/PCT_planner/planner/lib/build/src/ele_planner:/home/code/work_space/kn_nav/src/PCT_planner/planner/lib/build/src/map_manager:/home/code/work_space/kn_nav/src/PCT_planner/planner/lib/build/src/common/smoothing:/home/code/thirdparty/pct-install/gtsam-4.1.1/lib:/opt/unitree_robotics/lib:/usr/local/lib
+
+x-nav-common: &nav-common
+  image: ${KN_NAV_IMAGE:-cross-floor-nav:amd-v1}
+  network_mode: host
+  ipc: host
+  init: true
+  restart: unless-stopped
+  working_dir: /home/code/work_space/kn_nav
+  environment: *nav-environment
+  volumes:
+    - ${NAV_MAP_DIR:-/home/unitree/nav_map}:/home/nav_map:ro
+
+services:
+  livox:
+    <<: *nav-common
+    privileged: true
+    command:
+      - /bin/bash
+      - -lc
+      - |
+        set -e
+        source /opt/ros/humble/setup.bash
+        source /home/code/work_space/ws_livox/install/setup.bash
+        exec ros2 launch livox_ros_driver2 ${LIVOX_LAUNCH:-msg_MID360s_launch.py}
+
+  navigation:
+    <<: *nav-common
+    privileged: true
+    depends_on:
+      livox:
+        condition: service_started
+    command:
+      - /bin/bash
+      - -lc
+      - |
+        set -e
+        source /opt/ros/humble/setup.bash
+        source /home/code/work_space/ws_livox/install/setup.bash
+        source /home/code/work_space/kn_nav/install/setup.bash
+        exec ros2 launch pct_scan_navigation ${ROBOT_LAUNCH:-unitree_go2w_pct_scan_navigation.launch.py} start_go2_bridge:=false
+
+  web_api:
+    <<: *nav-common
+    depends_on:
+      navigation:
+        condition: service_started
+    environment:
+      <<: *nav-environment
+      KN_NAV_API_HOST: 0.0.0.0
+      KN_NAV_API_PORT: "8000"
+      KN_NAV_API_KEY: "${KN_NAV_API_KEY:-}"
+    volumes:
+      - ${NAV_MAP_DIR:-/home/unitree/nav_map}:/home/nav_map:ro
+      - ${NAV_DATA_DIR:-/home/unitree/kn_nav_data}:/data/kn_nav
+    command:
+      - /bin/bash
+      - -lc
+      - |
+        set -e
+        source /opt/ros/humble/setup.bash
+        source /home/code/work_space/kn_nav/install/setup.bash
+        python3 -c 'import fastapi, uvicorn' || {
+          echo 'Missing FastAPI dependencies. Rebuild the image with fastapi and uvicorn.' >&2
+          exit 1
+        }
+        until ros2 service list 2>/dev/null | grep -qx '/global_localization_node/get_parameters'; do
+          echo 'Waiting for navigation parameter service...'
+          sleep 2
+        done
+        mkdir -p /data/kn_nav/points
+        exec python3 /home/code/work_space/kn_nav/src/web_api/ros2_service_api.py \
+          --host 0.0.0.0 \
+          --port 8000 \
+          --points-directory /data/kn_nav/points
