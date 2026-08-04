@@ -11,7 +11,7 @@ set -euo pipefail
 SESSION_NAME="${SESSION_NAME:-go2_nav}"
 CONTAINER_ID="${CONTAINER_ID:-f3b82610c6d7}"
 STARTUP_WAIT="${STARTUP_WAIT:-2}"
-TMUX_MOUSE="${TMUX_MOUSE:-off}"
+TMUX_MOUSE="${TMUX_MOUSE:-on}"
 
 if [[ "${TMUX_MOUSE}" != "on" && "${TMUX_MOUSE}" != "off" ]]; then
   echo "TMUX_MOUSE must be 'on' or 'off'." >&2
@@ -48,6 +48,17 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
+configure_tmux_input() {
+  # Mouse selection is copied to tmux's buffer on release. With OSC52 support,
+  # set-clipboard also mirrors it to the terminal's system clipboard.
+  tmux set-option -t "${SESSION_NAME}" mouse "${TMUX_MOUSE}"
+  tmux set-option -s set-clipboard on
+  tmux bind-key -T copy-mode MouseDragEnd1Pane \
+    send-keys -X copy-selection-and-cancel
+  tmux bind-key -T copy-mode-vi MouseDragEnd1Pane \
+    send-keys -X copy-selection-and-cancel
+}
+
 container_running="$(
   docker inspect --format '{{.State.Running}}' "${CONTAINER_ID}" 2>/dev/null || true
 )"
@@ -61,6 +72,7 @@ if tmux has-session -t "${SESSION_NAME}" 2>/dev/null; then
   if [[ "${recreate}" == "true" ]]; then
     tmux kill-session -t "${SESSION_NAME}"
   else
+    configure_tmux_input
     echo "Attaching to existing tmux session: ${SESSION_NAME}"
     echo "Use --recreate to discard it and build a fresh layout."
     exec tmux attach-session -t "${SESSION_NAME}"
@@ -86,11 +98,7 @@ split_column() {
 read -r -a left_panes <<< "$(split_column "${left_0}")"
 read -r -a right_panes <<< "$(split_column "${right_0}")"
 
-# Keep normal terminal text selection available by default. When tmux mouse
-# mode is needed, start with TMUX_MOUSE=on and hold Shift while selecting text
-# for the system clipboard.
-tmux set-option -t "${SESSION_NAME}" mouse "${TMUX_MOUSE}"
-tmux set-option -t "${SESSION_NAME}" set-clipboard on
+configure_tmux_input
 tmux set-window-option -t "${SESSION_NAME}:navigation" remain-on-exit on
 tmux set-window-option -t "${SESSION_NAME}:navigation" pane-border-status top
 tmux set-window-option -t "${SESSION_NAME}:navigation" pane-border-format \
