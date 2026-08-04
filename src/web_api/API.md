@@ -115,6 +115,7 @@ HTTP 200 只表示 HTTP 请求和 ROS Service 调用已经完成，不保证业�
 | 序号 | 方法 | 路径 | 说明 |
 |---:|---|---|---|
 | 1 | `POST` | `/api/open3d_loc/relocalize` | 使用完整四元数执行重定位 |
+| 1A | `POST` | `/api/open3d_loc/relocalize/code` | 使用导航点六位唯一编码执行重定位 |
 | 2 | `POST` | `/api/navigation/points` | 获取当前位置并保存为命名导航点 |
 | 3 | `POST` | `/api/navigation/goal` | 发布保存点或直接坐标作为导航目标 |
 | 4 | `POST` | `/api/go2_cmd_vel_bridge/enable` | 开启或关闭底盘速度桥 |
@@ -258,6 +259,41 @@ HTTP/1.1 422 Unprocessable Entity
 ```
 
 字段缺失或类型错误时返回标准 FastAPI 422 响应。
+
+### 4.6 使用导航点编码重定位
+
+```http
+POST /api/open3d_loc/relocalize/code
+Content-Type: application/json
+```
+
+```json
+{
+  "code": "483271"
+}
+```
+
+接口会使用该导航点保存的XYZ和完整四元数执行重定位。成功响应额外返回导航点名称和编码：
+
+```json
+{
+  "success": true,
+  "message": "relocalization succeeded",
+  "code": "483271",
+  "name": "office",
+  "pose": {
+    "x": 1.520143605688493,
+    "y": 7.289045952913274,
+    "z": -0.5119403031633517,
+    "qx": 0.0,
+    "qy": 0.0,
+    "qz": -0.650156,
+    "qw": 0.759801
+  }
+}
+```
+
+编码必须是六位数字；编码不存在时返回HTTP 404。
 
 ## 5. 保存导航点（打点）
 
@@ -465,10 +501,11 @@ HTTP/1.1 500 Internal Server Error
 
 ## 7. 发布导航目标
 
-该接口支持两种互斥的调用方式：
+该接口支持三种互斥的调用方式：
 
 1. 使用已保存导航点的名称；
-2. 直接提供 `x/y/z/yaw`。
+2. 使用已保存导航点的六位唯一编码；
+3. 直接提供 `x/y/z/yaw`。
 
 `success=true` 只表示目标已经发布到 ROS `/goal_pose`，不表示路径规划成功、机器人开始运动或机器人已经到达。
 
@@ -495,6 +532,7 @@ Content-Type: application/json
   "message": "goal published on /goal_pose",
   "goal": {
     "source": "saved_point",
+    "code": "483271",
     "x": 1.520143605688493,
     "y": 7.289045952913274,
     "z": -0.5119403031633517,
@@ -503,6 +541,16 @@ Content-Type: application/json
   }
 }
 ```
+
+也可以只提交编码：
+
+```json
+{
+  "code": "483271"
+}
+```
+
+此时响应中的`source`为`saved_point_code`，同时返回匹配到的`name`和`code`。
 
 导航点不存在时：
 
@@ -546,6 +594,7 @@ HTTP/1.1 404 Not Found
   "message": "goal published on /goal_pose",
   "goal": {
     "source": "coordinates",
+    "code": null,
     "x": 3.0,
     "y": 1.0,
     "z": 0.4,
@@ -556,7 +605,7 @@ HTTP/1.1 404 Not Found
 
 ### 7.3 错误组合
 
-不能同时提供名称和坐标：
+名称、编码和坐标三种目标来源不能混用：
 
 ```json
 {
@@ -570,7 +619,7 @@ HTTP/1.1 404 Not Found
 
 ```json
 {
-  "detail": "Provide either name or coordinates, not both"
+  "detail": "Provide exactly one of name, code, or coordinates"
 }
 ```
 
@@ -777,6 +826,7 @@ Content-Type: application/json
   "message": "navigation goal added to queue",
   "task": {
     "task_id": "a47fe3bf52b74ba688fe65d76de74a54",
+    "code": "483271",
     "sequence": 1,
     "status": "queued",
     "message": "waiting in navigation queue",
@@ -785,6 +835,7 @@ Content-Type: application/json
     "finished_at": null,
     "goal": {
       "source": "saved_point",
+      "code": "483271",
       "name": "office",
       "x": 1.520143605688493,
       "y": 7.289045952913274,
@@ -796,7 +847,7 @@ Content-Type: application/json
 }
 ```
 
-`task_id` 是本次队列任务的唯一ID，`sequence` 是API本次运行期间的任务添加顺序。
+`task_id`是本次队列任务的唯一ID，`code`是保存导航点的唯一编码，`sequence`是API本次运行期间的任务添加顺序。直接坐标任务的`code`为`null`。
 
 ### 10.2 将直接坐标加入队列
 
@@ -811,7 +862,7 @@ Content-Type: application/json
 }
 ```
 
-字段要求与 `POST /api/navigation/goal` 完全相同：只能使用名称或直接坐标，不能同时使用。
+字段要求与 `POST /api/navigation/goal` 完全相同：可使用名称、编码或直接坐标，三种方式不能混用。
 
 ### 10.3 查询队列状态
 
@@ -826,6 +877,7 @@ GET /api/navigation/queue
   "success": true,
   "active": {
     "task_id": "a47fe3bf52b74ba688fe65d76de74a54",
+    "code": "483271",
     "sequence": 1,
     "status": "navigating",
     "message": "navigation goal is active",
@@ -834,6 +886,7 @@ GET /api/navigation/queue
     "finished_at": null,
     "goal": {
       "source": "saved_point",
+      "code": "483271",
       "name": "office",
       "x": 1.520143605688493,
       "y": 7.289045952913274,
@@ -847,6 +900,7 @@ GET /api/navigation/queue
   "queued": [
     {
       "task_id": "b920fda67eca44de8754eca1dc08ea1c",
+      "code": "906154",
       "sequence": 2,
       "status": "queued",
       "message": "waiting in navigation queue",
@@ -855,6 +909,7 @@ GET /api/navigation/queue
       "finished_at": null,
       "goal": {
         "source": "saved_point",
+        "code": "906154",
         "name": "meeting_room",
         "x": 4.0,
         "y": 2.0,

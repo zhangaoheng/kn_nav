@@ -121,9 +121,12 @@ class RenamePointRequest(BaseModel):
 
 
 class NavigationGoalRequest(BaseModel):
-    """A saved point name, or a direct planar map-frame goal."""
+    """A saved point name/code, or a direct planar map-frame goal."""
 
     name: Optional[str] = Field(None, description="Saved navigation point name")
+    code: Optional[str] = Field(
+        None, description="Six-digit unique saved navigation point code"
+    )
     x: Optional[float] = Field(None, description="Map-frame X position in metres")
     y: Optional[float] = Field(None, description="Map-frame Y position in metres")
     z: float = Field(0.0, description="Map-frame Z position in metres")
@@ -145,6 +148,10 @@ class RestartNavigationRequest(BaseModel):
         le=1,
         description="0 performs a soft reset; 1 requests a configured full restart",
     )
+
+
+class NavigationCodeRequest(BaseModel):
+    code: str = Field(..., description="Six-digit unique navigation point code")
 
 
 def _ensure_finite(values: Dict[str, float]) -> None:
@@ -251,6 +258,16 @@ def _normalise_point_name(name: str) -> str:
     if any(ord(character) < 32 for character in normalised):
         raise HTTPException(
             status_code=422, detail="Point name must not contain control characters"
+        )
+    return normalised
+
+
+def _normalise_navigation_code(code: str) -> str:
+    normalised = code.strip()
+    if len(normalised) != 6 or not normalised.isdigit():
+        raise HTTPException(
+            status_code=422,
+            detail="Navigation point code must contain exactly six digits",
         )
     return normalised
 
@@ -429,6 +446,15 @@ class NavigationPointStore:
             point = self._load_unlocked().get(name)
             return dict(point) if isinstance(point, dict) else None
 
+    def get_point_by_code(
+        self, code: str
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        with self._lock:
+            for name, point in self._load_unlocked().items():
+                if point.get("code") == code:
+                    return name, dict(point)
+        return None
+
     def save_point(
         self, name: str, point: Dict[str, Any], overwrite: bool
     ) -> Dict[str, Any]:
@@ -486,6 +512,7 @@ class ResolvedNavigationGoal:
     z: float
     yaw: float
     name: Optional[str] = None
+    code: Optional[str] = None
 
     def pose(self) -> QuaternionPose:
         half_yaw = 0.5 * self.yaw
@@ -502,6 +529,7 @@ class ResolvedNavigationGoal:
     def as_dict(self) -> Dict[str, Any]:
         result: Dict[str, Any] = {
             "source": self.source,
+            "code": self.code,
             "x": self.x,
             "y": self.y,
             "z": self.z,
@@ -510,6 +538,80 @@ class ResolvedNavigationGoal:
         if self.name is not None:
             result["name"] = self.name
         return result
+
+
+def _resolve_navigation_goal(
+    goal: NavigationGoalRequest,
+    store: NavigationPointStore,
+) -> ResolvedNavigationGoal:
+    has_coordinates = goal.x is not None or goal.y is not None
+    saved_selectors = int(goal.name is not None) + int(goal.code is not None)
+    if saved_selectors > 1 or (saved_selectors and has_coordinates):
+        raise HTTPException(
+            status_code=422,
+            detail="Provide exactly one of name, code, or coordinates",
+        )
+
+    point_name: Optional[str] = None
+    point_code: Optional[str] = None
+    point: Optional[Dict[str, Any]] = None
+    source = "coordinates"
+
+    if goal.name is not None:
+        point_name = _normalise_point_name(goal.name)
+        point = store.get_point(point_name)
+        if point is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Navigation point not found: {point_name}",
+            )
+        point_code = point.get("code")
+        source = "saved_point"
+    elif goal.code is not None:
+        point_code = _normalise_navigation_code(goal.code)
+        match = store.get_point_by_code(point_code)
+        if match is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Navigation point code not found: {point_code}",
+            )
+        point_name, point = match
+        source = "saved_point_code"
+
+    if point is not None:
+        try:
+            x = float(point["x"])
+            y = float(point["y"])
+            z = float(point.get("z", 0.0))
+            yaw = float(point["yaw"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Saved navigation point is invalid: {point_name}",
+            ) from error
+        if not NavigationPointStore._valid_code(point_code):
+            raise HTTPException(
+                status_code=500,
+                detail=f"Saved navigation point code is invalid: {point_name}",
+            )
+    else:
+        if goal.x is None or goal.y is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Provide a saved point name, code, or both x and y",
+            )
+        x, y, z, yaw = goal.x, goal.y, goal.z, goal.yaw
+
+    _ensure_finite({"x": x, "y": y, "z": z, "yaw": yaw})
+    return ResolvedNavigationGoal(
+        source=source,
+        x=float(x),
+        y=float(y),
+        z=float(z),
+        yaw=float(yaw),
+        name=point_name,
+        code=point_code,
+    )
 
 
 class RosServiceGateway:
@@ -1044,49 +1146,7 @@ class NavigationQueueManager:
         self._worker = None
 
     def _resolve_goal(self, goal: NavigationGoalRequest) -> ResolvedNavigationGoal:
-        if goal.name is not None:
-            if goal.x is not None or goal.y is not None:
-                raise HTTPException(
-                    status_code=422,
-                    detail="Provide either name or coordinates, not both",
-                )
-            point_name = _normalise_point_name(goal.name)
-            point = self._store.get_point(point_name)
-            if point is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Navigation point not found: {point_name}",
-                )
-            try:
-                x = float(point["x"])
-                y = float(point["y"])
-                z = float(point.get("z", 0.0))
-                yaw = float(point["yaw"])
-            except (KeyError, TypeError, ValueError) as error:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Saved navigation point is invalid: {point_name}",
-                ) from error
-            source = "saved_point"
-        else:
-            if goal.x is None or goal.y is None:
-                raise HTTPException(
-                    status_code=422,
-                    detail="x and y are required when name is not provided",
-                )
-            point_name = None
-            source = "coordinates"
-            x, y, z, yaw = goal.x, goal.y, goal.z, goal.yaw
-
-        _ensure_finite({"x": x, "y": y, "z": z, "yaw": yaw})
-        return ResolvedNavigationGoal(
-            source=source,
-            x=float(x),
-            y=float(y),
-            z=float(z),
-            yaw=float(yaw),
-            name=point_name,
-        )
+        return _resolve_navigation_goal(goal, self._store)
 
     @staticmethod
     def _copy_record(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -1104,6 +1164,7 @@ class NavigationQueueManager:
             self._sequence += 1
             record: Dict[str, Any] = {
                 "task_id": task_id,
+                "code": resolved.code,
                 "sequence": self._sequence,
                 "status": "queued",
                 "message": "waiting in navigation queue",
@@ -1345,7 +1406,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     application = FastAPI(
         title="KN Navigation ROS 2 Service API",
-        version="2.6.0",
+        version="2.7.0",
         description=(
             "Five core APIs: relocalize, save a navigation point, publish a goal, "
             "enable the velocity bridge, and list saved navigation points. "
@@ -1377,6 +1438,38 @@ def create_app(settings: Settings) -> FastAPI:
 
     router = APIRouter(prefix="/api", dependencies=[Depends(require_api_key)])
 
+    async def execute_relocalization(
+        pose: QuaternionPose,
+        ros: RosServiceGateway,
+        lock: Any,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        normalised_pose, original_norm = _normalise_quaternion_pose(pose)
+        sent_pose = _quaternion_pose_to_dict(normalised_pose)
+        result_metadata = metadata or {}
+        if lock.locked():
+            return {
+                "success": False,
+                "message": "another relocalize request is running",
+                **result_metadata,
+                "pose": sent_pose,
+            }
+
+        request = ros.request("relocalize")
+        _fill_pose_request(request, normalised_pose)
+        async with lock:
+            response = await ros.call("relocalize", request)
+        return {
+            "success": response.success,
+            "message": response.message,
+            **result_metadata,
+            "pose": sent_pose,
+            "input_quaternion_norm": original_norm,
+            "quaternion_normalized": not math.isclose(
+                original_norm, 1.0, rel_tol=1e-9, abs_tol=1e-9
+            ),
+        }
+
     @application.get("/", tags=["system"])
     async def root() -> Dict[str, Any]:
         return {
@@ -1385,6 +1478,7 @@ def create_app(settings: Settings) -> FastAPI:
             "health": "/api/health",
             "functions": [
                 "relocalize",
+                "relocalize_by_navigation_code",
                 "save_navigation_point",
                 "publish_navigation_goal",
                 "enable_velocity_bridge",
@@ -1512,28 +1606,48 @@ def create_app(settings: Settings) -> FastAPI:
         ros: RosServiceGateway = Depends(gateway),
         lock: Any = Depends(relocalize_lock),
     ) -> Dict[str, Any]:
-        normalised_pose, original_norm = _normalise_quaternion_pose(pose)
-        sent_pose = _quaternion_pose_to_dict(normalised_pose)
-        if lock.locked():
-            return {
-                "success": False,
-                "message": "another relocalize request is running",
-                "pose": sent_pose,
-            }
+        return await execute_relocalization(pose, ros, lock)
 
-        request = ros.request("relocalize")
-        _fill_pose_request(request, normalised_pose)
-        async with lock:
-            response = await ros.call("relocalize", request)
-        return {
-            "success": response.success,
-            "message": response.message,
-            "pose": sent_pose,
-            "input_quaternion_norm": original_norm,
-            "quaternion_normalized": not math.isclose(
-                original_norm, 1.0, rel_tol=1e-9, abs_tol=1e-9
-            ),
-        }
+    @router.post(
+        "/open3d_loc/relocalize/code",
+        tags=["localization"],
+        summary="Relocalize from a saved navigation point code",
+    )
+    async def relocalize_by_code(
+        command: NavigationCodeRequest,
+        ros: RosServiceGateway = Depends(gateway),
+        store: NavigationPointStore = Depends(point_store),
+        lock: Any = Depends(relocalize_lock),
+    ) -> Dict[str, Any]:
+        code = _normalise_navigation_code(command.code)
+        match = store.get_point_by_code(code)
+        if match is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Navigation point code not found: {code}",
+            )
+        point_name, point = match
+        try:
+            pose = QuaternionPose(
+                x=float(point["x"]),
+                y=float(point["y"]),
+                z=float(point.get("z", 0.0)),
+                qx=float(point["qx"]),
+                qy=float(point["qy"]),
+                qz=float(point["qz"]),
+                qw=float(point["qw"]),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Saved navigation point pose is invalid: {point_name}",
+            ) from error
+        return await execute_relocalization(
+            pose,
+            ros,
+            lock,
+            metadata={"code": code, "name": point_name},
+        )
 
     @router.post(
         "/navigation/points",
@@ -1621,80 +1735,27 @@ def create_app(settings: Settings) -> FastAPI:
     @router.post(
         "/navigation/goal",
         tags=["navigation"],
-        summary="3. Publish a saved point or direct XYZ/yaw navigation goal",
+        summary="3. Publish a saved point name/code or direct XYZ/yaw goal",
     )
     async def publish_navigation_goal(
         goal: NavigationGoalRequest,
         ros: RosServiceGateway = Depends(gateway),
         store: NavigationPointStore = Depends(point_store),
     ) -> Dict[str, Any]:
-        point_name: Optional[str] = None
-        source = "coordinates"
-        if goal.name is not None:
-            if goal.x is not None or goal.y is not None:
-                raise HTTPException(
-                    status_code=422,
-                    detail="Provide either name or coordinates, not both",
-                )
-            point_name = _normalise_point_name(goal.name)
-            point = store.get_point(point_name)
-            if point is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Navigation point not found: {point_name}",
-                )
-            try:
-                x = float(point["x"])
-                y = float(point["y"])
-                z = float(point.get("z", 0.0))
-                yaw = float(point["yaw"])
-            except (KeyError, TypeError, ValueError) as error:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Saved navigation point is invalid: {point_name}",
-                ) from error
-            source = "saved_point"
-        else:
-            if goal.x is None or goal.y is None:
-                raise HTTPException(
-                    status_code=422,
-                    detail="x and y are required when name is not provided",
-                )
-            x, y, z, yaw = goal.x, goal.y, goal.z, goal.yaw
-
-        _ensure_finite({"x": x, "y": y, "z": z, "yaw": yaw})
-        half_yaw = 0.5 * yaw
-        pose = QuaternionPose(
-            x=x,
-            y=y,
-            z=z,
-            qx=0.0,
-            qy=0.0,
-            qz=math.sin(half_yaw),
-            qw=math.cos(half_yaw),
-        )
+        resolved = _resolve_navigation_goal(goal, store)
         request = ros.request("publish_goal")
-        _fill_pose_request(request, pose)
+        _fill_pose_request(request, resolved.pose())
         response = await ros.call("publish_goal", request)
-        goal_result: Dict[str, Any] = {
-            "source": source,
-            "x": x,
-            "y": y,
-            "z": z,
-            "yaw": yaw,
-        }
-        if point_name is not None:
-            goal_result["name"] = point_name
         return {
             "success": response.success,
             "message": response.message,
-            "goal": goal_result,
+            "goal": resolved.as_dict(),
         }
 
     @router.post(
         "/navigation/queue",
         tags=["navigation"],
-        summary="Queue a saved point or direct goal for sequential navigation",
+        summary="Queue a saved point name/code or direct goal for navigation",
     )
     async def queue_navigation_goal(
         goal: NavigationGoalRequest,
