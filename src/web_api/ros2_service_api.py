@@ -5,7 +5,7 @@ Run this script from a shell where ROS 2 and this workspace have been sourced::
 
     source /opt/ros/humble/setup.bash
     source install/setup.bash
-    python3 src/tools/ros2_service_api.py --host 127.0.0.1 --port 8000
+    python3 src/tools/ros2_service_api.py --host 0.0.0.0 --port 8000
 
 FastAPI's interactive API documentation is then available at ``/docs``.
 Set ``KN_NAV_API_KEY`` to require the same value in the ``X-API-Key`` HTTP
@@ -30,9 +30,13 @@ import time
 from typing import Any, Dict, Optional, Tuple
 import uuid
 
+import yaml
+
 try:
     import uvicorn
     from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import FileResponse
     from pydantic import BaseModel, Field
 except ImportError as error:  # pragma: no cover - depends on the deployment host
     raise SystemExit(
@@ -43,7 +47,7 @@ except ImportError as error:  # pragma: no cover - depends on the deployment hos
 
 @dataclass(frozen=True)
 class Settings:
-    host: str = "127.0.0.1"
+    host: str = "0.0.0.0"
     port: int = 8000
     service_timeout: float = 30.0
     service_wait_timeout: float = 1.0
@@ -55,6 +59,7 @@ class Settings:
     points_directory: str = str(Path(__file__).parent)
     map_node: str = "/global_localization_node"
     map_parameter: str = "path_map"
+    map_profiles_path: str = "/home/nav_map/config/A2/map_profiles.yaml"
     map_wait_timeout: float = 30.0
     api_key: str = ""
 
@@ -89,6 +94,10 @@ class Settings:
                 "KN_NAV_MAP_NODE", "/global_localization_node"
             ),
             map_parameter=os.environ.get("KN_NAV_MAP_PARAMETER", "path_map"),
+            map_profiles_path=os.environ.get(
+                "KN_NAV_MAP_PROFILES_PATH",
+                "/home/nav_map/config/A2/map_profiles.yaml",
+            ),
             map_wait_timeout=float(
                 os.environ.get("KN_NAV_MAP_WAIT_TIMEOUT", "30.0")
             ),
@@ -119,9 +128,12 @@ class RenamePointRequest(BaseModel):
 
 
 class NavigationGoalRequest(BaseModel):
-    """A saved point name, or a direct planar map-frame goal."""
+    """A saved point name/code, or a direct planar map-frame goal."""
 
     name: Optional[str] = Field(None, description="Saved navigation point name")
+    code: Optional[str] = Field(
+        None, description="Six-digit unique saved navigation point code"
+    )
     x: Optional[float] = Field(None, description="Map-frame X position in metres")
     y: Optional[float] = Field(None, description="Map-frame Y position in metres")
     z: float = Field(0.0, description="Map-frame Z position in metres")
@@ -133,7 +145,7 @@ class BridgeEnableRequest(BaseModel):
 
 
 class SwitchMapRequest(BaseModel):
-    map_name: str = Field(..., description="Map profile name from map_profiles.yaml")
+    map_name: str = Field(..., description="Map profile name from navigation.yaml")
 
 
 class RestartNavigationRequest(BaseModel):
@@ -143,6 +155,10 @@ class RestartNavigationRequest(BaseModel):
         le=1,
         description="0 performs a soft reset; 1 requests a configured full restart",
     )
+
+
+class NavigationCodeRequest(BaseModel):
+    code: str = Field(..., description="Six-digit unique navigation point code")
 
 
 def _ensure_finite(values: Dict[str, float]) -> None:
@@ -253,6 +269,16 @@ def _normalise_point_name(name: str) -> str:
     return normalised
 
 
+def _normalise_navigation_code(code: str) -> str:
+    normalised = code.strip()
+    if len(normalised) != 6 or not normalised.isdigit():
+        raise HTTPException(
+            status_code=422,
+            detail="Navigation point code must contain exactly six digits",
+        )
+    return normalised
+
+
 def _normalise_map_name(name: str) -> str:
     normalised = name.strip()
     if not normalised:
@@ -268,33 +294,56 @@ def _normalise_map_name(name: str) -> str:
     return normalised
 
 
-def _map_name_from_path(map_path: str) -> str:
-    map_file_name = Path(map_path.strip()).name
-    map_name = Path(map_file_name).stem.strip()
-    if not map_name:
-        raise RuntimeError(f"Unable to determine map name from path: {map_path!r}")
+def _safe_map_name(map_name: str) -> str:
+    """Return a map name that is safe to use as a per-map JSON filename."""
+    normalised = map_name.strip()
+    if not normalised:
+        raise RuntimeError("Active map name is empty")
     safe_name = "".join(
         character if character.isalnum() or character in ("-", "_", ".") else "_"
-        for character in map_name
+        for character in normalised
     ).strip("._")
     if not safe_name:
-        raise RuntimeError(f"Offline map name is invalid: {map_name!r}")
+        raise RuntimeError(f"Active map name is invalid: {map_name!r}")
     return safe_name
 
 
-def _points_file_for_map(points_directory: str, map_path: str) -> Path:
+def _load_map_names(config_path: str) -> list[str]:
+    """Read switchable map profile names from one unified navigation YAML."""
+    path = Path(config_path).expanduser().resolve()
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle) or {}
+    except OSError as error:
+        raise RuntimeError(f"Unable to read navigation config {path}: {error}") from error
+    except yaml.YAMLError as error:
+        raise RuntimeError(f"Invalid navigation config YAML {path}: {error}") from error
+
+    if not isinstance(config, dict):
+        raise RuntimeError(f"Navigation config root must be a dictionary: {path}")
+    maps = config.get("maps")
+    if not isinstance(maps, dict) or not maps:
+        raise RuntimeError(f'Navigation config has no non-empty "maps" section: {path}')
+    if any(not isinstance(name, str) or not name.strip() for name in maps):
+        raise RuntimeError(f"Navigation config contains an invalid map name: {path}")
+    return sorted(name.strip() for name in maps)
+
+
+def _points_file_for_map(points_directory: str, map_name: str) -> Path:
     directory = Path(points_directory).expanduser().resolve()
-    return directory / f"{_map_name_from_path(map_path)}.json"
+    return directory / f"{_safe_map_name(map_name)}.json"
 
 
 class NavigationPointStore:
     """Thread-safe JSON storage for named navigation points."""
 
-    def __init__(self, file_path: str, map_path: str = ""):
+    def __init__(
+        self, file_path: str, map_path: str = "", map_name: str = ""
+    ):
         self.path = Path(file_path).expanduser().resolve()
         self.map_path = map_path
         self.map_name = (
-            _map_name_from_path(map_path) if map_path else self.path.stem
+            _safe_map_name(map_name) if map_name else self.path.stem
         )
         self._lock = threading.Lock()
         self._initialise_file()
@@ -406,6 +455,15 @@ class NavigationPointStore:
             point = self._load_unlocked().get(name)
             return dict(point) if isinstance(point, dict) else None
 
+    def get_point_by_code(
+        self, code: str
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        with self._lock:
+            for name, point in self._load_unlocked().items():
+                if point.get("code") == code:
+                    return name, dict(point)
+        return None
+
     def save_point(
         self, name: str, point: Dict[str, Any], overwrite: bool
     ) -> Dict[str, Any]:
@@ -463,6 +521,7 @@ class ResolvedNavigationGoal:
     z: float
     yaw: float
     name: Optional[str] = None
+    code: Optional[str] = None
 
     def pose(self) -> QuaternionPose:
         half_yaw = 0.5 * self.yaw
@@ -479,6 +538,7 @@ class ResolvedNavigationGoal:
     def as_dict(self) -> Dict[str, Any]:
         result: Dict[str, Any] = {
             "source": self.source,
+            "code": self.code,
             "x": self.x,
             "y": self.y,
             "z": self.z,
@@ -487,6 +547,80 @@ class ResolvedNavigationGoal:
         if self.name is not None:
             result["name"] = self.name
         return result
+
+
+def _resolve_navigation_goal(
+    goal: NavigationGoalRequest,
+    store: NavigationPointStore,
+) -> ResolvedNavigationGoal:
+    has_coordinates = goal.x is not None or goal.y is not None
+    saved_selectors = int(goal.name is not None) + int(goal.code is not None)
+    if saved_selectors > 1 or (saved_selectors and has_coordinates):
+        raise HTTPException(
+            status_code=422,
+            detail="Provide exactly one of name, code, or coordinates",
+        )
+
+    point_name: Optional[str] = None
+    point_code: Optional[str] = None
+    point: Optional[Dict[str, Any]] = None
+    source = "coordinates"
+
+    if goal.name is not None:
+        point_name = _normalise_point_name(goal.name)
+        point = store.get_point(point_name)
+        if point is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Navigation point not found: {point_name}",
+            )
+        point_code = point.get("code")
+        source = "saved_point"
+    elif goal.code is not None:
+        point_code = _normalise_navigation_code(goal.code)
+        match = store.get_point_by_code(point_code)
+        if match is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Navigation point code not found: {point_code}",
+            )
+        point_name, point = match
+        source = "saved_point_code"
+
+    if point is not None:
+        try:
+            x = float(point["x"])
+            y = float(point["y"])
+            z = float(point.get("z", 0.0))
+            yaw = float(point["yaw"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Saved navigation point is invalid: {point_name}",
+            ) from error
+        if not NavigationPointStore._valid_code(point_code):
+            raise HTTPException(
+                status_code=500,
+                detail=f"Saved navigation point code is invalid: {point_name}",
+            )
+    else:
+        if goal.x is None or goal.y is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Provide a saved point name, code, or both x and y",
+            )
+        x, y, z, yaw = goal.x, goal.y, goal.z, goal.yaw
+
+    _ensure_finite({"x": x, "y": y, "z": z, "yaw": yaw})
+    return ResolvedNavigationGoal(
+        source=source,
+        x=float(x),
+        y=float(y),
+        z=float(z),
+        yaw=float(yaw),
+        name=point_name,
+        code=point_code,
+    )
 
 
 class RosServiceGateway:
@@ -500,6 +634,7 @@ class RosServiceGateway:
         "bridge_enable": "/go2_cmd_vel_bridge/enable",
         "switch_map": "/switch_map",
         "restart_navigation": "/restart_navigation",
+        "get_navigation_parameters": "/nav_manager_node/get_parameters",
     }
 
     STATUS_TOPICS = {
@@ -542,6 +677,7 @@ class RosServiceGateway:
     def __init__(self, settings: Settings):
         try:
             import rclpy
+            from geometry_msgs.msg import Twist
             from nav_msgs.msg import Odometry
             from open3d_loc.srv import GetPose, PoseDeviation, PublishGoal, Relocalize
             from pct_scan_navigation.msg import (
@@ -597,6 +733,7 @@ class RosServiceGateway:
             "switch_map": SwitchMap,
             "restart_navigation": RestartNavigation,
             "get_map_parameters": GetParameters,
+            "get_navigation_parameters": GetParameters,
         }
         self.clients = {
             key: self._node.create_client(self.service_types[key], service_name)
@@ -610,6 +747,10 @@ class RosServiceGateway:
             self._odometry_callback,
             qos_profile_sensor_data,
         )
+        self._emergency_cmd_vel_publisher = self._node.create_publisher(
+            Twist, "/cmd_vel", 10
+        )
+        self._twist_type = Twist
         self._topic_status_lock = threading.Lock()
         self._latest_topic_status: Dict[str, Dict[str, Any]] = {}
 
@@ -733,9 +874,13 @@ class RosServiceGateway:
     def log_info(self, message: str) -> None:
         self._node.get_logger().info(message)
 
-    async def current_map_path(self) -> str:
+    def publish_emergency_zero(self) -> None:
+        """Publish an all-zero velocity command without waiting for a service."""
+        self._emergency_cmd_vel_publisher.publish(self._twist_type())
+
+    async def current_map_identity(self) -> Tuple[str, str]:
         request = self.request("get_map_parameters")
-        request.names = [self.settings.map_parameter]
+        request.names = ["map_name", self.settings.map_parameter]
         try:
             response = await self.call(
                 "get_map_parameters",
@@ -747,17 +892,56 @@ class RosServiceGateway:
                 "Unable to read the active offline map from "
                 f"{self.service_names['get_map_parameters']}: {error.detail}"
             ) from error
-        if not response.values:
+        if len(response.values) < 2:
             raise RuntimeError(
-                f"Map parameter was not returned: {self.settings.map_parameter}"
+                "Active map parameters were not returned: "
+                f"map_name, {self.settings.map_parameter}"
             )
-        map_path = response.values[0].string_value.strip()
+        map_name = response.values[0].string_value.strip()
+        map_path = response.values[1].string_value.strip()
+        if not map_name:
+            raise RuntimeError(
+                f"Active map name parameter is empty: {self.settings.map_node}.map_name"
+            )
         if not map_path:
             raise RuntimeError(
                 "Active offline map parameter is empty: "
                 f"{self.settings.map_node}.{self.settings.map_parameter}"
             )
+        return _safe_map_name(map_name), map_path
+
+    async def current_map_path(self) -> str:
+        """Backward-compatible accessor for callers that only need the PCD path."""
+        _, map_path = await self.current_map_identity()
         return map_path
+
+    async def available_map_names(self) -> Dict[str, Any]:
+        request = self.request("get_navigation_parameters")
+        request.names = ["navigation_config_path", "map_profiles_path"]
+        response = await self.call("get_navigation_parameters", request)
+
+        config_path = ""
+        for value in response.values:
+            candidate = value.string_value.strip()
+            if candidate:
+                config_path = candidate
+                break
+        if not config_path:
+            config_path = self.settings.map_profiles_path.strip()
+        if not config_path:
+            raise HTTPException(
+                status_code=500,
+                detail="No map profiles path is configured",
+            )
+        try:
+            map_names = _load_map_names(config_path)
+        except RuntimeError as error:
+            raise HTTPException(status_code=500, detail=str(error)) from error
+        return {
+            "success": True,
+            "count": len(map_names),
+            "maps": map_names,
+        }
 
     @staticmethod
     def _message_timestamp(message: Any) -> Dict[str, Any]:
@@ -979,6 +1163,10 @@ class NavigationQueueManager:
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._run())
 
+    def set_point_store(self, store: NavigationPointStore) -> None:
+        """Use the navigation points belonging to the newly active map."""
+        self._store = store
+
     async def stop(self) -> None:
         if self._worker is None:
             return
@@ -989,50 +1177,38 @@ class NavigationQueueManager:
             pass
         self._worker = None
 
-    def _resolve_goal(self, goal: NavigationGoalRequest) -> ResolvedNavigationGoal:
-        if goal.name is not None:
-            if goal.x is not None or goal.y is not None:
-                raise HTTPException(
-                    status_code=422,
-                    detail="Provide either name or coordinates, not both",
-                )
-            point_name = _normalise_point_name(goal.name)
-            point = self._store.get_point(point_name)
-            if point is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Navigation point not found: {point_name}",
-                )
-            try:
-                x = float(point["x"])
-                y = float(point["y"])
-                z = float(point.get("z", 0.0))
-                yaw = float(point["yaw"])
-            except (KeyError, TypeError, ValueError) as error:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Saved navigation point is invalid: {point_name}",
-                ) from error
-            source = "saved_point"
-        else:
-            if goal.x is None or goal.y is None:
-                raise HTTPException(
-                    status_code=422,
-                    detail="x and y are required when name is not provided",
-                )
-            point_name = None
-            source = "coordinates"
-            x, y, z, yaw = goal.x, goal.y, goal.z, goal.yaw
+    async def emergency_stop(self) -> int:
+        """Cancel every API-managed goal and leave the queue ready for later use."""
+        await self.stop()
 
-        _ensure_finite({"x": x, "y": y, "z": z, "yaw": yaw})
-        return ResolvedNavigationGoal(
-            source=source,
-            x=float(x),
-            y=float(y),
-            z=float(z),
-            yaw=float(yaw),
-            name=point_name,
-        )
+        drained = 0
+        while True:
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                self._queue.task_done()
+                drained += 1
+
+        finished_at = datetime.now(timezone.utc).isoformat()
+        canceled = 0
+        async with self._lock:
+            for record in self._records.values():
+                if record["status"] in ("queued", "publishing", "navigating"):
+                    record.update(
+                        status="canceled",
+                        message="canceled by emergency stop",
+                        finished_at=finished_at,
+                    )
+                    canceled += 1
+            self._active_task_id = None
+
+        self.start()
+        return max(canceled, drained)
+
+    def _resolve_goal(self, goal: NavigationGoalRequest) -> ResolvedNavigationGoal:
+        return _resolve_navigation_goal(goal, self._store)
 
     @staticmethod
     def _copy_record(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -1050,6 +1226,7 @@ class NavigationQueueManager:
             self._sequence += 1
             record: Dict[str, Any] = {
                 "task_id": task_id,
+                "code": resolved.code,
                 "sequence": self._sequence,
                 "status": "queued",
                 "message": "waiting in navigation queue",
@@ -1093,7 +1270,7 @@ class NavigationQueueManager:
                     self._records.values(),
                     key=lambda record: record["sequence"],
                 )
-                if record["status"] in ("completed", "failed")
+                if record["status"] in ("completed", "failed", "canceled")
             ]
             return {
                 "success": True,
@@ -1256,15 +1433,16 @@ def create_app(settings: Settings) -> FastAPI:
         try:
             if settings.points_file.strip():
                 map_path = ""
+                map_name = ""
                 points_file = Path(settings.points_file).expanduser().resolve()
             else:
-                map_path = await gateway.current_map_path()
+                map_name, map_path = await gateway.current_map_identity()
                 points_file = _points_file_for_map(
-                    settings.points_directory, map_path
+                    settings.points_directory, map_name
                 )
 
             point_store_instance = NavigationPointStore(
-                str(points_file), map_path=map_path
+                str(points_file), map_path=map_path, map_name=map_name
             )
             queue_manager = NavigationQueueManager(
                 gateway,
@@ -1291,7 +1469,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     application = FastAPI(
         title="KN Navigation ROS 2 Service API",
-        version="2.5.0",
+        version="2.7.0",
         description=(
             "Five core APIs: relocalize, save a navigation point, publish a goal, "
             "enable the velocity bridge, and list saved navigation points. "
@@ -1300,6 +1478,16 @@ def create_app(settings: Settings) -> FastAPI:
             "map frame and yaw values use radians."
         ),
         lifespan=lifespan,
+    )
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=(
+            r"^https?://(localhost|127\.0\.0\.1|192\.168\.123\.\d+)"
+            r"(:\d+)?$"
+        ),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+        allow_headers=["Accept", "Content-Type", "X-API-Key"],
     )
 
     def gateway() -> RosServiceGateway:
@@ -1314,6 +1502,25 @@ def create_app(settings: Settings) -> FastAPI:
     def navigation_queue() -> NavigationQueueManager:
         return application.state.navigation_queue
 
+    async def select_point_store_for_map(
+        map_name: str, ros: RosServiceGateway
+    ) -> NavigationPointStore:
+        """Select the per-map JSON after a successful runtime map switch."""
+        if settings.points_file.strip():
+            return application.state.point_store
+        points_file = _points_file_for_map(settings.points_directory, map_name)
+        store = NavigationPointStore(
+            str(points_file), map_name=map_name
+        )
+        application.state.point_store = store
+        application.state.map_path = ""
+        application.state.navigation_queue.set_point_store(store)
+        ros.log_info(
+            "Navigation points store switched: map=%s file=%s"
+            % (store.map_name, store.path)
+        )
+        return store
+
     def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
         if settings.api_key and (
             x_api_key is None
@@ -1323,14 +1530,48 @@ def create_app(settings: Settings) -> FastAPI:
 
     router = APIRouter(prefix="/api", dependencies=[Depends(require_api_key)])
 
+    async def execute_relocalization(
+        pose: QuaternionPose,
+        ros: RosServiceGateway,
+        lock: Any,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        normalised_pose, original_norm = _normalise_quaternion_pose(pose)
+        sent_pose = _quaternion_pose_to_dict(normalised_pose)
+        result_metadata = metadata or {}
+        if lock.locked():
+            return {
+                "success": False,
+                "message": "another relocalize request is running",
+                **result_metadata,
+                "pose": sent_pose,
+            }
+
+        request = ros.request("relocalize")
+        _fill_pose_request(request, normalised_pose)
+        async with lock:
+            response = await ros.call("relocalize", request)
+        return {
+            "success": response.success,
+            "message": response.message,
+            **result_metadata,
+            "pose": sent_pose,
+            "input_quaternion_norm": original_norm,
+            "quaternion_normalized": not math.isclose(
+                original_norm, 1.0, rel_tol=1e-9, abs_tol=1e-9
+            ),
+        }
+
     @application.get("/", tags=["system"])
     async def root() -> Dict[str, Any]:
         return {
             "name": "KN Navigation ROS 2 Service API",
+            "control": "/control",
             "docs": "/docs",
             "health": "/api/health",
             "functions": [
                 "relocalize",
+                "relocalize_by_navigation_code",
                 "save_navigation_point",
                 "publish_navigation_goal",
                 "enable_velocity_bridge",
@@ -1339,13 +1580,19 @@ def create_app(settings: Settings) -> FastAPI:
                 "queue_navigation_goal",
                 "get_navigation_queue",
                 "get_robot_status",
+                "list_available_maps",
                 "get_current_map",
                 "get_localization_status",
                 "get_navigation_status",
                 "switch_map",
                 "restart_navigation",
+                "emergency_stop",
             ],
         }
+
+    @application.get("/control", include_in_schema=False)
+    async def control_page() -> Any:
+        return FileResponse(Path(__file__).with_name("control.html"))
 
     @router.get("/health", tags=["system"], summary="Check ROS gateway health")
     async def health(ros: RosServiceGateway = Depends(gateway)) -> Dict[str, Any]:
@@ -1367,6 +1614,16 @@ def create_app(settings: Settings) -> FastAPI:
         ros: RosServiceGateway = Depends(gateway),
     ) -> Dict[str, Any]:
         return ros.robot_status()
+
+    @router.get(
+        "/maps",
+        tags=["navigation-control"],
+        summary="List map profile names available for switching",
+    )
+    async def list_available_maps(
+        ros: RosServiceGateway = Depends(gateway),
+    ) -> Dict[str, Any]:
+        return await ros.available_map_names()
 
     @router.get(
         "/current_map",
@@ -1411,6 +1668,8 @@ def create_app(settings: Settings) -> FastAPI:
         request = ros.request("switch_map")
         request.map_name = map_name
         response = await ros.call("switch_map", request)
+        if response.success:
+            await select_point_store_for_map(map_name, ros)
         return {
             "success": bool(response.success),
             "message": response.message,
@@ -1438,6 +1697,68 @@ def create_app(settings: Settings) -> FastAPI:
         }
 
     @router.post(
+        "/emergency_stop",
+        tags=["robot"],
+        summary="Immediately stop motion without a request body",
+    )
+    async def emergency_stop(
+        ros: RosServiceGateway = Depends(gateway),
+        queue: NavigationQueueManager = Depends(navigation_queue),
+    ) -> Dict[str, Any]:
+        # Publish zero before any service wait, then latch the hardware bridge
+        # disabled and clear every planner/controller route through soft reset.
+        ros.publish_emergency_zero()
+        canceled_tasks = await queue.emergency_stop()
+
+        actions: Dict[str, Dict[str, Any]] = {}
+
+        disable_request = ros.request("bridge_enable")
+        disable_request.data = False
+        try:
+            disable_response = await ros.call("bridge_enable", disable_request)
+            actions["velocity_bridge"] = {
+                "success": bool(disable_response.success),
+                "message": disable_response.message,
+            }
+        except HTTPException as error:
+            actions["velocity_bridge"] = {
+                "success": False,
+                "message": str(error.detail),
+            }
+
+        ros.publish_emergency_zero()
+
+        reset_request = ros.request("restart_navigation")
+        reset_request.mode = 0
+        try:
+            reset_response = await ros.call("restart_navigation", reset_request)
+            actions["navigation_reset"] = {
+                "success": bool(reset_response.accepted),
+                "message": reset_response.message,
+            }
+        except HTTPException as error:
+            actions["navigation_reset"] = {
+                "success": False,
+                "message": str(error.detail),
+            }
+
+        ros.publish_emergency_zero()
+        bridge_stopped = actions["velocity_bridge"]["success"]
+        reset_done = actions["navigation_reset"]["success"]
+        success = bridge_stopped and reset_done
+        return {
+            "success": success,
+            "stopped": bridge_stopped,
+            "message": (
+                "Emergency stop applied; motion bridge is disabled"
+                if success
+                else "Emergency stop was requested but one or more safety actions failed"
+            ),
+            "canceled_navigation_tasks": canceled_tasks,
+            "actions": actions,
+        }
+
+    @router.post(
         "/open3d_loc/relocalize",
         tags=["localization"],
         summary="1. Relocalize and return success or failure",
@@ -1447,28 +1768,48 @@ def create_app(settings: Settings) -> FastAPI:
         ros: RosServiceGateway = Depends(gateway),
         lock: Any = Depends(relocalize_lock),
     ) -> Dict[str, Any]:
-        normalised_pose, original_norm = _normalise_quaternion_pose(pose)
-        sent_pose = _quaternion_pose_to_dict(normalised_pose)
-        if lock.locked():
-            return {
-                "success": False,
-                "message": "another relocalize request is running",
-                "pose": sent_pose,
-            }
+        return await execute_relocalization(pose, ros, lock)
 
-        request = ros.request("relocalize")
-        _fill_pose_request(request, normalised_pose)
-        async with lock:
-            response = await ros.call("relocalize", request)
-        return {
-            "success": response.success,
-            "message": response.message,
-            "pose": sent_pose,
-            "input_quaternion_norm": original_norm,
-            "quaternion_normalized": not math.isclose(
-                original_norm, 1.0, rel_tol=1e-9, abs_tol=1e-9
-            ),
-        }
+    @router.post(
+        "/open3d_loc/relocalize/code",
+        tags=["localization"],
+        summary="Relocalize from a saved navigation point code",
+    )
+    async def relocalize_by_code(
+        command: NavigationCodeRequest,
+        ros: RosServiceGateway = Depends(gateway),
+        store: NavigationPointStore = Depends(point_store),
+        lock: Any = Depends(relocalize_lock),
+    ) -> Dict[str, Any]:
+        code = _normalise_navigation_code(command.code)
+        match = store.get_point_by_code(code)
+        if match is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Navigation point code not found: {code}",
+            )
+        point_name, point = match
+        try:
+            pose = QuaternionPose(
+                x=float(point["x"]),
+                y=float(point["y"]),
+                z=float(point.get("z", 0.0)),
+                qx=float(point["qx"]),
+                qy=float(point["qy"]),
+                qz=float(point["qz"]),
+                qw=float(point["qw"]),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Saved navigation point pose is invalid: {point_name}",
+            ) from error
+        return await execute_relocalization(
+            pose,
+            ros,
+            lock,
+            metadata={"code": code, "name": point_name},
+        )
 
     @router.post(
         "/navigation/points",
@@ -1556,80 +1897,27 @@ def create_app(settings: Settings) -> FastAPI:
     @router.post(
         "/navigation/goal",
         tags=["navigation"],
-        summary="3. Publish a saved point or direct XYZ/yaw navigation goal",
+        summary="3. Publish a saved point name/code or direct XYZ/yaw goal",
     )
     async def publish_navigation_goal(
         goal: NavigationGoalRequest,
         ros: RosServiceGateway = Depends(gateway),
         store: NavigationPointStore = Depends(point_store),
     ) -> Dict[str, Any]:
-        point_name: Optional[str] = None
-        source = "coordinates"
-        if goal.name is not None:
-            if goal.x is not None or goal.y is not None:
-                raise HTTPException(
-                    status_code=422,
-                    detail="Provide either name or coordinates, not both",
-                )
-            point_name = _normalise_point_name(goal.name)
-            point = store.get_point(point_name)
-            if point is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Navigation point not found: {point_name}",
-                )
-            try:
-                x = float(point["x"])
-                y = float(point["y"])
-                z = float(point.get("z", 0.0))
-                yaw = float(point["yaw"])
-            except (KeyError, TypeError, ValueError) as error:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Saved navigation point is invalid: {point_name}",
-                ) from error
-            source = "saved_point"
-        else:
-            if goal.x is None or goal.y is None:
-                raise HTTPException(
-                    status_code=422,
-                    detail="x and y are required when name is not provided",
-                )
-            x, y, z, yaw = goal.x, goal.y, goal.z, goal.yaw
-
-        _ensure_finite({"x": x, "y": y, "z": z, "yaw": yaw})
-        half_yaw = 0.5 * yaw
-        pose = QuaternionPose(
-            x=x,
-            y=y,
-            z=z,
-            qx=0.0,
-            qy=0.0,
-            qz=math.sin(half_yaw),
-            qw=math.cos(half_yaw),
-        )
+        resolved = _resolve_navigation_goal(goal, store)
         request = ros.request("publish_goal")
-        _fill_pose_request(request, pose)
+        _fill_pose_request(request, resolved.pose())
         response = await ros.call("publish_goal", request)
-        goal_result: Dict[str, Any] = {
-            "source": source,
-            "x": x,
-            "y": y,
-            "z": z,
-            "yaw": yaw,
-        }
-        if point_name is not None:
-            goal_result["name"] = point_name
         return {
             "success": response.success,
             "message": response.message,
-            "goal": goal_result,
+            "goal": resolved.as_dict(),
         }
 
     @router.post(
         "/navigation/queue",
         tags=["navigation"],
-        summary="Queue a saved point or direct goal for sequential navigation",
+        summary="Queue a saved point name/code or direct goal for navigation",
     )
     async def queue_navigation_goal(
         goal: NavigationGoalRequest,
@@ -1711,7 +1999,7 @@ def _parse_args() -> argparse.Namespace:
         default=defaults.points_file,
         help=(
             "Explicit navigation points JSON file; when omitted, the file name "
-            "is derived from the active offline map"
+            "is derived from the active map_name"
         ),
     )
     parser.add_argument(
@@ -1728,6 +2016,11 @@ def _parse_args() -> argparse.Namespace:
         "--map-parameter",
         default=defaults.map_parameter,
         help="Parameter on --map-node containing the active offline map path",
+    )
+    parser.add_argument(
+        "--map-profiles-path",
+        default=defaults.map_profiles_path,
+        help="Fallback map_profiles.yaml used when nav_manager has no path parameter",
     )
     parser.add_argument(
         "--map-wait-timeout",
@@ -1784,6 +2077,7 @@ def main() -> None:
         points_directory=args.points_directory,
         map_node=args.map_node,
         map_parameter=args.map_parameter,
+        map_profiles_path=args.map_profiles_path,
         map_wait_timeout=args.map_wait_timeout,
         api_key=environment.api_key,
     )

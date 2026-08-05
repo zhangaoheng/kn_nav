@@ -1,7 +1,9 @@
 global_localization_node:
   ros__parameters:
     map_name: "outdoor"
+    # path_map: "/home/nav_map/cross-floor-kn/global_map_downsize.pcd"
     path_map: "/home/nav_map/outdoor/global_map_downsize.pcd"
+    # path_imu_to_base: "/home/nav_map/cross-floor-kn/imu_to_base.txt"
     path_imu_to_base: "/home/nav_map/outdoor/imu_to_base.txt"
 
     pcd_queue_maxsize: 10

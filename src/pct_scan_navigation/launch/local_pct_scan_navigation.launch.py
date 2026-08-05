@@ -105,7 +105,7 @@ def generate_launch_description():
     navigation_mode_value = ParameterValue(navigation_mode, value_type=int)
 
     # navigation_share = FindPackageShare('pct_scan_navigation')
-    navigation_share = str(Path.home() / 'nav_map')
+    navigation_share =  '/home/nav_map'
 
     def navigation_config(name):
         return PathJoinSubstitution([navigation_share, 'config', config_profile, name])
@@ -173,7 +173,6 @@ def generate_launch_description():
         name='nav_manager_node', output='both',
         parameters=[{
             'map_profiles_path': map_profiles_file,
-            'initial_map_name': 'outdoor',
             'full_restart_command': full_restart_command,
             'use_sim_time': use_sim_time,
         }],

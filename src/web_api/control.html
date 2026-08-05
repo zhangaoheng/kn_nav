@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>KN Navigation Control</title>
+  <style>
+    :root{--bg:#071015;--panel:#0d1a21;--panel2:#10232c;--line:#203943;--text:#e7f1f3;--muted:#88a2aa;--cyan:#3de0d0;--blue:#5c9dff;--green:#52dc8b;--yellow:#ffc857;--red:#ff4d57;--red2:#8e1820;--shadow:0 18px 45px #0007;--radius:16px}
+    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:radial-gradient(circle at 10% 0,#11313b 0,transparent 35%),var(--bg);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+    button,input,select{font:inherit}button{cursor:pointer}button:disabled{cursor:not-allowed;opacity:.45}
+    .shell{max-width:1500px;margin:auto;padding:18px}.topbar{position:sticky;top:0;z-index:30;display:flex;gap:14px;align-items:center;padding:12px 14px;background:#09151bea;border:1px solid var(--line);border-radius:18px;backdrop-filter:blur(16px);box-shadow:var(--shadow)}
+    .brand{display:flex;align-items:center;gap:10px;min-width:210px}.logo{display:grid;place-items:center;width:38px;height:38px;border:1px solid #397782;border-radius:11px;background:linear-gradient(145deg,#193e47,#0b1b22);color:var(--cyan);font-weight:900}.brand strong{display:block;font-size:15px;letter-spacing:.08em}.brand small{color:var(--muted)}
+    .connection{display:flex;gap:8px;align-items:center;flex:1}.connection input{min-width:120px}.connection .api-url{flex:1;min-width:280px}.connection #apiKey{width:220px}.status-dot{width:10px;height:10px;border-radius:50%;background:#53656a;box-shadow:0 0 0 4px #53656a22}.status-dot.ok{background:var(--green);box-shadow:0 0 12px var(--green)}.status-dot.bad{background:var(--red);box-shadow:0 0 12px var(--red)}
+    .estop{min-width:190px;height:52px;border:2px solid #ff8a90;border-radius:13px;background:linear-gradient(#ff5360,#b31420);color:white;font-weight:900;font-size:17px;letter-spacing:.08em;box-shadow:0 0 0 4px #ff4d5722,0 8px 24px #ff243855}.estop:active{transform:translateY(2px);filter:brightness(.8)}
+    .overview{display:grid;grid-template-columns:repeat(5,minmax(150px,1fr));gap:12px;margin:18px 0}.metric{padding:14px;background:linear-gradient(150deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:var(--radius);min-height:105px}.metric .label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}.metric .value{margin-top:9px;font-size:20px;font-weight:750;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.metric .sub{margin-top:5px;color:var(--muted);font-size:12px}.metric.good{border-color:#286b4a}.metric.warn{border-color:#765c21}.metric.danger{border-color:#7a2930}
+    .layout{display:grid;grid-template-columns:minmax(0,2fr) minmax(310px,1fr);gap:14px}.main,.side{display:grid;gap:14px;align-content:start}.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+    .card{background:linear-gradient(160deg,#102129,#0b171d);border:1px solid var(--line);border-radius:var(--radius);box-shadow:0 8px 30px #0003;overflow:hidden}.card-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 16px;border-bottom:1px solid var(--line)}.card-head h2{margin:0;font-size:14px;letter-spacing:.05em}.card-body{padding:16px}.badge{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:99px;background:#1b3038;color:#bcd0d5;font-size:11px}.badge.ok{background:#173d2a;color:#79e8a6}.badge.bad{background:#491d22;color:#ff8d94}.badge.warn{background:#493a18;color:#ffd978}
+    .row{display:flex;gap:9px;align-items:end;flex-wrap:wrap}.field{display:grid;gap:5px;flex:1;min-width:100px}.field label{font-size:11px;color:var(--muted);letter-spacing:.04em}.input,input,select{width:100%;height:38px;border:1px solid #294550;border-radius:9px;background:#08141a;color:var(--text);padding:0 10px;outline:none}.input:focus,input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px #3de0d018}
+    .btn{height:38px;border:1px solid #31525e;border-radius:9px;background:#18303a;color:var(--text);padding:0 13px;font-weight:650}.btn:hover{filter:brightness(1.18)}.btn.primary{background:#12665f;border-color:#2bafa3}.btn.blue{background:#244f8e;border-color:#4a82d2}.btn.danger{background:#651e26;border-color:#ac3844}.btn.ghost{background:transparent}.btn.small{height:30px;padding:0 9px;font-size:12px}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+    .pose{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.pose.quat{grid-template-columns:repeat(4,1fr)}.divider{height:1px;background:var(--line);margin:15px 0}.hint{color:var(--muted);font-size:12px;margin:7px 0 0}.danger-note{padding:10px;border:1px solid #723038;border-radius:9px;background:#30151a;color:#ffb0b5}
+    .table-wrap{overflow:auto;max-height:410px}table{width:100%;border-collapse:collapse;white-space:nowrap}th,td{text-align:left;padding:10px 9px;border-bottom:1px solid #1b323b}th{position:sticky;top:0;background:#0d1c23;color:var(--muted);font-size:11px;text-transform:uppercase}td code{color:#9edbd5}.empty{padding:28px;text-align:center;color:var(--muted)}
+    .queue-item{padding:10px;border:1px solid var(--line);border-radius:10px;background:#0a171d;margin-bottom:8px}.queue-item strong{display:flex;justify-content:space-between}.queue-item small{color:var(--muted)}
+    .log{height:260px;overflow:auto;background:#061015;padding:10px;border-radius:10px;font:12px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace}.log-line{padding:4px 5px;border-bottom:1px solid #12232a;word-break:break-word}.log-line.ok{color:#8deab1}.log-line.err{color:#ff9299}.log-time{color:#607d86;margin-right:7px}
+    details{border-top:1px solid var(--line)}summary{cursor:pointer;padding:12px 16px;color:var(--muted)}pre{margin:0;padding:14px;max-height:340px;overflow:auto;background:#061015;color:#b8d8dc;font:11px/1.5 ui-monospace,monospace}
+    .toast-wrap{position:fixed;right:18px;bottom:18px;z-index:60;display:grid;gap:8px;width:min(390px,calc(100vw - 36px))}.toast{padding:12px 14px;border:1px solid #2b5660;border-radius:11px;background:#10252d;box-shadow:var(--shadow);animation:in .18s ease}.toast.err{border-color:#a33a44;background:#32171c}.toast.ok{border-color:#317653;background:#122b1e}@keyframes in{from{transform:translateY(8px);opacity:0}}
+    .pulse{animation:pulse 1s infinite}@keyframes pulse{50%{box-shadow:0 0 0 8px #ff4d5700,0 0 25px #ff4d57}}
+    @media(max-width:1050px){.overview{grid-template-columns:repeat(3,1fr)}.layout{grid-template-columns:1fr}.side{grid-template-columns:repeat(2,minmax(0,1fr))}.topbar{flex-wrap:wrap}.connection{order:3;flex-basis:100%}}
+    @media(max-width:700px){.shell{padding:9px}.overview{grid-template-columns:repeat(2,1fr)}.grid2,.side{grid-template-columns:1fr}.brand{min-width:0;flex:1}.estop{min-width:150px}.pose,.pose.quat{grid-template-columns:repeat(2,1fr)}.connection{flex-wrap:wrap}.connection .api-url{flex-basis:100%;min-width:100%}.connection #apiKey{width:auto;flex:1}}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <header class="topbar">
+    <div class="brand"><div class="logo">KN</div><div><strong>NAV CONTROL</strong><small>机器人导航控制台</small></div></div>
+    <div class="connection">
+      <span id="connDot" class="status-dot"></span>
+      <input id="apiBase" class="api-url" aria-label="API 地址">
+      <input id="apiKey" type="password" placeholder="API Key（可选）" aria-label="API Key">
+      <button class="btn" onclick="connect()">连接</button>
+    </div>
+    <button id="estop" class="estop pulse" onclick="emergencyStop()">■ 一键急停</button>
+  </header>
+
+  <section class="overview">
+    <div id="healthCard" class="metric"><div class="label">API / ROS</div><div id="healthValue" class="value">未连接</div><div id="healthSub" class="sub">—</div></div>
+    <div id="motionCard" class="metric"><div class="label">机器人运动</div><div id="motionValue" class="value">—</div><div id="motionSub" class="sub">—</div></div>
+    <div id="mapCard" class="metric"><div class="label">当前地图</div><div id="mapValue" class="value">—</div><div id="mapSub" class="sub">—</div></div>
+    <div id="locCard" class="metric"><div class="label">定位状态</div><div id="locValue" class="value">—</div><div id="locSub" class="sub">fitness —</div></div>
+    <div id="navCard" class="metric"><div class="label">导航状态</div><div id="navValue" class="value">—</div><div id="navSub" class="sub">—</div></div>
+  </section>
+
+  <div class="layout">
+    <main class="main">
+      <div class="grid2">
+        <section class="card">
+          <div class="card-head"><h2>运动安全控制</h2><span id="bridgeBadge" class="badge warn">状态未知</span></div>
+          <div class="card-body">
+            <div class="danger-note">急停会清空导航任务、发送零速度、禁用速度桥并执行软复位。恢复运动必须手动重新使能。</div>
+            <div class="actions">
+              <button class="btn primary" onclick="setBridge(true)">使能运动桥</button>
+              <button class="btn danger" onclick="setBridge(false)">禁用运动桥</button>
+              <button class="btn" onclick="restartNavigation(0)">导航软复位</button>
+              <button class="btn ghost" onclick="restartNavigation(1)">完整重启</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-head"><h2>地图管理</h2><span id="mapBadge" class="badge">—</span></div>
+          <div class="card-body">
+            <div class="row"><div class="field"><label>可用地图</label><select id="mapSelect"><option value="">加载中…</option></select></div><button class="btn primary" onclick="switchMap()">切换地图</button></div>
+            <p class="hint">切换会同时加载定位 PCD、规划 tomogram 和对应导航点 JSON。</p>
+          </div>
+        </section>
+      </div>
+
+      <section class="card">
+        <div class="card-head"><h2>导航点</h2><div><span id="pointMap" class="badge">地图 —</span> <button class="btn small" onclick="loadPoints()">刷新</button></div></div>
+        <div class="card-body">
+          <div class="row"><div class="field"><label>保存当前位置名称</label><input id="saveName" placeholder="例如：充电桩"></div><label class="field" style="flex:0 0 auto;min-width:auto"><span>覆盖同名</span><input id="overwrite" type="checkbox" style="width:20px;height:20px"></label><button class="btn primary" onclick="savePoint()">保存当前位置</button></div>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th>名称</th><th>代码</th><th>X</th><th>Y</th><th>Yaw</th><th>操作</th></tr></thead><tbody id="pointsBody"><tr><td colspan="6" class="empty">暂无数据</td></tr></tbody></table></div>
+      </section>
+
+      <div class="grid2">
+        <section class="card">
+          <div class="card-head"><h2>直接导航目标</h2><span class="badge">map frame</span></div>
+          <div class="card-body">
+            <div class="pose"><div class="field"><label>X / m</label><input id="goalX" type="number" step="0.01" value="0"></div><div class="field"><label>Y / m</label><input id="goalY" type="number" step="0.01" value="0"></div><div class="field"><label>Z / m</label><input id="goalZ" type="number" step="0.01" value="0"></div><div class="field"><label>Yaw / rad</label><input id="goalYaw" type="number" step="0.01" value="0"></div></div>
+            <div class="actions"><button class="btn blue" onclick="sendCoordinates(false)">立即发布</button><button class="btn primary" onclick="sendCoordinates(true)">加入队列</button></div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-head"><h2>重定位</h2><span class="badge">Quaternion</span></div>
+          <div class="card-body">
+            <div class="pose"><div class="field"><label>X</label><input id="relX" type="number" step="0.01" value="0"></div><div class="field"><label>Y</label><input id="relY" type="number" step="0.01" value="0"></div><div class="field"><label>Z</label><input id="relZ" type="number" step="0.01" value="0"></div><div class="field"><label>QX</label><input id="relQx" type="number" step="0.01" value="0"></div><div class="field"><label>QY</label><input id="relQy" type="number" step="0.01" value="0"></div><div class="field"><label>QZ</label><input id="relQz" type="number" step="0.01" value="0"></div><div class="field"><label>QW</label><input id="relQw" type="number" step="0.01" value="1"></div></div>
+            <div class="actions"><button class="btn blue" onclick="relocalizePose()">执行重定位</button></div>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <aside class="side">
+      <section class="card">
+        <div class="card-head"><h2>机器人实时位姿</h2><span id="liveBadge" class="badge">1 Hz</span></div>
+        <div class="card-body"><div class="pose"><div><small class="hint">X</small><div id="poseX" class="value">—</div></div><div><small class="hint">Y</small><div id="poseY" class="value">—</div></div><div><small class="hint">Z</small><div id="poseZ" class="value">—</div></div><div><small class="hint">速度</small><div id="poseSpeed" class="value">—</div></div></div></div>
+        <details><summary>原始状态 JSON</summary><pre id="rawStatus">{}</pre></details>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h2>导航队列</h2><button class="btn small" onclick="loadQueue()">刷新</button></div>
+        <div id="queueList" class="card-body"><div class="empty">暂无任务</div></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h2>事件日志</h2><button class="btn small ghost" onclick="clearLog()">清空</button></div>
+        <div class="card-body"><div id="eventLog" class="log"></div></div>
+      </section>
+    </aside>
+  </div>
+</div>
+<div id="toasts" class="toast-wrap"></div>
+
+<script>
+  const $=id=>document.getElementById(id);
+  const state={timer:null,busy:false,points:[],last:{},mapLoadAt:0,mapLoading:false};
+  const defaultBase='http://192.168.123.162:8000';
+  $('apiBase').value=defaultBase;
+  $('apiKey').value=sessionStorage.getItem('kn_api_key')||'';
+
+  function base(){return $('apiBase').value.trim().replace(/\/$/,'')}
+  function esc(v){return String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
+  function num(id){const v=Number($(id).value);if(!Number.isFinite(v))throw new Error(`${id} 不是有效数字`);return v}
+  function fmt(v,n=3){return Number.isFinite(Number(v))?Number(v).toFixed(n):'—'}
+  function log(message,type=''){const line=document.createElement('div');line.className=`log-line ${type}`;line.innerHTML=`<span class="log-time">${new Date().toLocaleTimeString()}</span>${esc(message)}`;$('eventLog').prepend(line)}
+  function toast(message,type=''){const el=document.createElement('div');el.className=`toast ${type}`;el.textContent=message;$('toasts').append(el);setTimeout(()=>el.remove(),4500)}
+  function errorText(data,status){if(typeof data==='string')return data;return data?.detail||data?.message||`HTTP ${status}`}
+
+  async function request(path,{method='GET',body,quiet=false,timeout=10000}={}){
+    const headers={'Accept':'application/json'};const key=$('apiKey').value.trim();if(key)headers['X-API-Key']=key;if(body!==undefined)headers['Content-Type']='application/json';
+    const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),timeout);
+    try{const res=await fetch(base()+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body),signal:controller.signal});const text=await res.text();let data;try{data=text?JSON.parse(text):{}}catch{data=text}if(!res.ok)throw new Error(errorText(data,res.status));return data}
+    catch(e){if(!quiet){log(`${method} ${path}: ${e.message}`,'err');toast(e.name==='AbortError'?'请求超时':e.message,'err')}throw e}finally{clearTimeout(timer)}
+  }
+
+  async function connect(){sessionStorage.setItem('kn_api_key',$('apiKey').value.trim());await refreshAll();startPolling()}
+  function startPolling(){clearInterval(state.timer);state.timer=setInterval(refreshStatus,1000)}
+  function setMetric(id,kind){const el=$(id);el.classList.remove('good','warn','danger');if(kind)el.classList.add(kind)}
+
+  async function refreshStatus(){
+    if(state.busy)return;state.busy=true;
+    const paths=['/api/health','/api/robot/status','/api/current_map','/api/localization_status','/api/navigation_status'];
+    const results=await Promise.allSettled(paths.map(p=>request(p,{quiet:true,timeout:2500})));
+    const [health,robot,map,loc,nav]=results.map(r=>r.status==='fulfilled'?r.value:null);
+    $('connDot').className=`status-dot ${health?.success?'ok':'bad'}`;$('healthValue').textContent=health?.success?'在线':'离线';$('healthSub').textContent=health?`${Object.values(health.services||{}).filter(Boolean).length} services ready`:'无法连接';setMetric('healthCard',health?.success?'good':'danger');
+    if(robot){$('motionValue').textContent=robot.state==='moving'?'运动中':'已停止';$('motionSub').textContent=`线速度 ${fmt(robot.velocity?.linear?.speed)} m/s`;$('poseX').textContent=fmt(robot.position?.x);$('poseY').textContent=fmt(robot.position?.y);$('poseZ').textContent=fmt(robot.position?.z);$('poseSpeed').textContent=fmt(robot.velocity?.linear?.speed);setMetric('motionCard',robot.state==='moving'?'warn':'good')}
+    if(map){$('mapValue').textContent=map.map_name||'—';$('mapSub').textContent=`${map.state_name||'—'} · ${map.reason||'—'}`;$('mapBadge').textContent=map.state_name||'—';setMetric('mapCard',map.state_name==='LOADED'?'good':'warn')}
+    if(loc){$('locValue').textContent=loc.state_name||'—';$('locSub').textContent=`fitness ${fmt(loc.fitness)}${loc.stale?' · 数据过期':''}`;setMetric('locCard',['TRACKING','INIT_SUCCESS'].includes(loc.state_name)?'good':loc.state_name==='TRACKING_LOST'?'danger':'warn')}
+    if(nav){$('navValue').textContent=nav.state_name||'—';$('navSub').textContent=`剩余 ${nav.remaining_waypoints??'—'} · 距离 ${fmt(nav.distance_to_goal)}m`;setMetric('navCard',['FAILED','BLOCKED','LOCALIZATION_LOST'].includes(nav.state_name)?'danger':nav.goal_active?'warn':'good')}
+    state.last={health,robot,map,loc,nav};$('rawStatus').textContent=JSON.stringify(state.last,null,2);state.busy=false;
+    if(Date.now()-state.mapLoadAt>5000)loadMaps();
+  }
+
+  async function refreshAll(){await refreshStatus();await Promise.allSettled([loadMaps(),loadPoints(),loadQueue()])}
+  async function emergencyStop(){const btn=$('estop');btn.disabled=true;log('正在执行一键急停…','err');try{const r=await request('/api/emergency_stop',{method:'POST',timeout:15000});toast(r.success?'急停成功：运动桥已锁定':'急停未完全确认，请使用硬件急停',r.success?'ok':'err');log(`${r.message}，取消任务 ${r.canceled_navigation_tasks}`,r.success?'ok':'err');$('bridgeBadge').className=`badge ${r.stopped?'bad':'warn'}`;$('bridgeBadge').textContent=r.stopped?'已急停/禁用':'未确认';await refreshAll()}finally{btn.disabled=false}}
+  async function setBridge(enabled){if(enabled&&!confirm('确认重新使能机器人运动？请确保机器人周围安全。'))return;const r=await request('/api/go2_cmd_vel_bridge/enable',{method:'POST',body:{data:enabled}});toast(r.message,r.success?'ok':'err');log(r.message,r.success?'ok':'err');$('bridgeBadge').className=`badge ${enabled&&r.success?'ok':'bad'}`;$('bridgeBadge').textContent=enabled&&r.success?'已使能':'已禁用'}
+  async function restartNavigation(mode){if(mode===1&&!confirm('确认执行完整重启？'))return;const r=await request('/api/restart_navigation',{method:'POST',body:{mode}});toast(r.message,r.success?'ok':'err');log(r.message,r.success?'ok':'err')}
+
+  async function loadMaps(){if(state.mapLoading)return;state.mapLoading=true;state.mapLoadAt=Date.now();try{const r=await request('/api/maps',{quiet:true});const current=state.last.map?.map_name;$('mapSelect').innerHTML=(r.maps||[]).map(m=>`<option value="${esc(m)}" ${m===current?'selected':''}>${esc(m)}</option>`).join('')||'<option value="">无可用地图</option>'}catch(e){$('mapSelect').innerHTML='<option value="">地图列表加载失败</option>';log(`/api/maps: ${e.message}`,'err')}finally{state.mapLoading=false}}
+  async function switchMap(){const name=$('mapSelect').value;if(!name)return;if(!confirm(`确认切换到地图 “${name}”？当前导航将停止。`))return;const r=await request('/api/switch_map',{method:'POST',body:{map_name:name},timeout:40000});toast(r.message,r.success?'ok':'err');log(r.message,r.success?'ok':'err');if(r.success)await refreshAll()}
+
+  async function loadPoints(){const r=await request('/api/navigation/points',{quiet:true});state.points=r.points||[];$('pointMap').textContent=`地图 ${r.map_name||'—'} · ${r.count||0} 点`;$('pointsBody').innerHTML=state.points.length?state.points.map((p,i)=>`<tr><td>${esc(p.name)}</td><td><code>${esc(p.code||'—')}</code></td><td>${fmt(p.x)}</td><td>${fmt(p.y)}</td><td>${fmt(p.yaw)}</td><td><button class="btn small blue" onclick="pointGoal(${i},false)">导航</button> <button class="btn small" onclick="pointGoal(${i},true)">排队</button> <button class="btn small ghost" onclick="pointRelocalize(${i})">重定位</button> <button class="btn small ghost" onclick="renamePoint(${i})">改名</button></td></tr>`).join(''):'<tr><td colspan="6" class="empty">当前地图暂无导航点</td></tr>'}
+  async function savePoint(){const name=$('saveName').value.trim();if(!name){toast('请输入导航点名称','err');return}const r=await request('/api/navigation/points',{method:'POST',body:{name,overwrite:$('overwrite').checked}});toast(r.message,r.success?'ok':'err');log(r.message,r.success?'ok':'err');if(r.success){$('saveName').value='';await loadPoints()}}
+  async function renamePoint(i){const p=state.points[i];const next=prompt('新名称',p.name);if(!next||next===p.name)return;const r=await request('/api/navigation/points/rename',{method:'PATCH',body:{old_name:p.name,new_name:next}});toast(r.message,'ok');await loadPoints()}
+  async function pointGoal(i,queued){const p=state.points[i];if(!confirm(`${queued?'加入队列':'立即导航'}到 “${p.name}”？`))return;const path=queued?'/api/navigation/queue':'/api/navigation/goal';const body=p.code?{code:p.code}:{name:p.name};const r=await request(path,{method:'POST',body});toast(r.message,r.success?'ok':'err');log(r.message,r.success?'ok':'err');await loadQueue()}
+  async function pointRelocalize(i){const p=state.points[i];if(!p.code){toast('该导航点没有代码','err');return}if(!confirm(`使用 “${p.name}” 执行重定位？`))return;const r=await request('/api/open3d_loc/relocalize/code',{method:'POST',body:{code:p.code},timeout:35000});toast(r.message,r.success?'ok':'err');log(r.message,r.success?'ok':'err')}
+
+  async function sendCoordinates(queued){const body={x:num('goalX'),y:num('goalY'),z:num('goalZ'),yaw:num('goalYaw')};const r=await request(queued?'/api/navigation/queue':'/api/navigation/goal',{method:'POST',body});toast(r.message,r.success?'ok':'err');log(r.message,r.success?'ok':'err');if(queued)await loadQueue()}
+  async function relocalizePose(){const body={x:num('relX'),y:num('relY'),z:num('relZ'),qx:num('relQx'),qy:num('relQy'),qz:num('relQz'),qw:num('relQw')};if(!confirm('确认以输入位姿执行重定位？'))return;const r=await request('/api/open3d_loc/relocalize',{method:'POST',body,timeout:35000});toast(r.message,r.success?'ok':'err');log(r.message,r.success?'ok':'err')}
+
+  async function loadQueue(){const r=await request('/api/navigation/queue',{quiet:true});const items=[];if(r.active)items.push(queueHtml(r.active,'活动'));(r.queued||[]).forEach(x=>items.push(queueHtml(x,`排队 #${x.queue_position}`)));(r.history||[]).slice(-5).reverse().forEach(x=>items.push(queueHtml(x,'历史')));$('queueList').innerHTML=items.join('')||'<div class="empty">暂无导航任务</div>'}
+  function queueHtml(x,label){const goal=x.goal||{};return `<div class="queue-item"><strong><span>${esc(goal.name||goal.code||'坐标目标')}</span><span class="badge ${x.status==='failed'?'bad':x.status==='completed'?'ok':x.status==='canceled'?'warn':''}">${esc(x.status)}</span></strong><small>${esc(label)} · (${fmt(goal.x)}, ${fmt(goal.y)})<br>${esc(x.message||'')}</small></div>`}
+  function clearLog(){$('eventLog').innerHTML=''}
+
+  window.addEventListener('unhandledrejection',e=>{if(e.reason?.message)log(e.reason.message,'err')});
+  log('控制台已加载，正在连接…');connect().catch(()=>{});
+</script>
+</body>
+</html>
