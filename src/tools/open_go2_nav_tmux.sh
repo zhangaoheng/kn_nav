@@ -3,13 +3,20 @@
 # Open a 2-column x 4-row tmux workspace.  The four panes in the left
 # column enter the robot Docker container and receive commands without
 # pressing Enter.  The top two panes in the right column also enter the
-# container without receiving commands; the remaining two stay on the host.
+# container; the top-right pane runs the Web API automatically, while the
+# second-right pane remains idle. The remaining two stay on the host.
 
 set -euo pipefail
 
 SESSION_NAME="${SESSION_NAME:-go2_nav}"
 CONTAINER_ID="${CONTAINER_ID:-f3b82610c6d7}"
 STARTUP_WAIT="${STARTUP_WAIT:-2}"
+TMUX_MOUSE="${TMUX_MOUSE:-on}"
+
+if [[ "${TMUX_MOUSE}" != "on" && "${TMUX_MOUSE}" != "off" ]]; then
+  echo "TMUX_MOUSE must be 'on' or 'off'." >&2
+  exit 2
+fi
 
 recreate=false
 if [[ "${1:-}" == "--recreate" ]]; then
@@ -22,13 +29,14 @@ if (( $# != 0 )); then
 fi
 
 LEFT_TITLES=(livox pct_scan goal_points enable_go2)
-RIGHT_TITLES=(container_1 container_2 host_3 host_4)
+RIGHT_TITLES=(web_api container_2 host_3 host_4)
 LEFT_COMMANDS=(
   "ros2 launch livox_ros_driver2 msg_MID360s_launch.py"
   "ros2 launch pct_scan_navigation unitree_go2w_pct_scan_navigation.launch.py"
   "python3 /home/code/work_space/kn_nav/src/tools/goal_points_cli.py"
   "ros2 service call /go2_cmd_vel_bridge/enable std_srvs/srv/SetBool '{data: true}'"
 )
+WEB_API_COMMAND="python3 /home/code/work_space/kn_nav/src/web_api/ros2_service_api.py --host 0.0.0.0 --port 8000"
 
 if ! command -v tmux >/dev/null 2>&1; then
   echo "tmux is not installed. Install it with: sudo apt install tmux" >&2
@@ -39,6 +47,17 @@ if ! command -v docker >/dev/null 2>&1; then
   echo "docker command was not found." >&2
   exit 1
 fi
+
+configure_tmux_input() {
+  # Mouse selection is copied to tmux's buffer on release. With OSC52 support,
+  # set-clipboard also mirrors it to the terminal's system clipboard.
+  tmux set-option -t "${SESSION_NAME}" mouse "${TMUX_MOUSE}"
+  tmux set-option -s set-clipboard on
+  tmux bind-key -T copy-mode MouseDragEnd1Pane \
+    send-keys -X copy-selection-and-cancel
+  tmux bind-key -T copy-mode-vi MouseDragEnd1Pane \
+    send-keys -X copy-selection-and-cancel
+}
 
 container_running="$(
   docker inspect --format '{{.State.Running}}' "${CONTAINER_ID}" 2>/dev/null || true
@@ -53,6 +72,7 @@ if tmux has-session -t "${SESSION_NAME}" 2>/dev/null; then
   if [[ "${recreate}" == "true" ]]; then
     tmux kill-session -t "${SESSION_NAME}"
   else
+    configure_tmux_input
     echo "Attaching to existing tmux session: ${SESSION_NAME}"
     echo "Use --recreate to discard it and build a fresh layout."
     exec tmux attach-session -t "${SESSION_NAME}"
@@ -78,7 +98,7 @@ split_column() {
 read -r -a left_panes <<< "$(split_column "${left_0}")"
 read -r -a right_panes <<< "$(split_column "${right_0}")"
 
-tmux set-option -t "${SESSION_NAME}" mouse on
+configure_tmux_input
 tmux set-window-option -t "${SESSION_NAME}:navigation" remain-on-exit on
 tmux set-window-option -t "${SESSION_NAME}:navigation" pane-border-status top
 tmux set-window-option -t "${SESSION_NAME}:navigation" pane-border-format \
@@ -106,6 +126,11 @@ sleep "${STARTUP_WAIT}"
 for index in "${!left_panes[@]}"; do
   tmux send-keys -l -t "${left_panes[index]}" "${LEFT_COMMANDS[index]}"
 done
+
+# The Web API is safe to start automatically. Motion-related commands remain
+# prefilled without Enter and must still be confirmed manually.
+tmux send-keys -l -t "${right_panes[0]}" "${WEB_API_COMMAND}"
+tmux send-keys -t "${right_panes[0]}" C-m
 
 tmux select-pane -t "${left_panes[0]}"
 exec tmux attach-session -t "${SESSION_NAME}"

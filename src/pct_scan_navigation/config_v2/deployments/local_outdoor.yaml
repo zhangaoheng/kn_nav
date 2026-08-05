@@ -1,0 +1,52 @@
+version: 2
+
+deployment:
+  name: local_outdoor
+  robot_profile: local
+  map_profile: local
+  active_map: outdoor
+  enabled_maps: [outdoor, cross-floor-kn]
+
+calibration:
+  imu_to_base_file: /home/kangneng/xq/map/pcd/outdoor/imu_to_base.txt
+
+startup:
+  use_sim_time: false
+  navigation_mode: 2
+  start_localization: true
+  start_global_planner: true
+  start_velocity_bridge: false
+
+tuning:
+  localization:
+    icp_distance_threshold: 0.2
+    fitness_eval_threshold: 0.2
+    tracking_fitness: 0.9
+    initial_fitness: 0.9
+    max_tracking_translation: 1.0
+    max_tracking_yaw_deg: 2.0
+    max_initial_translation: 2.0
+    max_initial_yaw_deg: 20.0
+  local_planner:
+    planning_horizon: 7.5
+    sliding_map_size: [8.0, 8.0, 4.0]
+    local_update_range: [5.5, 5.5, 3.0]
+    map_sliding_enabled: true
+    map_sliding_threshold: 0.2
+  robot_geometry:
+    double_cylinder_radius: 0.25
+    double_cylinder_offset: 0.18
+    obstacles_inflation_z_up: 0.1
+    obstacles_inflation_z_down: 0.4
+  unitree:
+    sport_state_topic: rt/sportmodestate
+  motion:
+    max_vx: 0.8
+    max_abs_vy: 0.3
+    max_abs_vyaw: 0.8
+    max_linear_acceleration: 1.0
+    max_yaw_acceleration: 1.0
+
+safety:
+  allow_automatic_enable: false
+

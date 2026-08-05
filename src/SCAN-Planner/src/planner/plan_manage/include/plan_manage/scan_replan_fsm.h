@@ -106,6 +106,7 @@ namespace scan_planner
     rclcpp::Publisher<scan_planner_msgs::msg::Bspline>::SharedPtr bspline_pub_;
     rclcpp::Publisher<scan_planner_msgs::msg::DataDisp>::SharedPtr data_disp_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr self_inflation_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr local_target_pub_;
     rclcpp::Publisher<pct_scan_navigation::msg::NavigationStatus>::SharedPtr navigation_status_pub_;
     rclcpp::TimerBase::SharedPtr navigation_status_timer_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_navigation_srv_;
@@ -130,6 +131,7 @@ namespace scan_planner
     uint32_t remainingWaypointCount() const;
     void finishProcess();
     void publishSelfInflationMarker();
+    void publishLocalTargetMarker(bool visible);
     void updateGoalYaw(const geometry_msgs::msg::Quaternion &orientation,
                        const std::string &label);
     bool goalReached() const;

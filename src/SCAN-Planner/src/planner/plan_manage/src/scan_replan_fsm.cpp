@@ -74,6 +74,8 @@ namespace scan_planner
     data_disp_pub_ = node_->create_publisher<scan_planner_msgs::msg::DataDisp>("planning/data_display", 100);
     self_inflation_pub_ = node_->create_publisher<visualization_msgs::msg::Marker>(
         "self_inflation", rclcpp::QoS(1).reliable().transient_local());
+    local_target_pub_ = node_->create_publisher<visualization_msgs::msg::Marker>(
+        "/scan_planner/local_target", rclcpp::QoS(1).reliable().transient_local());
     navigation_status_pub_ =
         node_->create_publisher<pct_scan_navigation::msg::NavigationStatus>("/navigation_status", 10);
     navigation_status_timer_ = node_->create_wall_timer(
@@ -514,6 +516,31 @@ namespace scan_planner
     self_inflation_pub_->publish(marker);
   }
 
+  void SCANReplanFSM::publishLocalTargetMarker(bool visible)
+  {
+    visualization_msgs::msg::Marker marker;
+    marker.header.frame_id = self_inflation_frame_id_.empty() ? "map" : self_inflation_frame_id_;
+    marker.header.stamp = node_->now();
+    marker.ns = "scan_planner_local_target";
+    marker.id = 0;
+    marker.type = visualization_msgs::msg::Marker::SPHERE;
+    marker.action = visible ? visualization_msgs::msg::Marker::ADD
+                            : visualization_msgs::msg::Marker::DELETE;
+    marker.pose.orientation.w = 1.0;
+
+    if (visible)
+    {
+      marker.pose.position.x = local_target_pt_(0);
+      marker.pose.position.y = local_target_pt_(1);
+      marker.pose.position.z = local_target_pt_(2);
+      marker.scale.x = marker.scale.y = marker.scale.z = 0.30;
+      marker.color.r = marker.color.g = 1.0;
+      marker.color.a = 1.0;
+    }
+
+    local_target_pub_->publish(marker);
+  }
+
   void SCANReplanFSM::changeFSMExecState(FSM_EXEC_STATE new_state, string pos_call)
   {
 
@@ -695,6 +722,7 @@ namespace scan_planner
       progress_arc_length_ = 0.0;
       have_target_ = false;
       have_end_yaw_ = false;
+      publishLocalTargetMarker(false);
       changeFSMExecState(WAIT_TARGET, "FSM");
       break;
     }
@@ -833,6 +861,7 @@ namespace scan_planner
     need_hover_stop_ = false;
     have_end_yaw_ = false;
     navigation_status_reason_ = reason;
+    publishLocalTargetMarker(false);
     if (was_active && have_odom_)
       callEmergencyStop(odom_pos_);
     changeFSMExecState(WAIT_TARGET, "RESET");
@@ -1227,6 +1256,7 @@ namespace scan_planner
     const double target_speed = local_target_vel_.norm();
     if (target_speed > max_vel)
       local_target_vel_ *= max_vel / target_speed;
+    publishLocalTargetMarker(true);
     return true;
   }
 

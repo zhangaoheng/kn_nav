@@ -30,6 +30,7 @@ class NavManagerNode(Node):
     def __init__(self):
         super().__init__('nav_manager_node')
 
+        self.declare_parameter('navigation_config_path', '')
         self.declare_parameter('map_profiles_path', '')
         self.declare_parameter('initial_map_name', '')
         self.declare_parameter('full_restart_command', '')
@@ -42,6 +43,8 @@ class NavManagerNode(Node):
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
         self.declare_parameter('waypoints_topic', '/scan_planner/waypoints')
 
+        self.navigation_config_path = self.get_parameter(
+            'navigation_config_path').value
         self.map_profiles_path = self.get_parameter('map_profiles_path').value
         self.current_map_name = self.get_parameter('initial_map_name').value
         self.full_restart_command = self.get_parameter('full_restart_command').value
@@ -93,21 +96,26 @@ class NavManagerNode(Node):
             self._publish_map_status(MapStatus.UNLOADED, '', 'startup')
 
         self.get_logger().info(
-            f'Nav manager ready: profiles={self.map_profiles_path or "<unset>"}')
+            'Nav manager ready: profiles='
+            f'{self.navigation_config_path or self.map_profiles_path or "<unset>"}')
 
     def _load_profiles(self) -> Dict[str, Any]:
-        if not self.map_profiles_path:
-            self.get_logger().warn('map_profiles_path is empty; /switch_map will fail')
-            return {}
-        if not os.path.exists(self.map_profiles_path):
+        profile_path = self.navigation_config_path or self.map_profiles_path
+        if not profile_path:
             self.get_logger().warn(
-                f'map_profiles_path does not exist: {self.map_profiles_path}')
+                'navigation_config_path and map_profiles_path are empty; '
+                '/switch_map will fail')
             return {}
-        with open(self.map_profiles_path, 'r', encoding='utf-8') as handle:
+        if not os.path.exists(profile_path):
+            self.get_logger().warn(
+                f'map profile config does not exist: {profile_path}')
+            return {}
+        with open(profile_path, 'r', encoding='utf-8') as handle:
             data = yaml.safe_load(handle) or {}
         maps = data.get('maps', {})
         if not isinstance(maps, dict):
-            self.get_logger().warn('map_profiles.yaml has no valid "maps" dictionary')
+            self.get_logger().warn(
+                f'{profile_path} has no valid "maps" dictionary')
             return {}
         return maps
 

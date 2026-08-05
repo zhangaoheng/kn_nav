@@ -215,6 +215,7 @@ string message
 
 ```bash
 ros2 service call /switch_map pct_scan_navigation/srv/SwitchMap "{map_name: outdoor}"
+ros2 service call /switch_map pct_scan_navigation/srv/SwitchMap "{map_name: cross-floor-kn}"
 ```
 
 ## `/restart_navigation`
