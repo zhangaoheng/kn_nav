@@ -407,7 +407,7 @@ HTTP/1.1 409 Conflict
 默认存储文件位于 API 脚本同目录，文件名取当前 `/global_localization_node` 的 `path_map` 参数中的地图文件名。例如：
 
 ```text
-global_map_downsize.json
+json/global_map_downsize.json
 ```
 
 API 启动时：

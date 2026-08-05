@@ -8,12 +8,10 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    default_config = PathJoinSubstitution([
-        FindPackageShare('pct_scan_navigation'),
-        'config',
-        'A2',
-        'navigation.yaml',
-    ])
+    # Runtime map/navigation configuration lives outside the ROS install tree.
+    # This keeps /home/nav_map as the single source of truth and avoids stale
+    # generated copies under install/pct_scan_navigation/share/.
+    default_config = '/home/nav_map/config/A2/navigation.yaml'
     base_launch = PathJoinSubstitution([
         FindPackageShare('pct_scan_navigation'),
         'launch',

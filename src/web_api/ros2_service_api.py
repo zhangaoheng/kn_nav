@@ -56,10 +56,10 @@ class Settings:
     queue_yaw_tolerance: float = 0.10
     odometry_topic: str = "/Odometry_open3d"
     points_file: str = ""
-    points_directory: str = str(Path(__file__).parent)
+    points_directory: str = str(Path(__file__).parent / "json")
     map_node: str = "/global_localization_node"
     map_parameter: str = "path_map"
-    map_profiles_path: str = "/home/nav_map/config/A2/map_profiles.yaml"
+    navigation_config_path: str = "/home/nav_map/config/A2/navigation.yaml"
     map_wait_timeout: float = 30.0
     api_key: str = ""
 
@@ -88,15 +88,18 @@ class Settings:
                 "KN_NAV_POINTS_FILE", ""
             ),
             points_directory=os.environ.get(
-                "KN_NAV_POINTS_DIRECTORY", str(Path(__file__).parent)
+                "KN_NAV_POINTS_DIRECTORY", str(Path(__file__).parent / "json")
             ),
             map_node=os.environ.get(
                 "KN_NAV_MAP_NODE", "/global_localization_node"
             ),
             map_parameter=os.environ.get("KN_NAV_MAP_PARAMETER", "path_map"),
-            map_profiles_path=os.environ.get(
-                "KN_NAV_MAP_PROFILES_PATH",
-                "/home/nav_map/config/A2/map_profiles.yaml",
+            navigation_config_path=os.environ.get(
+                "KN_NAV_NAVIGATION_CONFIG_PATH",
+                os.environ.get(
+                    "KN_NAV_MAP_PROFILES_PATH",
+                    "/home/nav_map/config/A2/navigation.yaml",
+                ),
             ),
             map_wait_timeout=float(
                 os.environ.get("KN_NAV_MAP_WAIT_TIMEOUT", "30.0")
@@ -326,7 +329,9 @@ def _load_map_names(config_path: str) -> list[str]:
         raise RuntimeError(f'Navigation config has no non-empty "maps" section: {path}')
     if any(not isinstance(name, str) or not name.strip() for name in maps):
         raise RuntimeError(f"Navigation config contains an invalid map name: {path}")
-    return sorted(name.strip() for name in maps)
+    # PyYAML preserves mapping insertion order. Return the names in the same
+    # order as navigation.yaml so the API/UI reflects the operator's config.
+    return [name.strip() for name in maps]
 
 
 def _points_file_for_map(points_directory: str, map_name: str) -> Path:
@@ -916,22 +921,11 @@ class RosServiceGateway:
         return map_path
 
     async def available_map_names(self) -> Dict[str, Any]:
-        request = self.request("get_navigation_parameters")
-        request.names = ["navigation_config_path", "map_profiles_path"]
-        response = await self.call("get_navigation_parameters", request)
-
-        config_path = ""
-        for value in response.values:
-            candidate = value.string_value.strip()
-            if candidate:
-                config_path = candidate
-                break
-        if not config_path:
-            config_path = self.settings.map_profiles_path.strip()
+        config_path = self.settings.navigation_config_path.strip()
         if not config_path:
             raise HTTPException(
                 status_code=500,
-                detail="No map profiles path is configured",
+                detail="No unified navigation config path is configured",
             )
         try:
             map_names = _load_map_names(config_path)
@@ -1592,7 +1586,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     @application.get("/control", include_in_schema=False)
     async def control_page() -> Any:
-        return FileResponse(Path(__file__).with_name("control.html"))
+        return FileResponse(Path(__file__).parent / "html" / "control.html")
 
     @router.get("/health", tags=["system"], summary="Check ROS gateway health")
     async def health(ros: RosServiceGateway = Depends(gateway)) -> Dict[str, Any]:
@@ -1665,6 +1659,15 @@ def create_app(settings: Settings) -> FastAPI:
         ros: RosServiceGateway = Depends(gateway),
     ) -> Dict[str, Any]:
         map_name = _normalise_map_name(command.map_name)
+        available = await ros.available_map_names()
+        if map_name not in available["maps"]:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Unknown map_name: {map_name}. Available maps: "
+                    + ", ".join(available["maps"])
+                ),
+            )
         request = ros.request("switch_map")
         request.map_name = map_name
         response = await ros.call("switch_map", request)
@@ -2018,9 +2021,14 @@ def _parse_args() -> argparse.Namespace:
         help="Parameter on --map-node containing the active offline map path",
     )
     parser.add_argument(
+        "--navigation-config-path",
         "--map-profiles-path",
-        default=defaults.map_profiles_path,
-        help="Fallback map_profiles.yaml used when nav_manager has no path parameter",
+        dest="navigation_config_path",
+        default=defaults.navigation_config_path,
+        help=(
+            "Unified navigation.yaml containing the maps section "
+            "(--map-profiles-path is a deprecated alias)"
+        ),
     )
     parser.add_argument(
         "--map-wait-timeout",
@@ -2077,7 +2085,7 @@ def main() -> None:
         points_directory=args.points_directory,
         map_node=args.map_node,
         map_parameter=args.map_parameter,
-        map_profiles_path=args.map_profiles_path,
+        navigation_config_path=args.navigation_config_path,
         map_wait_timeout=args.map_wait_timeout,
         api_key=environment.api_key,
     )
