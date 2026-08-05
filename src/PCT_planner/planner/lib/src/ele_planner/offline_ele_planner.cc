@@ -20,25 +20,27 @@ void OfflineElePlanner::InitMap(
 
 bool OfflineElePlanner::Plan(const Eigen::Vector3i& start,
                              const Eigen::Vector3i& goal, const bool optimize) {
+  path_.clear();
   if (!path_finder_.Search(start, goal)) {
     printf("A star Failed!\n");
     return false;
   }
 
-  if (optimize) {
-    path_ = path_finder_.GetPathPoints();
-    path_.front().ref_v = 1;
-    path_.back().ref_v = 1;
-
-    bool success = false;
-    if (use_quintic_) {
-      success = trajectory_optimizer_wnoj_.GenerateTrajectory(path_, 200);
-    } else {
-      success = trajectory_optimizer_.GenerateTrajectory(path_, 200);
-    }
-
-    return success;
+  path_ = path_finder_.GetPathPoints();
+  if (path_.empty()) {
+    return false;
   }
 
-  return true;
+  if (!optimize || path_.size() == 1) {
+    return true;
+  }
+
+  path_.front().ref_v = 1;
+  path_.back().ref_v = 1;
+
+  if (use_quintic_) {
+    return trajectory_optimizer_wnoj_.GenerateTrajectory(path_, 200);
+  }
+
+  return trajectory_optimizer_.GenerateTrajectory(path_, 200);
 }

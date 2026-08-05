@@ -84,13 +84,38 @@ TEST(WaypointSampling, SkipsZeroLengthSegments)
   EXPECT_NEAR(output.poses[1].pose.position.y, 1.5, 1e-9);
 }
 
-TEST(WaypointRolling, NeverConsumesFinalPoint)
+TEST(WaypointSampling, PreservesFinalOrientation)
 {
-  EXPECT_EQ(pct_scan_navigation::consumedWaypointCount(0.99, 1.0, 3), 0u);
-  EXPECT_EQ(pct_scan_navigation::consumedWaypointCount(1.00, 1.0, 3), 1u);
-  EXPECT_EQ(pct_scan_navigation::consumedWaypointCount(2.10, 1.0, 3), 2u);
-  EXPECT_EQ(pct_scan_navigation::consumedWaypointCount(100.0, 1.0, 3), 2u);
-  EXPECT_EQ(pct_scan_navigation::consumedWaypointCount(100.0, 1.0, 1), 0u);
+  auto input = path({pose(0.0, 0.0, 0.0), pose(1.5, 0.0, 0.0)});
+  input.poses.back().pose.orientation.z = 0.6;
+  input.poses.back().pose.orientation.w = 0.8;
+  const auto output = sample(input);
+  ASSERT_FALSE(output.poses.empty());
+  EXPECT_DOUBLE_EQ(output.poses.back().pose.orientation.z, 0.6);
+  EXPECT_DOUBLE_EQ(output.poses.back().pose.orientation.w, 0.8);
+}
+
+TEST(WaypointSampling, SignatureChangesOnlyWithRouteContent)
+{
+  auto first = path({pose(0.0, 0.0, 0.0), pose(2.0, 0.0, 0.0)});
+  auto same = first;
+  same.header.stamp.sec = 123;
+  auto changed = first;
+  changed.poses.back().pose.position.y = 0.1;
+
+  nav_msgs::msg::Path output;
+  std::uint64_t first_signature = 0;
+  std::uint64_t same_signature = 0;
+  std::uint64_t changed_signature = 0;
+  std::string reason;
+  ASSERT_TRUE(pct_scan_navigation::sampleWaypoints(
+      first, "map", 1.0, 0.0, output, first_signature, reason));
+  ASSERT_TRUE(pct_scan_navigation::sampleWaypoints(
+      same, "map", 1.0, 0.0, output, same_signature, reason));
+  ASSERT_TRUE(pct_scan_navigation::sampleWaypoints(
+      changed, "map", 1.0, 0.0, output, changed_signature, reason));
+  EXPECT_EQ(first_signature, same_signature);
+  EXPECT_NE(first_signature, changed_signature);
 }
 
 }  // namespace

@@ -21,6 +21,10 @@ constexpr double kQcHeading = 0.01;
 
 bool GPMPOptimizer::GenerateTrajectory(const std::vector<PathPoint>& input_path,
                                        const double T) {
+  if (input_path.size() < 2) {
+    return false;
+  }
+
   auto t0 = std::chrono::high_resolution_clock::now();
 
   Vector6 s_init, s_target;
@@ -201,8 +205,6 @@ void GPMPOptimizer::PathPointToNode(const PathPoint& path_point, Vector6& x) {
 
 void GPMPOptimizer::SubSamplePath(const std::vector<PathPoint>& path,
                                   std::vector<PathPoint>& sub_sampled_path) {
-  assert(path.size() > 1);
-
   if (!sub_sampled_path.empty()) {
     sub_sampled_path.clear();
   }

@@ -245,6 +245,18 @@ class NavManagerNode(Node):
         self.map_status_pub.publish(msg)
 
     def _localization_status_cb(self, msg: LocalizationStatus):
+        # The localization YAML is the single source of truth for the startup
+        # map name. Mirror the name reported by global_localization_node instead
+        # of maintaining a separate launch-file default.
+        reported_map_name = msg.map_name.strip()
+        if reported_map_name and reported_map_name != self.current_map_name:
+            self.current_map_name = reported_map_name
+            self._publish_map_status(
+                MapStatus.LOADED,
+                reported_map_name,
+                'localization_status',
+            )
+
         if (
             msg.state == LocalizationStatus.TRACKING_LOST and
             self._last_localization_state != LocalizationStatus.TRACKING_LOST

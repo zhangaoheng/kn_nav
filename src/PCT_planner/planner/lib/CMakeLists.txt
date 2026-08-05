@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.13.0)
 project(planning_core CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED true)
 

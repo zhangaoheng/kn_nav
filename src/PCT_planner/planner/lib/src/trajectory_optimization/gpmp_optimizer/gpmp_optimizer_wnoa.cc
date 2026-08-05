@@ -22,6 +22,10 @@ constexpr double kQc = 0.1;
 
 bool GPMPOptimizerWnoa::GenerateTrajectory(
     const std::vector<PathPoint>& input_path, const double T) {
+  if (input_path.size() < 2) {
+    return false;
+  }
+
   auto t0 = std::chrono::high_resolution_clock::now();
   static auto sigma_initial = Diagonal::Sigmas(Vector4(0.001, 0.1, 0.001, 0.1));
   static auto sigma_goal = Diagonal::Sigmas(Vector4(0.001, 1, 0.001, 1));
@@ -243,8 +247,6 @@ void GPMPOptimizerWnoa::PathPointToNode(const PathPoint& path_point,
 void GPMPOptimizerWnoa::SubSamplePath(
     const std::vector<PathPoint>& path,
     std::vector<PathPoint>& sub_sampled_path) {
-  assert(path.size() > 1);
-
   if (!sub_sampled_path.empty()) {
     sub_sampled_path.clear();
   }

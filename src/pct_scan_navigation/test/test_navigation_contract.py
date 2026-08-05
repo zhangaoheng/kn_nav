@@ -40,13 +40,11 @@ def test_coordinator_profiles_use_lightweight_mode2_contract():
         'mode': 2,
         'global_frame': 'map',
         'path_topic': '/pct_path',
-        'odom_topic': '/Odometry_open3d',
         'waypoints_topic': '/scan_planner/waypoints',
         'waypoint_spacing': 1.0,
         'waypoint_z_offset': 0.0,
-        'goal_tolerance': 0.15,
     }
-    for profile in ('local', 'unitree_go2', 'unitree_go2w'):
+    for profile in ('A2', 'local', 'unitree_go2', 'unitree_go2w'):
         params = load(profile, 'coordinator.yaml')['pct_scan_coordinator']['ros__parameters']
         assert params == expected
 
@@ -201,11 +199,50 @@ def test_scan_mode2_is_dynamic_and_has_no_mandatory_sequence():
     assert 'keypoint_recorder.py' not in cmake
 
 
+def test_coordinator_publishes_each_complete_path_without_odom_rolling():
+    source = (ROOT / 'src/pct_scan_coordinator.cpp').read_text()
+    assert 'publishWaypointPath(sampled)' in source
+    assert 'signature == path_signature_' in source
+    assert 'rclcpp::QoS(1).reliable().transient_local()' in source
+    for removed in (
+        'nav_msgs/msg/odometry.hpp',
+        'odomCallback',
+        'publishRemainingWaypoints',
+        'consumedWaypointCount',
+        'accumulated_distance_',
+        'goal_tolerance',
+    ):
+        assert removed not in source
+
+
+def test_scan_mode2_preserves_global_reference_and_uses_arc_lookahead():
+    source = (SCAN_MANAGE / 'src/scan_replan_fsm.cpp').read_text()
+    replan = source.split(
+        'bool SCANReplanFSM::planFromCurrentTraj()', 1
+    )[1].split(
+        'void SCANReplanFSM::setStartStateFromOdomOrCurrentTraj()', 1
+    )[0]
+    target = source.split(
+        'bool SCANReplanFSM::getLocalTarget()', 1
+    )[1]
+
+    assert 'planGlobalTrajWaypoints' not in replan
+    assert 'navi_mode_ != NAVI_MODE::WAYPOINT_PATH' in replan
+    assert 'global.last_progress_time_ = projection_time' in target
+    assert 'progress_arc_length_ += projection_arc' in target
+    assert 'std::min(planning_horizon_, planner_manager_->pp_.planning_horizon_)' in target
+    assert 'target_arc + segment_length >= lookahead' in target
+    assert 'map->isInMap(local_target_pt_)' in target
+    assert 'candidate_time -= time_step' in target
+    assert 'candidate_time +=' not in target
+
+
 def test_goal_completion_is_latched_without_new_status_topics():
     coordinator = (ROOT / 'src/pct_scan_coordinator.cpp').read_text()
     fsm = (SCAN_MANAGE / 'src/scan_replan_fsm.cpp').read_text()
     controller = (SCAN_MANAGE / 'src/closed_loop_controller.cpp').read_text()
-    assert 'route_completed_' in coordinator
+    assert 'route_active_' in coordinator
+    assert 'route_completed_' not in coordinator
     assert 'goalReached()' in fsm
     assert 'position_error > finish_dist_ + no_replan_thresh_' in fsm
     assert 'bspline.yaw_pts.push_back(end_yaw_)' in fsm

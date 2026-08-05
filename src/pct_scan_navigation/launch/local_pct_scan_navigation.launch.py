@@ -105,7 +105,7 @@ def generate_launch_description():
     navigation_mode_value = ParameterValue(navigation_mode, value_type=int)
 
     # navigation_share = FindPackageShare('pct_scan_navigation')
-    navigation_share = str(Path.home() / 'nav_map')
+    navigation_share =  '/home/nav_map'
 
     def navigation_config(name):
         return PathJoinSubstitution([navigation_share, 'config', config_profile, name])
@@ -173,7 +173,6 @@ def generate_launch_description():
         name='nav_manager_node', output='both',
         parameters=[{
             'map_profiles_path': map_profiles_file,
-            'initial_map_name': 'outdoor',
             'full_restart_command': full_restart_command,
             'use_sim_time': use_sim_time,
         }],
@@ -192,7 +191,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument(
             'navigation_mode', default_value='2',
-            description='1: direct RViz goal to SCAN, 2: PCT rolling waypoints; 3 unsupported',
+            description='1: direct RViz goal to SCAN, 2: complete PCT reference path; 3 unsupported',
         ),
         DeclareLaunchArgument(
             'config_profile', default_value='local',

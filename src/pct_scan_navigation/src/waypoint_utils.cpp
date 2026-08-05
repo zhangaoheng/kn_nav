@@ -143,18 +143,4 @@ bool sampleWaypoints(
   return true;
 }
 
-std::size_t consumedWaypointCount(
-    double accumulated_distance,
-    double spacing,
-    std::size_t waypoint_count)
-{
-  if (waypoint_count <= 1 || !std::isfinite(accumulated_distance) ||
-      !std::isfinite(spacing) || accumulated_distance <= 0.0 || spacing <= 0.0)
-    return 0;
-
-  const auto passed = static_cast<std::size_t>(
-      std::floor((accumulated_distance + kEpsilon) / spacing));
-  return std::min(passed, waypoint_count - 1);
-}
-
 }  // namespace pct_scan_navigation

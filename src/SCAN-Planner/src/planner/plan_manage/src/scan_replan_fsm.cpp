@@ -313,12 +313,24 @@ namespace scan_planner
     navigation_status_reason_ = "ok";
     init_pt_ = odom_pos_;
     updateGoalYaw(path.poses.back().pose.orientation, label);
-    active_waypoints_ = waypoints;
     if (!planGlobalTrajByWaypoints(waypoints))
     {
       RCLCPP_ERROR(node_->get_logger(), "Unable to generate global trajectory from %s", label.c_str());
       return false;
     }
+
+    active_waypoints_ = std::move(waypoints);
+    waypoint_arc_lengths_.clear();
+    waypoint_arc_lengths_.reserve(active_waypoints_.size());
+    Eigen::Vector3d previous = init_pt_;
+    double path_length = 0.0;
+    for (const auto &waypoint : active_waypoints_)
+    {
+      path_length += (waypoint - previous).norm();
+      waypoint_arc_lengths_.push_back(path_length);
+      previous = waypoint;
+    }
+    progress_arc_length_ = 0.0;
 
     if (exec_state_ == WAIT_TARGET || exec_state_ == INIT)
       changeFSMExecState(GEN_NEW_TRAJ, "TRIG");
@@ -326,7 +338,8 @@ namespace scan_planner
              exec_state_ == FINAL_YAW_ALIGN)
       changeFSMExecState(REPLAN_TRAJ, "TRIG");
     RCLCPP_INFO(node_->get_logger(), "%s accepted: %zu guides, final=[%.2f %.2f %.2f]",
-                label.c_str(), waypoints.size(), end_pt_(0), end_pt_(1), end_pt_(2));
+                label.c_str(), active_waypoints_.size(),
+                end_pt_(0), end_pt_(1), end_pt_(2));
     return true;
   }
 
@@ -678,6 +691,8 @@ namespace scan_planner
       navigation_status_reason_ = "goal_reached";
       publishNavigationStatus();
       active_waypoints_.clear();
+      waypoint_arc_lengths_.clear();
+      progress_arc_length_ = 0.0;
       have_target_ = false;
       have_end_yaw_ = false;
       changeFSMExecState(WAIT_TARGET, "FSM");
@@ -769,6 +784,15 @@ namespace scan_planner
     return (odom_pos_ - end_pt_).head<2>().norm();
   }
 
+  uint32_t SCANReplanFSM::remainingWaypointCount() const
+  {
+    const auto first_remaining = std::upper_bound(
+        waypoint_arc_lengths_.begin(), waypoint_arc_lengths_.end(),
+        progress_arc_length_ + 1e-3);
+    return static_cast<uint32_t>(
+        std::distance(first_remaining, waypoint_arc_lengths_.end()));
+  }
+
   void SCANReplanFSM::publishNavigationStatus()
   {
     if (!navigation_status_pub_)
@@ -780,7 +804,7 @@ namespace scan_planner
     msg.map_name = current_map_name_;
     msg.goal_active = have_target_;
     msg.distance_to_goal = static_cast<float>(distanceToGoal());
-    msg.remaining_waypoints = static_cast<uint32_t>(active_waypoints_.size());
+    msg.remaining_waypoints = remainingWaypointCount();
     if (current_map_state_ == pct_scan_navigation::msg::MapStatus::LOADING)
       msg.reason = "map_switching";
     else if (current_map_state_ == pct_scan_navigation::msg::MapStatus::FAILED)
@@ -799,6 +823,8 @@ namespace scan_planner
   {
     const bool was_active = have_target_ || !active_waypoints_.empty();
     active_waypoints_.clear();
+    waypoint_arc_lengths_.clear();
+    progress_arc_length_ = 0.0;
     pending_waypoint_path_.reset();
     have_target_ = false;
     have_new_target_ = false;
@@ -824,43 +850,37 @@ namespace scan_planner
 
   bool SCANReplanFSM::planFromCurrentTraj()
   {
-    LocalTrajData *info = &planner_manager_->local_data_;
-    rclcpp::Time time_now = node_->now();
-    double t_cur = (time_now - info->start_time_).seconds();
-    t_cur = std::min(std::max(t_cur, 0.0), info->duration_);
+    setStartStateFromOdomOrCurrentTraj();
 
-    //cout << "info->velocity_traj_=" << info->velocity_traj_.get_control_points() << endl;
-
-    start_pt_ = odom_pos_;
-    start_vel_ = info->velocity_traj_.evaluateDeBoorT(t_cur);
-    start_acc_ = info->acceleration_traj_.evaluateDeBoorT(t_cur);
-
-    const Eigen::Vector2d to_goal = end_pt_.head<2>() - odom_pos_.head<2>();
-    if (to_goal.norm() > 1e-3 && start_vel_.head<2>().dot(to_goal) < 0.0)
+    if (navi_mode_ != NAVI_MODE::WAYPOINT_PATH)
     {
-      start_vel_.setZero();
-      start_acc_.setZero();
-    }
+      const Eigen::Vector2d to_goal =
+          end_pt_.head<2>() - odom_pos_.head<2>();
+      if (to_goal.norm() > 1e-3 &&
+          start_vel_.head<2>().dot(to_goal) < 0.0)
+      {
+        start_vel_.setZero();
+        start_acc_.setZero();
+      }
 
-    bool global_success = false;
-    if (navi_mode_ == NAVI_MODE::WAYPOINT_PATH && !active_waypoints_.empty())
-      global_success = planner_manager_->planGlobalTrajWaypoints(
-          start_pt_, start_vel_, start_acc_, active_waypoints_,
-          Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
-    else
-      global_success = planner_manager_->planGlobalTraj(
+      const bool global_success = planner_manager_->planGlobalTraj(
           start_pt_, start_vel_, start_acc_, end_pt_,
           Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
-
-    if (!global_success)
+      if (!global_success)
+      {
+        RCLCPP_ERROR(node_->get_logger(),
+                     "[navi_mode=%d] Unable to refresh global trajectory from odom to current target",
+                     navi_mode_);
+        return false;
+      }
+      if (!adjustGlobalTargetIfOccupied())
+        return false;
+    }
+    else if (planner_manager_->global_data_.global_duration_ <= 1e-3)
     {
-      RCLCPP_ERROR(node_->get_logger(),
-                   "[navi_mode=%d] Unable to refresh global trajectory from odom to current target", navi_mode_);
+      RCLCPP_ERROR(node_->get_logger(), "Mode 2 has no valid global reference trajectory");
       return false;
     }
-
-    if (!adjustGlobalTargetIfOccupied())
-      return false;
 
     bool success = callReboundReplan(true, false);
     if (!success)
@@ -890,13 +910,6 @@ namespace scan_planner
     const double t_cur = std::min(std::max(raw_t_cur, 0.0), info->duration_);
     start_vel_ = info->velocity_traj_.evaluateDeBoorT(t_cur);
     start_acc_ = info->acceleration_traj_.evaluateDeBoorT(t_cur);
-
-    const Eigen::Vector2d to_goal = end_pt_.head<2>() - odom_pos_.head<2>();
-    if (to_goal.norm() > 1e-3 && start_vel_.head<2>().dot(to_goal) < 0.0)
-    {
-      start_vel_.setZero();
-      start_acc_.setZero();
-    }
   }
 
   void SCANReplanFSM::checkCollisionCallback()
@@ -949,7 +962,8 @@ namespace scan_planner
   bool SCANReplanFSM::callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj)
   {
 
-    getLocalTarget();
+    if (!getLocalTarget())
+      return false;
 
     bool plan_success =
         planner_manager_->reboundReplan(start_pt_, start_vel_, start_acc_, local_target_pt_, local_target_vel_, (have_new_target_ || flag_use_poly_init), flag_randomPolyTraj);
@@ -1033,109 +1047,187 @@ namespace scan_planner
     return true;
   }
 
-  void SCANReplanFSM::getLocalTarget()
+  bool SCANReplanFSM::getLocalTarget()
   {
-    double t;
-
-    double t_step = planning_horizon_ / 20 / planner_manager_->pp_.max_vel_;
-    double dist_min = 9999, dist_min_t = 0.0;
-    double target_t = planner_manager_->global_data_.global_duration_;
-    for (t = planner_manager_->global_data_.last_progress_time_; t < planner_manager_->global_data_.global_duration_; t += t_step)
+    auto &global = planner_manager_->global_data_;
+    const double duration = global.global_duration_;
+    const double max_vel = planner_manager_->pp_.max_vel_;
+    const double lookahead =
+        std::min(planning_horizon_, planner_manager_->pp_.planning_horizon_);
+    if (!std::isfinite(duration) || duration <= 1e-3 ||
+        !std::isfinite(max_vel) || max_vel <= 1e-3 ||
+        !std::isfinite(lookahead) || lookahead <= 1e-3)
     {
-      Eigen::Vector3d pos_t = planner_manager_->global_data_.getPosition(t);
-      double dist = (pos_t - start_pt_).norm();
-
-      if (t < planner_manager_->global_data_.last_progress_time_ + 1e-5 && dist > planning_horizon_)
-      {
-        RCLCPP_ERROR(node_->get_logger(),
-                     "Local target progress mismatch: distance=%.3f horizon=%.3f progress_time=%.3f",
-                     dist, planning_horizon_, planner_manager_->global_data_.last_progress_time_);
-        local_target_pt_ = pos_t;
-        target_t = t;
-        planner_manager_->global_data_.last_progress_time_ = t;
-        break;
-      }
-      if (dist < dist_min)
-      {
-        dist_min = dist;
-        dist_min_t = t;
-      }
-      if (dist >= planning_horizon_)
-      {
-        local_target_pt_ = pos_t;
-        target_t = t;
-        planner_manager_->global_data_.last_progress_time_ = dist_min_t;
-        break;
-      }
+      RCLCPP_ERROR(node_->get_logger(),
+                   "Invalid global trajectory or local-target limits: duration=%.3f "
+                   "max_vel=%.3f lookahead=%.3f",
+                   duration, max_vel, lookahead);
+      return false;
     }
-    if (t > planner_manager_->global_data_.global_duration_) // Last global point
+
+    const double time_step = std::clamp(
+        planning_horizon_ / (40.0 * max_vel), 0.01, 0.10);
+    const double previous_progress =
+        std::clamp(global.last_progress_time_, 0.0, duration);
+    double projection_time = previous_progress;
+    double projection_arc = 0.0;
+    double best_distance_sq =
+        (global.global_traj_.evaluate(previous_progress) - odom_pos_).squaredNorm();
+
+    double segment_start_time = previous_progress;
+    Eigen::Vector3d segment_start = global.global_traj_.evaluate(segment_start_time);
+    double searched_arc = 0.0;
+    while (segment_start_time < duration - 1e-6 &&
+           searched_arc < planning_horizon_ - 1e-6)
     {
+      const double raw_end_time = std::min(duration, segment_start_time + time_step);
+      const Eigen::Vector3d raw_end = global.global_traj_.evaluate(raw_end_time);
+      const double raw_length = (raw_end - segment_start).norm();
+      if (raw_length <= 1e-9)
+      {
+        segment_start_time = raw_end_time;
+        segment_start = raw_end;
+        continue;
+      }
+
+      const double allowed_length =
+          std::min(raw_length, planning_horizon_ - searched_arc);
+      const double allowed_ratio = allowed_length / raw_length;
+      const double segment_end_time =
+          segment_start_time + allowed_ratio * (raw_end_time - segment_start_time);
+      const Eigen::Vector3d segment_end =
+          segment_start + allowed_ratio * (raw_end - segment_start);
+      const Eigen::Vector3d segment = segment_end - segment_start;
+      const double segment_length_sq = segment.squaredNorm();
+      const double ratio = std::clamp(
+          (odom_pos_ - segment_start).dot(segment) / segment_length_sq, 0.0, 1.0);
+      const Eigen::Vector3d projected = segment_start + ratio * segment;
+      const double distance_sq = (projected - odom_pos_).squaredNorm();
+      if (distance_sq < best_distance_sq)
+      {
+        best_distance_sq = distance_sq;
+        projection_time =
+            segment_start_time + ratio * (segment_end_time - segment_start_time);
+        projection_arc = searched_arc + ratio * allowed_length;
+      }
+
+      searched_arc += allowed_length;
+      segment_start_time = segment_end_time;
+      segment_start = segment_end;
+      if (allowed_ratio < 1.0)
+        break;
+    }
+
+    global.last_progress_time_ = projection_time;
+    progress_arc_length_ += projection_arc;
+
+    const Eigen::Vector3d reference_velocity =
+        global.global_traj_.evaluateVel(projection_time);
+    if (reference_velocity.norm() > 1e-3 &&
+        start_vel_.dot(reference_velocity) < 0.0)
+    {
+      start_vel_.setZero();
+      start_acc_.setZero();
+    }
+
+    double target_time = projection_time;
+    local_target_pt_ = global.global_traj_.evaluate(projection_time);
+    double target_arc = 0.0;
+    segment_start_time = projection_time;
+    segment_start = local_target_pt_;
+    while (segment_start_time < duration - 1e-6 &&
+           target_arc < lookahead - 1e-6)
+    {
+      const double segment_end_time =
+          std::min(duration, segment_start_time + time_step);
+      const Eigen::Vector3d segment_end =
+          global.global_traj_.evaluate(segment_end_time);
+      const double segment_length = (segment_end - segment_start).norm();
+      if (segment_length <= 1e-9)
+      {
+        segment_start_time = segment_end_time;
+        segment_start = segment_end;
+        continue;
+      }
+
+      if (target_arc + segment_length >= lookahead)
+      {
+        const double ratio = (lookahead - target_arc) / segment_length;
+        target_time =
+            segment_start_time + ratio * (segment_end_time - segment_start_time);
+        local_target_pt_ =
+            segment_start + ratio * (segment_end - segment_start);
+        target_arc = lookahead;
+        break;
+      }
+
+      target_arc += segment_length;
+      target_time = segment_end_time;
+      local_target_pt_ = segment_end;
+      segment_start_time = segment_end_time;
+      segment_start = segment_end;
+    }
+    if (target_time >= duration - 1e-6)
+    {
+      target_time = duration;
       local_target_pt_ = end_pt_;
-      target_t = planner_manager_->global_data_.global_duration_;
     }
 
-    auto targetOccupancy = [&](const Eigen::Vector3d &pt) {
-      return planner_manager_->grid_map_->getInflateOccupancy(pt, estimateYawFromSegment(odom_pos_, pt));
-    };
-
-    if (targetOccupancy(local_target_pt_) != 0)
+    auto map = planner_manager_->grid_map_;
+    if (map && map->isInMap(local_target_pt_))
     {
-      bool found_free_target = false;
-      double adjusted_t = target_t;
-
-      for (double dt = 0.0; dt <= planner_manager_->global_data_.global_duration_; dt += t_step)
+      const Eigen::Vector3d target_previous =
+          global.global_traj_.evaluate(std::max(projection_time, target_time - time_step));
+      if (map->getInflateOccupancy(
+              local_target_pt_,
+              estimateYawFromSegment(target_previous, local_target_pt_)) > 0)
       {
-        double t_forward = target_t + dt;
-        if (t_forward <= planner_manager_->global_data_.global_duration_)
+        bool found_free_target = false;
+        for (double candidate_time = target_time;
+             candidate_time >= projection_time - 1e-6;
+             candidate_time -= time_step)
         {
-          Eigen::Vector3d pt = planner_manager_->global_data_.getPosition(t_forward);
-          if (targetOccupancy(pt) == 0)
+          const double clamped_time =
+              std::max(projection_time, candidate_time);
+          const Eigen::Vector3d candidate =
+              global.global_traj_.evaluate(clamped_time);
+          if (!map->isInMap(candidate))
+            continue;
+          const Eigen::Vector3d previous =
+              global.global_traj_.evaluate(
+                  std::max(projection_time, clamped_time - time_step));
+          if (map->getInflateOccupancy(
+                  candidate, estimateYawFromSegment(previous, candidate)) == 0)
           {
-            local_target_pt_ = pt;
-            adjusted_t = t_forward;
+            local_target_pt_ = candidate;
+            target_time = clamped_time;
             found_free_target = true;
             break;
           }
-        }
-
-        double t_backward = target_t - dt;
-        if (t_backward >= std::max(0.0, dist_min_t))
-        {
-          Eigen::Vector3d pt = planner_manager_->global_data_.getPosition(t_backward);
-          if (targetOccupancy(pt) == 0)
-          {
-            local_target_pt_ = pt;
-            adjusted_t = t_backward;
-            found_free_target = true;
+          if (clamped_time <= projection_time + 1e-6)
             break;
-          }
+        }
+
+        if (found_free_target)
+        {
+          RCLCPP_WARN_THROTTLE(
+              node_->get_logger(), *node_->get_clock(), 1000,
+              "Occupied local target moved backward along the global reference");
+        }
+        else
+        {
+          RCLCPP_WARN_THROTTLE(
+              node_->get_logger(), *node_->get_clock(), 1000,
+              "Local target is occupied and no earlier free target was found");
         }
       }
-
-      if (found_free_target)
-      {
-        RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
-                             "Local target was adjusted to a nearby collision-free point");
-        target_t = adjusted_t;
-      }
-      else
-      {
-        RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
-                             "Local target is in collision and no nearby free target was found");
-      }
     }
 
-    if ((end_pt_ - local_target_pt_).norm() < (planner_manager_->pp_.max_vel_ * planner_manager_->pp_.max_vel_) / (2 * planner_manager_->pp_.max_acc_))
-    {
-      // local_target_vel_ = (end_pt_ - init_pt_).normalized() * planner_manager_->pp_.max_vel_ * (( end_pt_ - local_target_pt_ ).norm() / ((planner_manager_->pp_.max_vel_*planner_manager_->pp_.max_vel_)/(2*planner_manager_->pp_.max_acc_)));
-      // cout << "A" << endl;
-      local_target_vel_ = Eigen::Vector3d::Zero();
-    }
-    else
-    {
-      local_target_vel_ = planner_manager_->global_data_.getVelocity(target_t);
-      // cout << "AA" << endl;
-    }
+    local_target_vel_ = global.global_traj_.evaluateVel(target_time);
+    const double target_speed = local_target_vel_.norm();
+    if (target_speed > max_vel)
+      local_target_vel_ *= max_vel / target_speed;
+    return true;
   }
 
 } // namespace scan_planner
