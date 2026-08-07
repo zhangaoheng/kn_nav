@@ -8,7 +8,7 @@ launch:
   start_pct_planner: true
   start_go2_bridge: true
   network_interface: eth0
-  initial_map_name: floor
+  initial_map_name: outdoor
   full_restart_command: ''
 topics:
   body_pose: /Odometry_open3d
@@ -19,25 +19,18 @@ topics:
   initial_path: /initial_path
 maps:
   outdoor:
-    pcd_path: /home/nav_map/outdoor/outdoor_global_voxel02.pcd
-    tomo_path: /home/nav_map/outdoor/outdoor_global_voxel002_ground.pickle
+    pcd_path: /home/nav_map/outdoor/global_map_downsize.pcd
+    tomo_path: /home/code/work_space/kn_nav/src/PCT_planner/rsc/tomogram/outdoor_global_voxel002_ground.pickle
     localization:
       fitness_eval_threshold: 0.2
-      threshold_fitness: 0.8
+      threshold_fitness: 0.7
       threshold_fitness_init: 0.9
-  floor:
+  cross-floor-kn:
     pcd_path: /home/nav_map/cross-floor-kn/global_map_downsize.pcd
-    tomo_path: /home/nav_map/cross-floor-kn/liuxing_ground_voxel005_radius015.pickle
+    tomo_path: /home/code/work_space/kn_nav/src/PCT_planner/rsc/tomogram/outdoor_global_voxel002_ground.pickle
     localization:
       fitness_eval_threshold: 0.2
-      threshold_fitness: 0.8
-      threshold_fitness_init: 0.9
-  fourfloors:
-    pcd_map: /home/nav_map/four_floors/four_floors_0.05.pcd
-    tomo_path: /home/nav_map/four_floors/four_floors_0.05.pickle
-    localization:
-      fitness_eval_threshold: 0.2
-      threshold_fitness: 0.8
+      threshold_fitness: 0.7
       threshold_fitness_init: 0.9
 nodes:
   fastlio_mapping:
@@ -95,15 +88,8 @@ nodes:
       interval: -1
   global_localization_node:
     map_name: outdoor
-    # path_map: /home/nav_map/cross-floor-kn/global_map_downsize.pcd
-    # path_imu_to_base: /home/nav_map/cross-floor-kn/imu_to_base.txt
-
-    # path_map: /home/nav_map/outdoor/outdoor_global_voxel02.pcd
-    # path_imu_to_base: /home/nav_map/outdoor/imu_to_base.txt
-
-    path_map: /home/nav_map/four_floors/four_floors_0.05.pcd
-    path_imu_to_base: /home/nav_map/four_floors/imu_to_base.txt
-    
+    path_map: /home/nav_map/outdoor/global_map_downsize.pcd
+    path_imu_to_base: /home/nav_map/outdoor/imu_to_base.txt
     pcd_queue_maxsize: 10
     loc_frequence: 0.5
     map_publish_interval: 5.0
@@ -113,12 +99,12 @@ nodes:
     fitness_eval_threshold: 0.2
     normal_search_radius: 0.4
     scan_map_filter_radius: 1.0
-    localization_lost_fail_count: 10
-    threshold_fitness: 0.8
+    localization_lost_fail_count: 20
+    threshold_fitness: 0.7
     threshold_fitness_init: 0.9
     max_icp_translation: 2.0
-    max_icp_yaw_deg: 5.0
-    max_init_icp_translation: 20.0
+    max_icp_yaw_deg: 2.0
+    max_init_icp_translation: 10.0
     max_init_icp_yaw_deg: 180.0
     min_init_fitness_improvement: 0.02
     min_source_points: 500
@@ -132,7 +118,7 @@ nodes:
     - 0.0
     - 0.0
     static_tf_imu_link_to_base_link:
-    - 0.4
+    - 0.2
     - 0.0
     - 0.0
     - 0.0
@@ -153,11 +139,7 @@ nodes:
     goal_topic: /goal_pose
     relocalize_timeout_sec: 20.0
   pct_global_planner:
-    # tomo_path: /home/nav_map/cross-floor-kn/liuxing_ground_voxel005_radius015.pickle
-
-    # tomo_path: /home/nav_map/outdoor/outdoor_global_voxel002_ground.pickle
-
-    tomo_path: /home/nav_map/four_floors/four_floors_0.05.pickle
+    tomo_path: /home/code/work_space/kn_nav/src/PCT_planner/rsc/tomogram/outdoor_global_voxel002_ground.pickle
     global_frame: map
     robot_frame: base_link
     goal_pose_topic: /goal_pose
@@ -178,9 +160,9 @@ nodes:
   scan_planner_node:
     map_name: outdoor
     fsm.navi_mode: 2
-    fsm.thresh_replan: 4.0
+    fsm.thresh_replan: 1.0
     fsm.thresh_no_replan: 0.1
-    fsm.planning_horizon: 3.5
+    fsm.planning_horizon: 5.5
     fsm.emergency_time: 1.0
     fsm.finish_dist: 0.15
     fsm.finish_yaw: 0.1
@@ -189,7 +171,7 @@ nodes:
     grid_map.sensor_type: lidar
     grid_map.cloud_is_world: true
     grid_map.need_extrinsic: false
-    grid_map.resolution: 0.1
+    grid_map.resolution: 0.2
     grid_map.frame_id: map
     grid_map.sliding_map_frame_id: scan_sliding_map
     grid_map.ground_height: 0.0
@@ -204,7 +186,7 @@ nodes:
     grid_map.double_cylinder_radius: 0.28
     grid_map.double_cylinder_offset: 0.44
     grid_map.body_height: 0.4
-    grid_map.obstacles_inflation_z_up: 0.1
+    grid_map.obstacles_inflation_z_up: 0.27
     grid_map.obstacles_inflation_z_down: 0.44
     grid_map.cx: 317.19183349609375
     grid_map.cy: 256.4806823730469
@@ -253,11 +235,9 @@ nodes:
     mode: 2
     global_frame: map
     path_topic: /pct_path
-    odom_topic: /Odometry_open3d
     waypoints_topic: /scan_planner/waypoints
     waypoint_spacing: 1.0
-    waypoint_z_offset: 0.2
-    goal_tolerance: 0.15
+    waypoint_z_offset: 0.0
   nav_manager_node:
     service_timeout_s: 8.0
     load_localization_service: /global_localization_node/load_map
@@ -272,10 +252,10 @@ nodes:
     sdk_timeout: 0.5
     control_rate: 20.0
     min_vx: 0.0
-    max_vx: 0.75
+    max_vx: 1.2
     max_abs_vy: 0.5
     max_abs_vyaw: 2.0
-    max_linear_acceleration: 1.5
+    max_linear_acceleration: 1.0
     max_yaw_acceleration: 1.2
     command_timeout: 0.3
     odometry_timeout: 1.0

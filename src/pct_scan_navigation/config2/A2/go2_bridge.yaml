@@ -5,10 +5,10 @@ go2_cmd_vel_bridge:
     sdk_timeout: 0.5
     control_rate: 20.0
     min_vx: 0.0
-    max_vx: 0.75
+    max_vx: 1.2
     max_abs_vy: 0.5
     max_abs_vyaw: 2.0
-    max_linear_acceleration: 1.5
+    max_linear_acceleration: 1.0
     max_yaw_acceleration: 1.2
     command_timeout: 0.3
     odometry_timeout: 1.0

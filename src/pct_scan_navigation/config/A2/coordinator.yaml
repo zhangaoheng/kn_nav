@@ -3,6 +3,8 @@ pct_scan_coordinator:
     mode: 2
     global_frame: map
     path_topic: /pct_path
+    odom_topic: /Odometry_open3d
     waypoints_topic: /scan_planner/waypoints
     waypoint_spacing: 1.0
-    waypoint_z_offset: 0.0
+    waypoint_z_offset: 0.2
+    goal_tolerance: 0.15

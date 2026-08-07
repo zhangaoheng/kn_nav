@@ -1,15 +1,17 @@
+# ros2 service call /switch_map pct_scan_navigation/srv/SwitchMap "{map_name: outdoor}"
+# ros2 service call /switch_map pct_scan_navigation/srv/SwitchMap "{map_name: cross-floor-kn}"
 maps:
   outdoor:
-    pcd_path: "/home/nav_map/outdoor/global_map_downsize.pcd"
-    tomo_path: "/home/code/work_space/kn_nav/src/PCT_planner/rsc/tomogram/outdoor_global_voxel002_ground.pickle"
+    pcd_path: "/home/nav_map/outdoor/outdoor_global_voxel02.pcd"
+    tomo_path: "/home/nav_map/outdoor/outdoor_global_voxel002_ground.pickle"
     localization:
       fitness_eval_threshold: 0.2
-      threshold_fitness: 0.7
+      threshold_fitness: 0.8
       threshold_fitness_init: 0.9
   cross-floor-kn:
     pcd_path: "/home/nav_map/cross-floor-kn/global_map_downsize.pcd"
-    tomo_path: "/home/code/work_space/kn_nav/src/PCT_planner/rsc/tomogram/outdoor_global_voxel002_ground.pickle"
+    tomo_path: "/home/nav_map/cross-floor-kn/liuxing_ground_voxel005_radius015.pickle"
     localization:
       fitness_eval_threshold: 0.2
-      threshold_fitness: 0.7
+      threshold_fitness: 0.8
       threshold_fitness_init: 0.9
