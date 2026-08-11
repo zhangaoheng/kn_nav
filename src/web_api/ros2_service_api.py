@@ -334,6 +334,31 @@ def _load_map_names(config_path: str) -> list[str]:
     return [name.strip() for name in maps]
 
 
+def _load_initial_map_identity(config_path: str) -> Tuple[str, str]:
+    """Read the startup map from the unified config, independent of ROS timing."""
+    path = Path(config_path).expanduser().resolve()
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle) or {}
+    except OSError as error:
+        raise RuntimeError(f"Unable to read navigation config {path}: {error}") from error
+    except yaml.YAMLError as error:
+        raise RuntimeError(f"Invalid navigation config YAML {path}: {error}") from error
+
+    launch = config.get("launch") or {}
+    maps = config.get("maps") or {}
+    map_name = str(launch.get("initial_map_name", "")).strip()
+    profile = maps.get(map_name)
+    if not map_name or not isinstance(profile, dict):
+        raise RuntimeError(
+            f"launch.initial_map_name {map_name!r} is not present in maps: {path}"
+        )
+    map_path = str(profile.get("pcd_path", "")).strip()
+    if not map_path:
+        raise RuntimeError(f"maps.{map_name}.pcd_path is empty: {path}")
+    return _safe_map_name(map_name), map_path
+
+
 def _points_file_for_map(points_directory: str, map_name: str) -> Path:
     directory = Path(points_directory).expanduser().resolve()
     return directory / f"{_safe_map_name(map_name)}.json"
@@ -1430,7 +1455,12 @@ def create_app(settings: Settings) -> FastAPI:
                 map_name = ""
                 points_file = Path(settings.points_file).expanduser().resolve()
             else:
-                map_name, map_path = await gateway.current_map_identity()
+                # Do not query the ROS parameter here: during a tmux restart an
+                # old localization node can still answer before the new A2 node
+                # is ready, causing the API to create the wrong map JSON file.
+                map_name, map_path = _load_initial_map_identity(
+                    settings.navigation_config_path
+                )
                 points_file = _points_file_for_map(
                     settings.points_directory, map_name
                 )

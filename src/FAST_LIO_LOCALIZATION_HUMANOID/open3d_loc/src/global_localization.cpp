@@ -148,6 +148,12 @@ bool GloabalLocalization::LoadMapFromPath(const std::string &path_map,
         current_map_name_ = resolved_map_name;
     }
 
+    // Keep the ROS parameters in sync with the runtime-loaded map.  The map
+    // service changes the in-memory cloud, but without this update parameter
+    // clients would continue to observe the startup map name/path.
+    this->set_parameter(rclcpp::Parameter("map_name", resolved_map_name));
+    this->set_parameter(rclcpp::Parameter("path_map", path_map));
+
     {
         std::lock_guard<std::mutex> scan_lock(lock_scan_);
         que_pcd_scan_.clear();
@@ -157,6 +163,9 @@ bool GloabalLocalization::LoadMapFromPath(const std::string &path_map,
     tracking_fail_count_ = 0;
     loc_fitness_.store(0.0);
     pub_map_->publish(next_map_msg);
+
+    RCLCPP_INFO(this->get_logger(), "runtime PCD map loaded: name=%s path=%s points=%zu",
+                resolved_map_name.c_str(), path_map.c_str(), map_ori->points_.size());
 
     if (message)
         *message = "loaded map: " + path_map;

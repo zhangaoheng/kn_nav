@@ -149,7 +149,15 @@ def _launch_setup(context):
         _setting(context, 'network_interface', launch_config, 'enp2s0'))
     full_restart_command = str(
         _setting(context, 'full_restart_command', launch_config, ''))
-    initial_map_name = str(launch_config.get('initial_map_name', 'outdoor'))
+    initial_map_name = str(launch_config.get('initial_map_name', '')).strip()
+    if not initial_map_name:
+        raise ValueError(
+            'unified navigation config launch.initial_map_name is required')
+    maps = config.get('maps', {})
+    if initial_map_name not in maps:
+        raise ValueError(
+            'unified navigation config launch.initial_map_name must reference '
+            f'an entry in maps: {initial_map_name}')
 
     common_overrides = {'use_sim_time': use_sim_time}
     actions = []
