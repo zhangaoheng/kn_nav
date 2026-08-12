@@ -1,0 +1,41 @@
+/tf_static:
+  history: keep_last
+  depth: 1
+  reliability: reliable
+  durability: transient_local
+
+/current_map:
+  history: keep_last
+  depth: 10
+  reliability: reliable
+  durability: transient_local
+
+/pct_path:
+  history: keep_last
+  depth: 10
+  reliability: reliable
+  durability: transient_local
+
+/pct_astar_path:
+  history: keep_last
+  depth: 10
+  reliability: reliable
+  durability: transient_local
+
+/scan_planner/waypoints:
+  history: keep_last
+  depth: 10
+  reliability: reliable
+  durability: transient_local
+
+/map_3d:
+  history: keep_last
+  depth: 1
+  reliability: reliable
+  durability: transient_local
+
+/tomogram:
+  history: keep_last
+  depth: 1
+  reliability: reliable
+  durability: transient_local

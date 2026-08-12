@@ -4,17 +4,26 @@
 # column enter the robot Docker container and receive commands without
 # pressing Enter.  The top two panes in the right column also enter the
 # container; the top-right pane runs the Web API automatically, while the
-# second-right pane remains idle. The remaining two stay on the host.
+# second-right pane records the navigation rosbag automatically. The remaining
+# two stay on the host.
 
 set -euo pipefail
 
 SESSION_NAME="${SESSION_NAME:-go2_nav}"
-CONTAINER_ID="${CONTAINER_ID:-f3b82610c6d7}"
+CONTAINER_ID="${CONTAINER_ID:-7f475292e5e6}"
 STARTUP_WAIT="${STARTUP_WAIT:-2}"
 TMUX_MOUSE="${TMUX_MOUSE:-on}"
+ROSBAG_OUTPUT_ROOT="${ROSBAG_OUTPUT_ROOT:-/home/nav_map/rosbag/A2}"
+ROSBAG_PROFILE="${ROSBAG_PROFILE:-balanced}"
+ROSBAG_TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+ROSBAG_OUTPUT_PATH="${ROSBAG_OUTPUT_ROOT}/a2_${ROSBAG_TIMESTAMP}"
 
 if [[ "${TMUX_MOUSE}" != "on" && "${TMUX_MOUSE}" != "off" ]]; then
   echo "TMUX_MOUSE must be 'on' or 'off'." >&2
+  exit 2
+fi
+if [[ "${ROSBAG_PROFILE}" != "balanced" && "${ROSBAG_PROFILE}" != "full" ]]; then
+  echo "ROSBAG_PROFILE must be 'balanced' or 'full'." >&2
   exit 2
 fi
 
@@ -29,14 +38,15 @@ if (( $# != 0 )); then
 fi
 
 LEFT_TITLES=(livox pct_scan goal_points enable_go2)
-RIGHT_TITLES=(web_api container_2 host_3 host_4)
+RIGHT_TITLES=(web_api rosbag host_3 host_4)
 LEFT_COMMANDS=(
   "ros2 launch livox_ros_driver2 msg_MID360s_launch.py"
-  "ros2 launch pct_scan_navigation unitree_go2w_pct_scan_navigation.launch.py"
+  "ros2 launch pct_scan_navigation unitree_A2_pct_scan_navigation.launch.py"
   "python3 /home/code/work_space/kn_nav/src/tools/goal_points_cli.py"
   "ros2 service call /go2_cmd_vel_bridge/enable std_srvs/srv/SetBool '{data: true}'"
 )
 WEB_API_COMMAND="python3 /home/code/work_space/kn_nav/src/web_api/ros2_service_api.py --host 0.0.0.0 --port 8000"
+ROSBAG_COMMAND="ROSBAG_PROFILE='${ROSBAG_PROFILE}' /home/code/work_space/kn_nav/src/tools/record_navigation_bag.sh '${ROSBAG_OUTPUT_PATH}' /home/nav_map/config/A2/navigation.yaml"
 
 if ! command -v tmux >/dev/null 2>&1; then
   echo "tmux is not installed. Install it with: sudo apt install tmux" >&2
@@ -70,6 +80,35 @@ fi
 
 if tmux has-session -t "${SESSION_NAME}" 2>/dev/null; then
   if [[ "${recreate}" == "true" ]]; then
+    # Give rosbag a chance to flush metadata and close sqlite cleanly before
+    # destroying the old tmux session.
+    rosbag_pane="$(
+      tmux list-panes -t "${SESSION_NAME}" -F '#{pane_id} #{pane_title}' |
+        awk '$2 == "rosbag" {print $1; exit}'
+    )"
+    if [[ -n "${rosbag_pane}" ]]; then
+      active_bag_marker="${ROSBAG_OUTPUT_ROOT}/.active_navigation_bag"
+      active_bag_path=""
+      if [[ -f "${active_bag_marker}" ]]; then
+        active_bag_path="$(<"${active_bag_marker}")"
+      fi
+      tmux send-keys -t "${rosbag_pane}" C-c
+      # Compression and runtime parameter snapshots can take longer than two
+      # seconds. Wait for the recorder's completion marker before killing tmux.
+      for _ in $(seq 1 90); do
+        if [[ -n "${active_bag_path}" &&
+          -f "${active_bag_path}/repro/recording_finalized.txt" ]]; then
+          break
+        fi
+        if [[ ! -f "${active_bag_marker}" ]]; then
+          break
+        fi
+        sleep 1
+      done
+      if [[ -f "${active_bag_marker}" ]]; then
+        echo "Warning: rosbag finalization did not finish within 90 seconds." >&2
+      fi
+    fi
     tmux kill-session -t "${SESSION_NAME}"
   else
     configure_tmux_input
@@ -127,10 +166,13 @@ for index in "${!left_panes[@]}"; do
   tmux send-keys -l -t "${left_panes[index]}" "${LEFT_COMMANDS[index]}"
 done
 
-# The Web API is safe to start automatically. Motion-related commands remain
-# prefilled without Enter and must still be confirmed manually.
+# The Web API and rosbag recorder are safe to start automatically.
+# Motion-related commands remain prefilled without Enter and must still be
+# confirmed manually.
 tmux send-keys -l -t "${right_panes[0]}" "${WEB_API_COMMAND}"
 tmux send-keys -t "${right_panes[0]}" C-m
+tmux send-keys -l -t "${right_panes[1]}" "${ROSBAG_COMMAND}"
+tmux send-keys -t "${right_panes[1]}" C-m
 
 tmux select-pane -t "${left_panes[0]}"
 exec tmux attach-session -t "${SESSION_NAME}"
