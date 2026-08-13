@@ -113,6 +113,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
         "srv/PoseDeviation.srv"
         "srv/GetPose.srv"
         "srv/PublishGoal.srv"
+        "srv/GlobalRelocalize.srv"
         DEPENDENCIES geometry_msgs
 )
 
@@ -162,6 +163,20 @@ ament_target_dependencies(global_localization_node
         pct_scan_navigation
 )
 
+# Optional, manually triggered global recovery. This is deliberately a
+# separate process so expensive matching cannot disturb normal tracking.
+add_executable(global_relocalization_node src/global_relocalization_node.cpp)
+target_link_libraries(global_relocalization_node
+        ${Open3D_LIBRARIES}
+        open3d_conversions
+)
+ament_target_dependencies(global_relocalization_node
+        rclcpp
+        geometry_msgs
+        sensor_msgs
+        pct_scan_navigation
+)
+
 # Build localization service node
 add_executable(localization_service_node src/localization_service_node.cpp)
 ament_target_dependencies(localization_service_node
@@ -173,6 +188,7 @@ ament_target_dependencies(localization_service_node
 )
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(localization_service_node "${cpp_typesupport_target}")
+target_link_libraries(global_relocalization_node "${cpp_typesupport_target}")
 
 # Install targets
 install(TARGETS
@@ -185,6 +201,7 @@ install(TARGETS
 
 install(TARGETS
         global_localization_node
+        global_relocalization_node
         localization_service_node
 
         DESTINATION lib/${PROJECT_NAME}

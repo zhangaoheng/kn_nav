@@ -1,0 +1,27 @@
+global_relocalization_node:
+  ros__parameters:
+    # Safety default: reject triggers until explicitly enabled.
+    enabled: false
+    map_topic: /map_3d
+    scan_topic: /scan_base_link
+    status_topic: /localization_status
+    initialpose_topic: /initialpose
+
+    # ScanContext-inspired polar descriptor, independently implemented.
+    descriptor_rings: 20
+    descriptor_sectors: 60
+    descriptor_radius: 20.0
+    tile_size: 24.0
+    tile_height: 3.0
+    min_tile_points: 500
+    max_candidates: 5
+    min_descriptor_score: 0.15
+
+    # Coarse yaw/centroid alignment followed by multi-resolution Open3D ICP.
+    voxel_size: 0.4
+    min_scan_points: 300
+    min_target_points: 800
+    min_fitness: 0.45
+    max_inlier_rmse: 0.8
+    max_abs_z: 5.0
+    max_scan_age_s: 2.0

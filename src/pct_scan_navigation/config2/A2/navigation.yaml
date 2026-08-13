@@ -5,6 +5,7 @@ launch:
   use_sim_time: false
   navigation_mode: 2
   start_open3d_loc: true
+  start_global_relocalization: false
   start_pct_planner: true
   start_go2_bridge: true
   network_interface: eth0
@@ -138,6 +139,27 @@ nodes:
     current_pose_topic: /Odometry_open3d
     goal_topic: /goal_pose
     relocalize_timeout_sec: 20.0
+  global_relocalization_node:
+    enabled: false
+    map_topic: /map_3d
+    scan_topic: /scan_base_link
+    status_topic: /localization_status
+    initialpose_topic: /initialpose
+    descriptor_rings: 20
+    descriptor_sectors: 60
+    descriptor_radius: 20.0
+    tile_size: 24.0
+    tile_height: 3.0
+    min_tile_points: 500
+    max_candidates: 5
+    min_descriptor_score: 0.15
+    voxel_size: 0.4
+    min_scan_points: 300
+    min_target_points: 800
+    min_fitness: 0.45
+    max_inlier_rmse: 0.8
+    max_abs_z: 5.0
+    max_scan_age_s: 2.0
   pct_global_planner:
     tomo_path: /home/code/work_space/kn_nav/src/PCT_planner/rsc/tomogram/outdoor_global_voxel002_ground.pickle
     global_frame: map

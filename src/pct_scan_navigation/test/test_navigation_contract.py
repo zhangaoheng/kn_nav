@@ -35,7 +35,11 @@ def test_unified_configs_preserve_every_legacy_parameter():
         unified = load_unified(profile)
         assert unified['version'] == 1
         assert set(unified) == {'version', 'launch', 'topics', 'maps', 'nodes'}
-        assert set(unified['nodes']) == required_nodes
+        configured_nodes = set(unified['nodes'])
+        assert required_nodes <= configured_nodes
+        assert configured_nodes - required_nodes <= {'global_relocalization_node'}
+        if 'global_relocalization_node' in unified['nodes']:
+            assert unified['nodes']['global_relocalization_node']['enabled'] is False
         assert unified['maps'] == load(profile, 'map_profiles.yaml')['maps']
         assert unified['nodes']['fastlio_mapping'] == (
             load(profile, 'fast_lio.yaml')['/**']['ros__parameters'])

@@ -64,6 +64,9 @@ if(BUILD_TESTING)
   ament_add_gtest(test_waypoint_utils test/test_waypoint_utils.cpp)
   target_link_libraries(test_waypoint_utils waypoint_utils)
   ament_add_pytest_test(test_navigation_contract test/test_navigation_contract.py)
+  ament_add_pytest_test(
+    test_global_relocalization_contract
+    test/test_global_relocalization_contract.py)
 endif()
 
 ament_export_dependencies(rosidl_default_runtime)

@@ -1,0 +1,9 @@
+bool apply
+bool allow_while_tracking
+---
+bool success
+geometry_msgs/Pose pose
+float64 descriptor_score
+float64 fitness
+float64 inlier_rmse
+string message
