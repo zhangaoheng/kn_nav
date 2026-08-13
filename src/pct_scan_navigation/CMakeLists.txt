@@ -45,6 +45,7 @@ install(TARGETS pct_scan_coordinator waypoint_utils
 install(DIRECTORY include/ DESTINATION include)
 install(PROGRAMS
   scripts/check_navigation_config.py
+  scripts/fastlio_monitor_node.py
   scripts/global_path_follow_coordinator_node.py
   scripts/migrate_navigation_config.py
   scripts/nav_manager_node.py

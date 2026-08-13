@@ -173,6 +173,15 @@ def _launch_setup(context):
                 ],
             ),
             Node(
+                package='pct_scan_navigation',
+                executable='fastlio_monitor_node.py',
+                name='fastlio_monitor', output='both',
+                parameters=[
+                    dict(config.get('nodes', {}).get('fastlio_monitor', {})),
+                    common_overrides,
+                ],
+            ),
+            Node(
                 package='open3d_loc', executable='global_localization_node',
                 name='global_localization_node', output='both',
                 parameters=[
