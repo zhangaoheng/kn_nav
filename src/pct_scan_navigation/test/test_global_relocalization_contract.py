@@ -19,6 +19,11 @@ def test_global_relocalization_is_opt_in_and_does_not_control_motion():
     assert 'LocalizationStatus::TRACKING' in source
     assert 'LocalizationStatus::MAP_SWITCHING' in source
     assert 'map_dirty' in source
+    assert 'gravityAlignedTransform' in source
+    assert 'removeDominantHorizontalPlane' in source
+    assert 'ambiguous global relocalization candidates' in source
+    assert 'min_fitness_ = 0.70' in source
+    assert 'max_inlier_rmse_ = 0.40' in source
     for forbidden in ('cmd_vel', 'go2_cmd_vel_bridge', 'SportClient', 'sendTransform'):
         assert forbidden not in source
 

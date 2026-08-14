@@ -156,10 +156,16 @@ nodes:
     voxel_size: 0.4
     min_scan_points: 300
     min_target_points: 800
-    min_fitness: 0.45
-    max_inlier_rmse: 0.8
+    min_fitness: 0.70
+    max_inlier_rmse: 0.40
     max_abs_z: 5.0
     max_scan_age_s: 2.0
+    target_half_xy: 12.0
+    target_half_z: 2.0
+    ground_plane_distance: 0.15
+    min_fitness_margin: 0.05
+    ambiguity_translation_m: 1.0
+    ambiguity_yaw_deg: 10.0
   pct_global_planner:
     tomo_path: /home/code/work_space/kn_nav/src/PCT_planner/rsc/tomogram/outdoor_global_voxel002_ground.pickle
     global_frame: map
