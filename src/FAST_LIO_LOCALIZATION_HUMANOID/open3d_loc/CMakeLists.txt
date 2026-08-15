@@ -166,8 +166,10 @@ ament_target_dependencies(global_localization_node
 # Optional, manually triggered global recovery. This is deliberately a
 # separate process so expensive matching cannot disturb normal tracking.
 add_executable(global_relocalization_node src/global_relocalization_node.cpp)
+target_compile_features(global_relocalization_node PRIVATE cxx_std_17)
 target_link_libraries(global_relocalization_node
         ${Open3D_LIBRARIES}
+        ${YAMLCPP_LIBRARIES}
         open3d_conversions
 )
 ament_target_dependencies(global_relocalization_node
@@ -213,6 +215,16 @@ install(DIRECTORY
         config
         rviz_cfg
         DESTINATION share/${PROJECT_NAME}/
+)
+
+install(PROGRAMS
+        scripts/build_relocalization_keyframes.py
+        DESTINATION lib/${PROJECT_NAME}
+)
+
+install(FILES
+        KEYFRAME_RELOCALIZATION.md
+        DESTINATION share/${PROJECT_NAME}
 )
 
 # Install include directory

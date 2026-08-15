@@ -1,4 +1,6 @@
 from pathlib import Path
+import subprocess
+import sys
 
 import yaml
 
@@ -19,8 +21,12 @@ def test_global_relocalization_is_opt_in_and_does_not_control_motion():
     assert 'LocalizationStatus::TRACKING' in source
     assert 'LocalizationStatus::MAP_SWITCHING' in source
     assert 'map_dirty' in source
-    assert 'gravityAlignedTransform' in source
     assert 'removeDominantHorizontalPlane' in source
+    assert 'keyframe_database_root' in source
+    assert 'RegistrationRANSACBasedOnFeatureMatching' in source
+    assert 'RegistrationGeneralizedICP' in source
+    assert 'keyframe.pose * coarse.transformation_' in source
+    assert 'discard keyframe database loaded during map switch' in source
     assert 'ambiguous global relocalization candidates' in source
     assert 'min_fitness_ = 0.70' in source
     assert 'max_inlier_rmse_ = 0.40' in source
@@ -38,6 +44,22 @@ def test_global_relocalization_interfaces_are_installed():
     assert '"srv/GlobalRelocalize.srv"' in cmake
     assert 'add_executable(global_relocalization_node' in cmake
     assert 'global_relocalization_node' in cmake
+    assert 'build_relocalization_keyframes.py' in cmake
+
+
+def test_keyframe_builder_requires_explicit_map_alignment_confirmation(tmp_path):
+    script = OPEN3D_LOC / 'scripts/build_relocalization_keyframes.py'
+    result = subprocess.run(
+        [
+            sys.executable, str(script), str(tmp_path / 'missing_bag'),
+            str(tmp_path / 'database'), '--map-name', 'floor',
+            '--imu-to-base', str(tmp_path / 'imu_to_base.txt'),
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 2
+    assert '--confirmed-map-aligned' in result.stderr
+    assert not (tmp_path / 'database').exists()
 
 
 def test_a2_launcher_keeps_global_relocalization_optional():

@@ -7,6 +7,15 @@ global_relocalization_node:
     status_topic: /localization_status
     initialpose_topic: /initialpose
 
+    # Empty uses the legacy map-tile fallback. Set this to the parent directory
+    # containing one verified database directory per map name.
+    keyframe_database_root: ''
+    keyframe_fpfh_radius: 2.0
+    keyframe_ransac_distance: 1.0
+    keyframe_gicp_distance: 0.6
+    keyframe_ransac_iterations: 40000
+    max_keyframe_tilt_delta_deg: 20.0
+
     # ScanContext-inspired polar descriptor, independently implemented.
     descriptor_rings: 20
     descriptor_sectors: 60
@@ -17,7 +26,8 @@ global_relocalization_node:
     max_candidates: 5
     min_descriptor_score: 0.15
 
-    # Coarse yaw/centroid alignment followed by multi-resolution Open3D ICP.
+    # Keyframe mode uses FPFH/RANSAC coarse registration and GICP refinement.
+    # Legacy mode uses coarse yaw/centroid alignment and multi-resolution ICP.
     voxel_size: 0.4
     min_scan_points: 300
     min_target_points: 800

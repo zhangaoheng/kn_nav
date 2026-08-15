@@ -3,11 +3,14 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <fstream>
+#include <filesystem>
 #include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -21,6 +24,7 @@
 #include <open3d/Open3D.h>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <yaml-cpp/yaml.h>
 
 #include "open3d_conversions/open3d_conversions.h"
 #include "open3d_loc/srv/global_relocalize.hpp"
@@ -42,6 +46,10 @@ bool finiteTransform(const Eigen::Matrix4d & transform)
 {
   if (!transform.allFinite()) return false;
 
+  if ((transform.row(3) - Eigen::RowVector4d(0.0, 0.0, 0.0, 1.0)).norm() > 1e-6) {
+    return false;
+  }
+
   const Eigen::Matrix3d rotation =
     transform.block<3, 3>(0, 0);
 
@@ -53,15 +61,6 @@ bool finiteTransform(const Eigen::Matrix4d & transform)
 double transformYaw(const Eigen::Matrix4d & transform)
 {
   return std::atan2(transform(1, 0), transform(0, 0));
-}
-
-Eigen::Matrix4d gravityAlignedTransform(const Eigen::Matrix4d & transform)
-{
-  Eigen::Matrix4d result = Eigen::Matrix4d::Identity();
-  result.block<3, 3>(0, 0) =
-    Eigen::AngleAxisd(transformYaw(transform), Eigen::Vector3d::UnitZ()).toRotationMatrix();
-  result.block<3, 1>(0, 3) = transform.block<3, 1>(0, 3);
-  return result;
 }
 
 }  // namespace
@@ -98,6 +97,30 @@ public:
     initialpose_topic_ =
       declare_parameter<std::string>(
       "initialpose_topic", "/initialpose");
+
+    keyframe_database_root_ =
+      declare_parameter<std::string>(
+      "keyframe_database_root", "");
+
+    keyframe_fpfh_radius_ =
+      declare_parameter<double>(
+      "keyframe_fpfh_radius", 2.0);
+
+    keyframe_ransac_distance_ =
+      declare_parameter<double>(
+      "keyframe_ransac_distance", 1.0);
+
+    keyframe_gicp_distance_ =
+      declare_parameter<double>(
+      "keyframe_gicp_distance", 0.6);
+
+    keyframe_ransac_iterations_ =
+      declare_parameter<int>(
+      "keyframe_ransac_iterations", 40000);
+
+    max_keyframe_tilt_delta_deg_ =
+      declare_parameter<double>(
+      "max_keyframe_tilt_delta_deg", 20.0);
 
     descriptor_rings_ =
       declare_parameter<int>(
@@ -196,7 +219,12 @@ public:
       ground_plane_distance_ < 0.0 ||
       min_fitness_margin_ < 0.0 ||
       ambiguity_translation_m_ < 0.0 ||
-      ambiguity_yaw_deg_ < 0.0)
+      ambiguity_yaw_deg_ < 0.0 ||
+      keyframe_fpfh_radius_ <= voxel_size_ ||
+      keyframe_ransac_distance_ <= 0.0 ||
+      keyframe_gicp_distance_ <= 0.0 ||
+      keyframe_ransac_iterations_ < 100 ||
+      max_keyframe_tilt_delta_deg_ <= 0.0)
     {
       throw std::invalid_argument(
               "invalid global relocalization parameters");
@@ -305,6 +333,11 @@ private:
       open3d::geometry::PointCloud> cloud;
 
     Descriptor descriptor;
+
+    Eigen::Matrix4d pose{
+      Eigen::Matrix4d::Identity()};
+
+    bool is_keyframe{false};
   };
 
 
@@ -540,10 +573,119 @@ private:
   }
 
 
+  bool loadKeyframeDatabase(const std::string & map_name)
+  {
+    if (keyframe_database_root_.empty() || map_name.empty()) return false;
+    if (map_name.find('/') != std::string::npos || map_name.find("..") != std::string::npos) {
+      RCLCPP_ERROR(get_logger(), "invalid map name for keyframe database: %s", map_name.c_str());
+      return false;
+    }
+    {
+      std::lock_guard<std::mutex> lock(data_mutex_);
+      if (loaded_database_map_ == map_name && !tiles_.empty() && !map_dirty_) return true;
+    }
+
+    const std::filesystem::path database_dir =
+      std::filesystem::path(keyframe_database_root_) / map_name;
+    const std::filesystem::path metadata_path = database_dir / "metadata.yaml";
+    try {
+      const YAML::Node metadata = YAML::LoadFile(metadata_path.string());
+      const std::string metadata_map = metadata["map_name"].as<std::string>("");
+      const std::string frame_id = metadata["frame_id"].as<std::string>("");
+      const std::string scan_frame_id = metadata["scan_frame_id"].as<std::string>("");
+      const bool confirmed = metadata["confirmed_map_aligned"].as<bool>(false);
+      if (metadata_map != map_name || frame_id != "map" ||
+        scan_frame_id != "base_link" || !confirmed)
+      {
+        RCLCPP_ERROR(
+          get_logger(),
+          "reject keyframe database metadata: requested=%s metadata_map=%s "
+          "frame=%s scan_frame=%s confirmed=%s",
+          map_name.c_str(), metadata_map.c_str(), frame_id.c_str(),
+          scan_frame_id.c_str(), confirmed ? "true" : "false");
+        return false;
+      }
+    } catch (const std::exception & error) {
+      RCLCPP_ERROR(
+        get_logger(), "cannot read keyframe metadata %s: %s",
+        metadata_path.c_str(), error.what());
+      return false;
+    }
+    std::ifstream stream(database_dir / "keyframes.csv");
+    if (!stream.is_open()) {
+      RCLCPP_WARN(
+        get_logger(), "keyframe database is unavailable for map=%s path=%s",
+        map_name.c_str(), database_dir.c_str());
+      return false;
+    }
+
+    std::vector<Tile> keyframes;
+    std::string line;
+    std::getline(stream, line);
+    while (std::getline(stream, line)) {
+      if (line.empty()) continue;
+      std::vector<std::string> fields;
+      std::stringstream row(line);
+      std::string field;
+      while (std::getline(row, field, ',')) fields.push_back(field);
+      if (fields.size() != 20) {
+        RCLCPP_WARN(get_logger(), "skip malformed keyframe row with %zu fields", fields.size());
+        continue;
+      }
+      try {
+        Tile keyframe;
+        const std::filesystem::path cloud_path = database_dir / fields[2];
+        keyframe.cloud = open3d::io::CreatePointCloudFromFile(cloud_path.string());
+        if (!keyframe.cloud || keyframe.cloud->IsEmpty()) {
+          RCLCPP_WARN(get_logger(), "skip empty keyframe cloud: %s", cloud_path.c_str());
+          continue;
+        }
+        for (int index = 0; index < 16; ++index) {
+          keyframe.pose(index / 4, index % 4) = std::stod(fields[4 + index]);
+        }
+        if (!finiteTransform(keyframe.pose)) {
+          RCLCPP_WARN(get_logger(), "skip keyframe with invalid pose: %s", cloud_path.c_str());
+          continue;
+        }
+        keyframe.center = keyframe.pose.block<3, 1>(0, 3);
+        keyframe.descriptor = makeDescriptor(*keyframe.cloud, Eigen::Vector3d::Zero());
+        keyframe.is_keyframe = true;
+        keyframes.push_back(std::move(keyframe));
+      } catch (const std::exception & error) {
+        RCLCPP_WARN(get_logger(), "skip invalid keyframe row: %s", error.what());
+      }
+    }
+    if (keyframes.empty()) {
+      RCLCPP_ERROR(get_logger(), "keyframe database contains no usable frames: %s", database_dir.c_str());
+      return false;
+    }
+    const size_t count = keyframes.size();
+    {
+      std::lock_guard<std::mutex> lock(data_mutex_);
+      if (map_name_ != map_name) {
+        RCLCPP_WARN(
+          get_logger(),
+          "discard keyframe database loaded during map switch: loaded=%s active=%s",
+          map_name.c_str(), map_name_.c_str());
+        return false;
+      }
+      tiles_ = std::move(keyframes);
+      descriptor_map_.reset();
+      loaded_database_map_ = map_name;
+      map_dirty_ = false;
+    }
+    RCLCPP_INFO(
+      get_logger(), "Loaded relocalization keyframe database: map=%s frames=%zu path=%s",
+      map_name.c_str(), count, database_dir.c_str());
+    return true;
+  }
+
+
   void mapCallback(
     const sensor_msgs::msg::
     PointCloud2::ConstSharedPtr message)
   {
+    if (!keyframe_database_root_.empty()) return;
     uint64_t signature =
       1469598103934665603ULL;
 
@@ -817,10 +959,16 @@ private:
     const std::vector<Tile> &
     tiles) const
   {
+    // Keyframe clouds and the live scan are both expressed in base_link.
+    // Their descriptor origin must therefore be the sensor/base origin.  The
+    // legacy map-tile fallback contains map-frame points and remains centred
+    // on the tile/scan centroid as before.
+    const bool keyframe_mode =
+      !tiles.empty() && tiles.front().is_keyframe;
     const Descriptor query =
       makeDescriptor(
       scan,
-      scan.GetCenter());
+      keyframe_mode ? Eigen::Vector3d::Zero() : scan.GetCenter());
 
     std::vector<Candidate>
       candidates;
@@ -917,6 +1065,130 @@ private:
       "%s horizontal plane removed: input=%zu plane=%zu structural=%zu normal_z=%.3f",
       label, cloud->points_.size(), inliers.size(), structural->points_.size(), vertical_normal);
     return structural;
+  }
+
+
+  Match matchKeyframeCandidate(
+    const open3d::geometry::PointCloud & scan,
+    const Tile & keyframe,
+    const Candidate & candidate) const
+  {
+    Match match;
+    match.descriptor_score = candidate.score;
+
+    auto source = std::make_shared<open3d::geometry::PointCloud>(scan);
+    auto target = std::make_shared<open3d::geometry::PointCloud>(*keyframe.cloud);
+    source = source->VoxelDownSample(voxel_size_);
+    target = target->VoxelDownSample(voxel_size_);
+    source = removeDominantHorizontalPlane(
+      source, static_cast<size_t>(min_scan_points_), "keyframe source");
+    target = removeDominantHorizontalPlane(
+      target, static_cast<size_t>(min_target_points_), "keyframe target");
+
+    if (!source || !target ||
+      source->points_.size() < static_cast<size_t>(min_scan_points_) ||
+      target->points_.size() < static_cast<size_t>(min_target_points_))
+    {
+      RCLCPP_WARN(
+        get_logger(),
+        "keyframe candidate rejected before coarse registration: frame=%zu source=%zu target=%zu",
+        candidate.tile_index,
+        source ? source->points_.size() : 0UL,
+        target ? target->points_.size() : 0UL);
+      return match;
+    }
+
+    const open3d::geometry::KDTreeSearchParamHybrid normal_search(
+      std::max(voxel_size_ * 3.0, keyframe_fpfh_radius_ * 0.5), 50);
+    source->EstimateNormals(normal_search);
+    target->EstimateNormals(normal_search);
+
+    const open3d::geometry::KDTreeSearchParamHybrid feature_search(
+      keyframe_fpfh_radius_, 100);
+    auto source_feature =
+      open3d::pipelines::registration::ComputeFPFHFeature(*source, feature_search);
+    auto target_feature =
+      open3d::pipelines::registration::ComputeFPFHFeature(*target, feature_search);
+    if (!source_feature || !target_feature ||
+      source_feature->Num() != source->points_.size() ||
+      target_feature->Num() != target->points_.size())
+    {
+      RCLCPP_WARN(
+        get_logger(), "keyframe candidate has invalid FPFH features: frame=%zu",
+        candidate.tile_index);
+      return match;
+    }
+
+    const open3d::pipelines::registration::CorrespondenceCheckerBasedOnEdgeLength
+      edge_checker(0.9);
+    const open3d::pipelines::registration::CorrespondenceCheckerBasedOnDistance
+      distance_checker(keyframe_ransac_distance_);
+    const std::vector<std::reference_wrapper<
+      const open3d::pipelines::registration::CorrespondenceChecker>> checkers = {
+      std::cref(edge_checker), std::cref(distance_checker)};
+
+    const auto coarse =
+      open3d::pipelines::registration::RegistrationRANSACBasedOnFeatureMatching(
+      *source, *target, *source_feature, *target_feature, true,
+      keyframe_ransac_distance_,
+      open3d::pipelines::registration::TransformationEstimationPointToPoint(false),
+      3, checkers,
+      open3d::pipelines::registration::RANSACConvergenceCriteria(
+        keyframe_ransac_iterations_, 0.999));
+
+    if (coarse.fitness_ <= 0.0 || !std::isfinite(coarse.inlier_rmse_) ||
+      !finiteTransform(coarse.transformation_))
+    {
+      RCLCPP_INFO(
+        get_logger(),
+        "keyframe coarse registration failed: frame=%zu descriptor=%.3f fitness=%.6f rmse=%.6f",
+        candidate.tile_index, candidate.score, coarse.fitness_, coarse.inlier_rmse_);
+      return match;
+    }
+
+    // The local registration maps current base_link points into the stored
+    // keyframe's base_link frame. Compose that with the verified keyframe pose
+    // to obtain T_map_current_base.
+    const Eigen::Matrix4d global_initial =
+      keyframe.pose * coarse.transformation_;
+    auto target_map =
+      std::make_shared<open3d::geometry::PointCloud>(*target);
+    target_map->Transform(keyframe.pose);
+
+    const auto refined =
+      open3d::pipelines::registration::RegistrationGeneralizedICP(
+      *source, *target_map, keyframe_gicp_distance_, global_initial,
+      open3d::pipelines::registration::TransformationEstimationForGeneralizedICP(),
+      open3d::pipelines::registration::ICPConvergenceCriteria(1e-6, 1e-6, 64));
+
+    match.transform = refined.transformation_;
+    match.fitness = refined.fitness_;
+    match.rmse = refined.inlier_rmse_;
+
+    const Eigen::Matrix3d local_rotation =
+      coarse.transformation_.block<3, 3>(0, 0);
+    const double local_tilt_deg =
+      std::acos(std::max(-1.0, std::min(1.0, local_rotation(2, 2)))) * 180.0 / kPi;
+    const bool finite_ok = finiteTransform(match.transform);
+    const bool z_ok = std::abs(match.transform(2, 3)) <= max_abs_z_;
+    const bool tilt_ok = local_tilt_deg <= max_keyframe_tilt_delta_deg_;
+    const bool fitness_ok = match.fitness >= min_fitness_;
+    const bool rmse_ok = match.rmse <= max_inlier_rmse_;
+    match.valid = finite_ok && z_ok && tilt_ok && fitness_ok && rmse_ok;
+
+    RCLCPP_INFO(
+      get_logger(),
+      "keyframe registration: frame=%zu descriptor=%.3f coarse_fit=%.6f "
+      "coarse_rmse=%.6f local_tilt=%.2fdeg fine_fit=%.6f fine_rmse=%.6f "
+      "xyz=(%.3f %.3f %.3f) valid=%s",
+      candidate.tile_index, candidate.score, coarse.fitness_, coarse.inlier_rmse_,
+      local_tilt_deg, match.fitness, match.rmse,
+      match.transform(0, 3), match.transform(1, 3), match.transform(2, 3),
+      match.valid ? "true" : "false");
+
+    match.aligned = std::make_shared<open3d::geometry::PointCloud>(*source);
+    match.aligned->Transform(match.transform);
+    return match;
   }
 
 
@@ -1259,12 +1531,11 @@ private:
             open3d::pipelines::registration::ICPConvergenceCriteria(
               1e-6, 1e-6, 40));
 
-        // Global relocalization estimates a gravity-aligned base pose.  A
-        // free 6-DoF ICP can obtain a deceptively high score by tilting the
-        // scan into a large floor plane.  Project every accepted ICP update
-        // back to x/y/z/yaw before it can seed the next resolution level.
-        const Eigen::Matrix4d constrained_result =
-          gravityAlignedTransform(result.transformation_);
+        // Keep the complete rigid transform. Real map poses can contain
+        // roll/pitch, so projecting every result to yaw-only creates a
+        // systematic error. Horizontal-plane removal and the geometric gates
+        // below protect the fallback matcher from floor-dominated solutions.
+        const Eigen::Matrix4d constrained_result = result.transformation_;
         const double step_translation =
           (constrained_result.block<3, 1>(0, 3) -
           transform.block<3, 1>(0, 3)).norm();
@@ -1512,6 +1783,19 @@ private:
       }
     } guard{running_};
 
+    if (!keyframe_database_root_.empty()) {
+      std::string active_map;
+      {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        active_map = map_name_;
+      }
+      if (!loadKeyframeDatabase(active_map)) {
+        response->message =
+          "keyframe database unavailable for active map '" + active_map + "'";
+        return;
+      }
+    }
+
     std::shared_ptr<
       open3d::geometry::
       PointCloud> scan;
@@ -1559,6 +1843,9 @@ private:
         map_dirty_;
     }
 
+    const bool keyframe_mode =
+      !tiles.empty() && tiles.front().is_keyframe;
+
     RCLCPP_INFO(
       get_logger(),
       "trigger received: "
@@ -1568,6 +1855,7 @@ private:
       "tiles=%zu "
       "scan_points=%zu "
       "map_points=%zu "
+      "database_mode=%s "
       "map_dirty=%s",
 
       request->apply ?
@@ -1595,6 +1883,8 @@ private:
       points_.size() :
       0UL,
 
+      keyframe_mode ? "keyframes" : "map_tiles",
+
       map_dirty ?
       "true" :
       "false");
@@ -1611,9 +1901,10 @@ private:
     }
 
     if (
-      !descriptor_map ||
+      !keyframe_mode &&
+      (!descriptor_map ||
       descriptor_map->
-      IsEmpty())
+      IsEmpty()))
     {
       response->message =
         "descriptor map is empty; wait for " +
@@ -1728,14 +2019,14 @@ private:
         candidate.score,
         candidate.sector_shift);
 
-      Match current =
-        matchCandidate(
-        *scan,
-        *descriptor_map,
-        tiles[
-          candidate.
-          tile_index],
-        candidate);
+      Match current;
+      if (keyframe_mode) {
+        current = matchKeyframeCandidate(
+          *scan, tiles[candidate.tile_index], candidate);
+      } else {
+        current = matchCandidate(
+          *scan, *descriptor_map, tiles[candidate.tile_index], candidate);
+      }
 
       RCLCPP_INFO(
         get_logger(),
@@ -2073,6 +2364,14 @@ private:
   std::string scan_topic_;
   std::string status_topic_;
   std::string initialpose_topic_;
+  std::string keyframe_database_root_;
+  std::string loaded_database_map_;
+
+  double keyframe_fpfh_radius_{2.0};
+  double keyframe_ransac_distance_{1.0};
+  double keyframe_gicp_distance_{0.6};
+  int keyframe_ransac_iterations_{40000};
+  double max_keyframe_tilt_delta_deg_{20.0};
 
   int descriptor_rings_{20};
   int descriptor_sectors_{60};
