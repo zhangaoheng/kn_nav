@@ -139,6 +139,9 @@ def _launch_setup(context):
     start_open3d_loc = _bool_value(
         _setting(context, 'start_open3d_loc', launch_config, True),
         'start_open3d_loc')
+    start_global_relocalization = _bool_value(
+        _setting(context, 'start_global_relocalization', launch_config, False),
+        'start_global_relocalization')
     start_pct_planner = _bool_value(
         _setting(context, 'start_pct_planner', launch_config, True),
         'start_pct_planner')
@@ -198,6 +201,16 @@ def _launch_setup(context):
                 ],
             ),
         ])
+
+        if start_global_relocalization:
+            actions.append(Node(
+                package='open3d_loc', executable='global_relocalization_node',
+                name='global_relocalization_node', output='both',
+                parameters=[
+                    _node_parameters(config, 'global_relocalization_node'),
+                    common_overrides,
+                ],
+            ))
 
     if navigation_mode == 2 and start_pct_planner:
         actions.append(Node(
@@ -297,6 +310,7 @@ def generate_launch_description():
             description='1: direct RViz goal to SCAN, 2: complete PCT reference path',
         ),
         DeclareLaunchArgument('start_open3d_loc', default_value=''),
+        DeclareLaunchArgument('start_global_relocalization', default_value=''),
         DeclareLaunchArgument('start_pct_planner', default_value=''),
         DeclareLaunchArgument('start_go2_bridge', default_value=''),
         DeclareLaunchArgument('network_interface', default_value=''),

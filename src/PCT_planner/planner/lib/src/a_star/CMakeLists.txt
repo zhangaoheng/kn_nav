@@ -11,4 +11,8 @@ if(BUILD_TESTING)
   add_executable(test_same_node_path test_same_node_path.cc)
   target_link_libraries(test_same_node_path PRIVATE a_star_search)
   add_test(NAME test_same_node_path COMMAND test_same_node_path)
+
+  add_executable(test_failed_search_reset test_failed_search_reset.cc)
+  target_link_libraries(test_failed_search_reset PRIVATE a_star_search)
+  add_test(NAME test_failed_search_reset COMMAND test_failed_search_reset)
 endif()

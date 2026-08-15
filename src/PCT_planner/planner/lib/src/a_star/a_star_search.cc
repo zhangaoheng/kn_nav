@@ -85,10 +85,11 @@ int Astar::GetHash(const Eigen::Vector3i& idx) const {
 bool Astar::Search(const Eigen::Vector3i& start, const Eigen::Vector3i& goal) {
   auto t0 = std::chrono::high_resolution_clock::now();
 
-  if (!search_result_.empty()) {
-    Reset();
-    search_result_.clear();
-  }
+  // Search mutates node costs and parent pointers even when no path is found.
+  // Always reset that per-search state so a failed search cannot poison the
+  // next planning request.
+  Reset();
+  search_result_.clear();
 
   auto start_node = &grid_map_[start[0]][start[2]][start[1]];
   auto goal_node = &grid_map_[goal[0]][goal[2]][goal[1]];
