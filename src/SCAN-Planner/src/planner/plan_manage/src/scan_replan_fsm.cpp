@@ -49,6 +49,9 @@ namespace scan_planner
     body_height_ = load_parameter<double>(node_, "grid_map.body_height", 0.4);
     self_inflation_frame_id_ = load_parameter<std::string>(node_, "grid_map.frame_id", "world");
     current_map_name_ = load_parameter<std::string>(node_, "map_name", "");
+    const std::string corridor_path_topic =
+        load_parameter<std::string>(node_, "fsm.corridor_path_topic", "/pct_path");
+    corridor_z_offset_ = load_parameter<double>(node_, "fsm.corridor_z_offset", 0.0);
 
     /* initialize main modules */
     visualization_.reset(new PlanningVisualization(node_));
@@ -91,9 +94,14 @@ namespace scan_planner
           "move_base_simple/goal", 1,
           std::bind(&SCANReplanFSM::rvizGoalCallback, this, std::placeholders::_1));
     else if (navi_mode_ == NAVI_MODE::WAYPOINT_PATH)
+    {
       waypoint_sub_ = node_->create_subscription<nav_msgs::msg::Path>(
           "waypoints", rclcpp::QoS(1).reliable().transient_local(),
           std::bind(&SCANReplanFSM::dynamicWaypointCallback, this, std::placeholders::_1));
+      corridor_path_sub_ = node_->create_subscription<nav_msgs::msg::Path>(
+          corridor_path_topic, rclcpp::QoS(1).reliable().transient_local(),
+          std::bind(&SCANReplanFSM::corridorPathCallback, this, std::placeholders::_1));
+    }
     else if (navi_mode_ == NAVI_MODE::REFERENCE_PATH)
       path_sub_ = node_->create_subscription<nav_msgs::msg::Path>(
           "initial_path", 1, std::bind(&SCANReplanFSM::pathCallback, this, std::placeholders::_1));
@@ -276,6 +284,31 @@ namespace scan_planner
     }
 
     acceptWaypointPath(*msg, body_height_, "Reference path");
+  }
+
+  void SCANReplanFSM::corridorPathCallback(
+      const nav_msgs::msg::Path::ConstSharedPtr &msg)
+  {
+    active_corridor_path_.clear();
+    if (!msg || msg->poses.empty())
+      return;
+
+    active_corridor_path_.reserve(msg->poses.size());
+    for (const auto &pose_stamped : msg->poses)
+    {
+      const auto &position = pose_stamped.pose.position;
+      if (!std::isfinite(position.x) || !std::isfinite(position.y) ||
+          !std::isfinite(position.z))
+      {
+        active_corridor_path_.clear();
+        RCLCPP_WARN(node_->get_logger(), "Ignore invalid PCT corridor path");
+        return;
+      }
+      active_corridor_path_.emplace_back(
+          position.x, position.y, position.z + corridor_z_offset_);
+    }
+    RCLCPP_INFO(node_->get_logger(), "PCT corridor updated: %zu points",
+                active_corridor_path_.size());
   }
 
   void SCANReplanFSM::dynamicWaypointCallback(const nav_msgs::msg::Path::ConstSharedPtr &msg)
@@ -718,6 +751,7 @@ namespace scan_planner
       navigation_status_reason_ = "goal_reached";
       publishNavigationStatus();
       active_waypoints_.clear();
+      active_corridor_path_.clear();
       waypoint_arc_lengths_.clear();
       progress_arc_length_ = 0.0;
       have_target_ = false;
@@ -851,6 +885,7 @@ namespace scan_planner
   {
     const bool was_active = have_target_ || !active_waypoints_.empty();
     active_waypoints_.clear();
+    active_corridor_path_.clear();
     waypoint_arc_lengths_.clear();
     progress_arc_length_ = 0.0;
     pending_waypoint_path_.reset();
@@ -954,12 +989,8 @@ namespace scan_planner
     /* ---------- check trajectory ---------- */
     constexpr double time_step = 0.01;
     double t_cur = (node_->now() - info->start_time_).seconds();
-    double t_2_3 = info->duration_ * 2 / 3;
     for (double t = t_cur; t < info->duration_; t += time_step)
     {
-      if (t_cur < t_2_3 && t >= t_2_3) // If t_cur < t_2_3, only the first 2/3 partition of the trajectory is considered valid and will get checked.
-        break;
-
       Eigen::Vector3d pos = info->position_traj_.evaluateDeBoorT(t);
       Eigen::Vector3d pos_next = info->position_traj_.evaluateDeBoorT(std::min(t + time_step, info->duration_));
       if (map->getInflateOccupancy(pos, estimateYawFromSegment(pos, pos_next)))
@@ -995,7 +1026,10 @@ namespace scan_planner
       return false;
 
     bool plan_success =
-        planner_manager_->reboundReplan(start_pt_, start_vel_, start_acc_, local_target_pt_, local_target_vel_, (have_new_target_ || flag_use_poly_init), flag_randomPolyTraj);
+        planner_manager_->reboundReplan(
+            start_pt_, start_vel_, start_acc_, local_target_pt_, local_target_vel_,
+            (have_new_target_ || flag_use_poly_init), flag_randomPolyTraj,
+            active_corridor_path_.empty() ? active_waypoints_ : active_corridor_path_);
     have_new_target_ = false;
 
     cout << "final_plan_success=" << plan_success << endl;

@@ -27,7 +27,9 @@ namespace scan_planner
 
     /* main planning interface */
     bool reboundReplan(Eigen::Vector3d start_pt, Eigen::Vector3d start_vel, Eigen::Vector3d start_acc,
-                       Eigen::Vector3d end_pt, Eigen::Vector3d end_vel, bool flag_polyInit, bool flag_randomPolyTraj);
+                       Eigen::Vector3d end_pt, Eigen::Vector3d end_vel, bool flag_polyInit,
+                       bool flag_randomPolyTraj,
+                       const std::vector<Eigen::Vector3d> &corridor_path = {});
     bool EmergencyStop(Eigen::Vector3d stop_pos);
     bool planGlobalTraj(const Eigen::Vector3d &start_pos, const Eigen::Vector3d &start_vel, const Eigen::Vector3d &start_acc,
                         const Eigen::Vector3d &end_pos, const Eigen::Vector3d &end_vel, const Eigen::Vector3d &end_acc);
@@ -49,9 +51,12 @@ namespace scan_planner
     BsplineOptimizer::Ptr bspline_optimizer_rebound_;
 
     int continuous_failures_count_{0};
+    double corridor_max_deviation_{0.6};
 
     void updateTrajInfo(const UniformBspline &position_traj, const rclcpp::Time time_now);
     bool checkDynamicFeasibility(UniformBspline position_traj);
+    bool checkFullTrajectorySafety(UniformBspline position_traj,
+                                   const std::vector<Eigen::Vector3d> &corridor_path);
 
     void reparamBspline(UniformBspline &bspline, vector<Eigen::Vector3d> &start_end_derivative, double ratio, Eigen::MatrixXd &ctrl_pts, double &dt,
                         double &time_inc);

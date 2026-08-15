@@ -18,6 +18,7 @@ namespace scan_planner
     lambda2_ = get_double("optimization.lambda_collision", -1.0);
     lambda3_ = get_double("optimization.lambda_feasibility", -1.0);
     lambda4_ = get_double("optimization.lambda_fitness", -1.0);
+    lambda_corridor_ = get_double("optimization.lambda_corridor", 5.0);
     dist0_ = get_double("optimization.dist0", -1.0);
     max_vel_ = get_double("optimization.max_vel", -1.0);
     max_acc_ = get_double("optimization.max_acc", -1.0);
@@ -28,6 +29,13 @@ namespace scan_planner
   void BsplineOptimizer::setEnvironment(const GridMap::Ptr &env)
   {
     this->grid_map_ = env;
+  }
+
+  void BsplineOptimizer::setCorridorPath(
+      const vector<Eigen::Vector3d> &corridor_path, double max_deviation)
+  {
+    corridor_path_ = corridor_path;
+    corridor_max_deviation_ = max_deviation;
   }
 
   double BsplineOptimizer::estimateSegmentYaw(const Eigen::Vector3d &from, const Eigen::Vector3d &to) const
@@ -76,7 +84,7 @@ namespace scan_planner
     int same_occ_state_times = ENOUGH_INTERVAL + 1;
     bool occ, last_occ = false;
     bool flag_got_start = false, flag_got_end = false, flag_got_end_maybe = false;
-    int i_end = (int)init_points.cols() - order_ - ((int)init_points.cols() - 2 * order_) / 3; // only check closed 2/3 points.
+    int i_end = (int)init_points.cols() - order_;
     for (int i = order_; i <= i_end; ++i)
     {
       for (double a = 1.0; a >= 0.0; a -= step_size)
@@ -470,6 +478,56 @@ namespace scan_planner
     }
   }
 
+  Eigen::Vector3d BsplineOptimizer::nearestCorridorPoint(
+      const Eigen::Vector3d &point) const
+  {
+    if (corridor_path_.empty())
+      return point;
+    if (corridor_path_.size() == 1)
+      return corridor_path_.front();
+
+    Eigen::Vector3d nearest = corridor_path_.front();
+    double best_distance_sq = (point - nearest).squaredNorm();
+    for (size_t i = 1; i < corridor_path_.size(); ++i)
+    {
+      const Eigen::Vector3d &from = corridor_path_[i - 1];
+      const Eigen::Vector3d segment = corridor_path_[i] - from;
+      const double length_sq = segment.squaredNorm();
+      const double ratio = length_sq > 1e-12
+                               ? std::clamp((point - from).dot(segment) / length_sq, 0.0, 1.0)
+                               : 0.0;
+      const Eigen::Vector3d candidate = from + ratio * segment;
+      const double distance_sq = (point - candidate).squaredNorm();
+      if (distance_sq < best_distance_sq)
+      {
+        best_distance_sq = distance_sq;
+        nearest = candidate;
+      }
+    }
+    return nearest;
+  }
+
+  void BsplineOptimizer::calcCorridorCost(const Eigen::MatrixXd &q, double &cost,
+                                          Eigen::MatrixXd &gradient)
+  {
+    cost = 0.0;
+    if (corridor_path_.size() < 2 || corridor_max_deviation_ <= 0.0)
+      return;
+
+    const int end_idx = q.cols() - order_;
+    for (int i = order_; i < end_idx; ++i)
+    {
+      const Eigen::Vector3d delta = q.col(i) - nearestCorridorPoint(q.col(i));
+      const double distance = delta.norm();
+      if (distance <= corridor_max_deviation_ || distance <= 1e-9)
+        continue;
+
+      const double error = distance - corridor_max_deviation_;
+      cost += error * error;
+      gradient.col(i) += 2.0 * error * delta / distance;
+    }
+  }
+
   void BsplineOptimizer::calcSmoothnessCost(const Eigen::MatrixXd &q, double &cost,
                                             Eigen::MatrixXd &gradient, bool falg_use_jerk /* = true*/)
   {
@@ -724,7 +782,7 @@ namespace scan_planner
     int in_id, out_id;
     vector<std::pair<int, int>> segment_ids;
     bool flag_new_obs_valid = false;
-    int i_end = end_idx - (end_idx - order_) / 3;
+    int i_end = end_idx;
     for (int i = order_ - 1; i <= i_end; ++i)
     {
 
@@ -1014,12 +1072,16 @@ namespace scan_planner
         UniformBspline traj = UniformBspline(cps_.points, 3, bspline_interval_);
         double tm, tmp;
         traj.getTimeSpan(tm, tmp);
-        double t_step = (tmp - tm) / ((traj.evaluateDeBoorT(tmp) - traj.evaluateDeBoorT(tm)).norm() / grid_map_->getResolution());
-        for (double t = tm; t < tmp * 2 / 3; t += t_step) // Only check the closest 2/3 partition of the whole trajectory.
+        const double t_step = std::clamp(
+            grid_map_->getResolution() / std::max(2.0 * max_vel_, 1e-3), 0.01, 0.05);
+        const int sample_count = std::max(1, static_cast<int>(std::ceil((tmp - tm) / t_step)));
+        for (int sample = 0; sample <= sample_count; ++sample)
         {
+          const double t = std::min(tm + sample * t_step, tmp);
           Eigen::Vector3d pos = traj.evaluateDeBoorT(t);
+          Eigen::Vector3d pos_prev = traj.evaluateDeBoorT(std::max(t - t_step, tm));
           Eigen::Vector3d pos_next = traj.evaluateDeBoorT(std::min(t + t_step, tmp));
-          flag_occ = grid_map_->getInflateOccupancy(pos, estimateSegmentYaw(pos, pos_next));
+          flag_occ = grid_map_->getInflateOccupancy(pos, estimateSegmentYaw(pos_prev, pos_next));
           if (flag_occ)
           {
             //cout << "hit_obs, t=" << t << " P=" << traj.evaluateDeBoorT(t).transpose() << endl;
@@ -1112,12 +1174,16 @@ namespace scan_planner
       UniformBspline traj = UniformBspline(cps_.points, 3, bspline_interval_);
       double tm, tmp;
       traj.getTimeSpan(tm, tmp);
-      double t_step = (tmp - tm) / ((traj.evaluateDeBoorT(tmp) - traj.evaluateDeBoorT(tm)).norm() / grid_map_->getResolution()); // Step size is defined as the maximum size that can passes through every grid.
-      for (double t = tm; t < tmp * 2 / 3; t += t_step)
+      const double t_step = std::clamp(
+          grid_map_->getResolution() / std::max(2.0 * max_vel_, 1e-3), 0.01, 0.05);
+      const int sample_count = std::max(1, static_cast<int>(std::ceil((tmp - tm) / t_step)));
+      for (int sample = 0; sample <= sample_count; ++sample)
       {
+        const double t = std::min(tm + sample * t_step, tmp);
         Eigen::Vector3d pos = traj.evaluateDeBoorT(t);
+        Eigen::Vector3d pos_prev = traj.evaluateDeBoorT(std::max(t - t_step, tm));
         Eigen::Vector3d pos_next = traj.evaluateDeBoorT(std::min(t + t_step, tmp));
-        if (grid_map_->getInflateOccupancy(pos, estimateSegmentYaw(pos, pos_next)))
+        if (grid_map_->getInflateOccupancy(pos, estimateSegmentYaw(pos_prev, pos_next)))
         {
           // cout << "Refined traj hit_obs, t=" << t << " P=" << traj.evaluateDeBoorT(t).transpose() << endl;
 
@@ -1151,21 +1217,24 @@ namespace scan_planner
     memcpy(cps_.points.data() + 3 * order_, x, n * sizeof(x[0]));
 
     /* ---------- evaluate cost and gradient ---------- */
-    double f_smoothness, f_distance, f_feasibility;
+    double f_smoothness, f_distance, f_feasibility, f_corridor;
 
     Eigen::MatrixXd g_smoothness = Eigen::MatrixXd::Zero(3, cps_.size);
     Eigen::MatrixXd g_distance = Eigen::MatrixXd::Zero(3, cps_.size);
     Eigen::MatrixXd g_feasibility = Eigen::MatrixXd::Zero(3, cps_.size);
+    Eigen::MatrixXd g_corridor = Eigen::MatrixXd::Zero(3, cps_.size);
 
     calcSmoothnessCost(cps_.points, f_smoothness, g_smoothness);
     calcDistanceCostRebound(cps_.points, f_distance, g_distance, iter_num_, f_smoothness);
     calcFeasibilityCost(cps_.points, f_feasibility, g_feasibility);
+    calcCorridorCost(cps_.points, f_corridor, g_corridor);
 
-    f_combine = lambda1_ * f_smoothness + new_lambda2_ * f_distance + lambda3_ * f_feasibility;
+    f_combine = lambda1_ * f_smoothness + new_lambda2_ * f_distance +
+                lambda3_ * f_feasibility + lambda_corridor_ * f_corridor;
     //printf("origin %f %f %f %f\n", f_smoothness, f_distance, f_feasibility, f_combine);
 
     Eigen::MatrixXd grad_3D = lambda1_ * g_smoothness + new_lambda2_ * g_distance +
-                              lambda3_ * g_feasibility;
+                              lambda3_ * g_feasibility + lambda_corridor_ * g_corridor;
     grad_3D.row(2).setZero();
     memcpy(grad, grad_3D.data() + 3 * order_, n * sizeof(grad[0]));
   }

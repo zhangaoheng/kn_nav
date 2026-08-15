@@ -67,6 +67,8 @@ namespace scan_planner
 
     // optional inputs
     void setGuidePath(const vector<Eigen::Vector3d> &guide_pt);
+    void setCorridorPath(const vector<Eigen::Vector3d> &corridor_path,
+                         double max_deviation);
     void setWaypoints(const vector<Eigen::Vector3d> &waypts,
                       const vector<int> &waypt_idx); // N-2 constraints at most
 
@@ -100,6 +102,7 @@ namespace scan_planner
     // int             dim_;                // dimension of the B-spline
     //
     vector<Eigen::Vector3d> guide_pts_; // geometric guiding path points, N-6
+    vector<Eigen::Vector3d> corridor_path_;
     vector<Eigen::Vector3d> waypoints_; // waypts constraints
     vector<int> waypt_idx_;             // waypts constraints index
                                         //
@@ -113,6 +116,8 @@ namespace scan_planner
     double lambda2_, new_lambda2_; // distance weight
     double lambda3_;               // feasibility weight
     double lambda4_;               // curve fitting
+    double lambda_corridor_;       // PCT path corridor weight
+    double corridor_max_deviation_;
     int a;
     //
     double dist0_;             // safe distance
@@ -138,6 +143,9 @@ namespace scan_planner
                              Eigen::MatrixXd &gradient);
     void calcDistanceCostRebound(const Eigen::MatrixXd &q, double &cost, Eigen::MatrixXd &gradient, int iter_num, double smoothness_cost);
     void calcFitnessCost(const Eigen::MatrixXd &q, double &cost, Eigen::MatrixXd &gradient);
+    void calcCorridorCost(const Eigen::MatrixXd &q, double &cost,
+                          Eigen::MatrixXd &gradient);
+    Eigen::Vector3d nearestCorridorPoint(const Eigen::Vector3d &point) const;
     bool check_collision_and_rebound(void);
     double estimateSegmentYaw(const Eigen::Vector3d &from, const Eigen::Vector3d &to) const;
     double estimateControlPointYaw(const Eigen::MatrixXd &q, int id) const;

@@ -1,39 +1,125 @@
 // #include <fstream>
 #include <plan_manage/planner_manager.h>
 #include <chrono>
+#include <limits>
 #include <thread>
 
 namespace scan_planner
 {
   namespace
   {
-    void applyLinearZReference(std::vector<Eigen::Vector3d> &points, const double start_z, const double target_z)
+    Eigen::Vector3d nearestPointOnPath(const Eigen::Vector3d &point,
+                                       const std::vector<Eigen::Vector3d> &path)
     {
-      if (points.empty())
-        return;
-
-      if (points.size() == 1)
+      if (path.empty())
+        return point;
+      Eigen::Vector3d nearest = path.front();
+      double best_distance_sq = (point - nearest).squaredNorm();
+      for (size_t i = 1; i < path.size(); ++i)
       {
-        points.front()(2) = start_z;
-        return;
+        const Eigen::Vector3d &from = path[i - 1];
+        const Eigen::Vector3d segment = path[i] - from;
+        const double length_sq = segment.squaredNorm();
+        const double ratio = length_sq > 1e-12
+                                 ? std::clamp((point - from).dot(segment) / length_sq, 0.0, 1.0)
+                                 : 0.0;
+        const Eigen::Vector3d candidate = from + ratio * segment;
+        const double distance_sq = (point - candidate).squaredNorm();
+        if (distance_sq < best_distance_sq)
+        {
+          best_distance_sq = distance_sq;
+          nearest = candidate;
+        }
       }
+      return nearest;
+    }
 
-      std::vector<double> accumulated_xy_length(points.size(), 0.0);
+    struct PathProjection
+    {
+      size_t segment_index{0};
+      Eigen::Vector3d point{Eigen::Vector3d::Zero()};
+      double distance_sq{std::numeric_limits<double>::max()};
+    };
+
+    PathProjection projectOnPath(const Eigen::Vector3d &point,
+                                 const std::vector<Eigen::Vector3d> &path,
+                                 size_t first_segment)
+    {
+      PathProjection result;
+      if (path.size() < 2)
+        return result;
+      first_segment = std::min(first_segment, path.size() - 2);
+      for (size_t i = first_segment; i + 1 < path.size(); ++i)
+      {
+        const Eigen::Vector3d segment = path[i + 1] - path[i];
+        const double length_sq = segment.squaredNorm();
+        const double ratio = length_sq > 1e-12
+                                 ? std::clamp((point - path[i]).dot(segment) / length_sq, 0.0, 1.0)
+                                 : 0.0;
+        const Eigen::Vector3d candidate = path[i] + ratio * segment;
+        const double distance_sq = (point - candidate).squaredNorm();
+        if (distance_sq < result.distance_sq)
+        {
+          result.segment_index = i;
+          result.point = candidate;
+          result.distance_sq = distance_sq;
+        }
+      }
+      return result;
+    }
+
+    std::vector<Eigen::Vector3d> extractPathSegment(
+        const std::vector<Eigen::Vector3d> &path, const Eigen::Vector3d &start,
+        const Eigen::Vector3d &target)
+    {
+      if (path.size() < 2)
+        return path;
+      const PathProjection start_projection = projectOnPath(start, path, 0);
+      const PathProjection target_projection =
+          projectOnPath(target, path, start_projection.segment_index);
+      std::vector<Eigen::Vector3d> segment;
+      segment.push_back(start_projection.point);
+      for (size_t i = start_projection.segment_index + 1;
+           i <= target_projection.segment_index && i < path.size(); ++i)
+        segment.push_back(path[i]);
+      if ((segment.back() - target_projection.point).norm() > 1e-6)
+        segment.push_back(target_projection.point);
+      return segment;
+    }
+
+    void applyPathZReference(std::vector<Eigen::Vector3d> &points,
+                             const std::vector<Eigen::Vector3d> &path,
+                             double start_z, double target_z)
+    {
+      if (points.empty() || path.size() < 2)
+        return;
+
+      std::vector<double> path_arc(path.size(), 0.0);
+      for (size_t i = 1; i < path.size(); ++i)
+        path_arc[i] = path_arc[i - 1] + (path[i] - path[i - 1]).norm();
+      if (path_arc.back() <= 1e-9)
+        return;
+
+      std::vector<double> point_arc(points.size(), 0.0);
       for (size_t i = 1; i < points.size(); ++i)
-      {
-        accumulated_xy_length[i] = accumulated_xy_length[i - 1] +
-                                   (points[i].head<2>() - points[i - 1].head<2>()).norm();
-      }
-
-      const double total_xy_length = accumulated_xy_length.back();
+        point_arc[i] = point_arc[i - 1] + (points[i] - points[i - 1]).norm();
+      const double point_length = point_arc.back();
+      size_t path_index = 1;
       for (size_t i = 0; i < points.size(); ++i)
       {
-        const double ratio = total_xy_length > 1e-6
-                                 ? accumulated_xy_length[i] / total_xy_length
-                                 : static_cast<double>(i) / static_cast<double>(points.size() - 1);
-        points[i](2) = start_z + ratio * (target_z - start_z);
+        const double ratio = point_length > 1e-9
+                                 ? point_arc[i] / point_length
+                                 : static_cast<double>(i) / std::max<size_t>(1, points.size() - 1);
+        const double target_arc = ratio * path_arc.back();
+        while (path_index + 1 < path.size() && path_arc[path_index] < target_arc)
+          ++path_index;
+        const double segment_length = path_arc[path_index] - path_arc[path_index - 1];
+        const double segment_ratio = segment_length > 1e-9
+                                         ? (target_arc - path_arc[path_index - 1]) / segment_length
+                                         : 0.0;
+        points[i](2) = path[path_index - 1](2) +
+                       segment_ratio * (path[path_index](2) - path[path_index - 1](2));
       }
-
       points.front()(2) = start_z;
       points.back()(2) = target_z;
     }
@@ -61,6 +147,7 @@ namespace scan_planner
     pp_.feasibility_tolerance_ = get_double("manager.feasibility_tolerance", 0.0);
     pp_.ctrl_pt_dist = get_double("manager.control_points_distance", -1.0);
     pp_.planning_horizon_ = get_double("manager.planning_horizon", 5.0);
+    corridor_max_deviation_ = get_double("manager.corridor_max_deviation", 0.6);
 
     local_data_.traj_id_ = 0;
     grid_map_.reset(new GridMap);
@@ -81,7 +168,9 @@ namespace scan_planner
 
   bool SCANPlannerManager::reboundReplan(Eigen::Vector3d start_pt, Eigen::Vector3d start_vel,
                                         Eigen::Vector3d start_acc, Eigen::Vector3d local_target_pt,
-                                        Eigen::Vector3d local_target_vel, bool flag_polyInit, bool flag_randomPolyTraj)
+                                        Eigen::Vector3d local_target_vel, bool flag_polyInit,
+                                        bool flag_randomPolyTraj,
+                                        const std::vector<Eigen::Vector3d> &corridor_path)
   {
 
     static int count = 0;
@@ -248,7 +337,10 @@ namespace scan_planner
       }
     } while (flag_regenerate);
 
-    applyLinearZReference(point_set, start_pt(2), local_target_pt(2));
+    const std::vector<Eigen::Vector3d> local_corridor =
+        extractPathSegment(corridor_path, start_pt, local_target_pt);
+    applyPathZReference(point_set, local_corridor, start_pt(2), local_target_pt(2));
+    bspline_optimizer_rebound_->setCorridorPath(local_corridor, corridor_max_deviation_);
 
     Eigen::MatrixXd ctrl_pts;
     UniformBspline::parameterizeToBspline(ts, point_set, start_end_derivatives, ctrl_pts);
@@ -294,7 +386,8 @@ namespace scan_planner
         pos = UniformBspline(optimal_control_points, 3, ts);
     }
 
-    if (!flag_step_2_success || !checkDynamicFeasibility(pos))
+    if (!flag_step_2_success || !checkDynamicFeasibility(pos) ||
+        !checkFullTrajectorySafety(pos, local_corridor))
     {
       printf("\033[34mThis refined trajectory is unsafe or dynamically infeasible. Skip publishing it.\n\033[0m");
       continuous_failures_count_++;
@@ -536,6 +629,52 @@ namespace scan_planner
       }
     }
 
+    return true;
+  }
+
+  bool SCANPlannerManager::checkFullTrajectorySafety(
+      UniformBspline position_traj,
+      const std::vector<Eigen::Vector3d> &corridor_path)
+  {
+    if (!grid_map_)
+      return false;
+
+    const double duration = position_traj.getTimeSum();
+    const double sample_dt = std::clamp(
+        grid_map_->getResolution() / std::max(2.0 * pp_.max_vel_, 1e-3), 0.01, 0.05);
+    const int sample_count = std::max(1, static_cast<int>(std::ceil(duration / sample_dt)));
+    for (int sample = 0; sample <= sample_count; ++sample)
+    {
+      const double t = std::min(sample * sample_dt, duration);
+      const double previous_t = std::max(t - sample_dt, 0.0);
+      const double next_t = std::min(t + sample_dt, duration);
+      const Eigen::Vector3d point = position_traj.evaluateDeBoorT(t);
+      const Eigen::Vector3d previous = position_traj.evaluateDeBoorT(previous_t);
+      const Eigen::Vector3d next = position_traj.evaluateDeBoorT(next_t);
+      const Eigen::Vector2d direction = (next - previous).head<2>();
+      const double yaw = direction.squaredNorm() > 1e-8
+                             ? std::atan2(direction(1), direction(0))
+                             : 0.0;
+      if (grid_map_->getInflateOccupancy(point, yaw) > 0)
+      {
+        RCLCPP_WARN(node_->get_logger(),
+                    "Reject full trajectory: collision at t=%.3f [%.2f %.2f %.2f]",
+                    t, point(0), point(1), point(2));
+        return false;
+      }
+
+      if (corridor_path.size() >= 2 && corridor_max_deviation_ > 0.0)
+      {
+        const double deviation = (point - nearestPointOnPath(point, corridor_path)).norm();
+        if (deviation > corridor_max_deviation_)
+        {
+          RCLCPP_WARN(node_->get_logger(),
+                      "Reject full trajectory: corridor deviation at t=%.3f is %.3f > %.3f",
+                      t, deviation, corridor_max_deviation_);
+          return false;
+        }
+      }
+    }
     return true;
   }
 

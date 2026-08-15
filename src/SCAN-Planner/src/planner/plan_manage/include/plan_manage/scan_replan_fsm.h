@@ -64,6 +64,7 @@ namespace scan_planner
     double self_inflation_z_up_, self_inflation_z_down_;
     double self_double_cylinder_radius_, self_double_cylinder_offset_;
     double body_height_;
+    double corridor_z_offset_{0.0};
     std::string self_inflation_frame_id_;
 
     /* planning data */
@@ -86,6 +87,7 @@ namespace scan_planner
     double end_yaw_{0.0};
     Eigen::Vector3d local_target_pt_, local_target_vel_;                     // local target state
     std::vector<Eigen::Vector3d> active_waypoints_;
+    std::vector<Eigen::Vector3d> active_corridor_path_;
     std::vector<double> waypoint_arc_lengths_;
     double progress_arc_length_{0.0};
     nav_msgs::msg::Path::SharedPtr pending_waypoint_path_;
@@ -101,6 +103,7 @@ namespace scan_planner
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr waypoint_sub_, path_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr corridor_path_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr go2_execution_frozen_sub_;
     rclcpp::Subscription<pct_scan_navigation::msg::MapStatus>::SharedPtr current_map_sub_;
     rclcpp::Publisher<scan_planner_msgs::msg::Bspline>::SharedPtr bspline_pub_;
@@ -151,6 +154,7 @@ namespace scan_planner
     void rvizGoalCallback(const geometry_msgs::msg::PoseStamped::ConstSharedPtr &msg);
     void waypointCallback(const nav_msgs::msg::Path::ConstSharedPtr &msg);
     void dynamicWaypointCallback(const nav_msgs::msg::Path::ConstSharedPtr &msg);
+    void corridorPathCallback(const nav_msgs::msg::Path::ConstSharedPtr &msg);
     void pathCallback(const nav_msgs::msg::Path::ConstSharedPtr &msg);
     void odometryCallback(const nav_msgs::msg::Odometry::ConstSharedPtr &msg);
     void go2ExecutionFrozenCallback(const std_msgs::msg::Bool::ConstSharedPtr &msg);
