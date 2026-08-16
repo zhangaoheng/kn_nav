@@ -1,3 +1,13 @@
+// ============================================================================
+// 文件名：test_utils.hpp
+// 用途：CSV 数据驱动测试的公共工具（供 test_all_functions_csv.cpp 使用）。
+// 结构：
+//   - readCsv：读取 CSV → vector<map<列名,值>>；
+//   - FuncTest：一个被测函数的描述（输入列/期望输出列/调用方式）；
+//   - runCsvTests：读取输入 CSV、执行被测函数、对比期望、写出结果 CSV 并断言。
+// 数据流：test_data/<name>.csv → invoke() → test_results_<name>.csv + gtest 断言。
+// ============================================================================
+
 #pragma once
 
 #include <fstream>
@@ -14,6 +24,8 @@ namespace test_utils
 {
 
 // 1) CSV を読み込んで、<列名→値> のマップのベクタを返す
+// 读取 CSV：首行为列名，后续每行转成 <列名→double> 的 map
+
 static std::vector<std::map<std::string, double>> readCsv(const std::string & path) {
   std::ifstream ifs(path);
   if (!ifs) throw std::runtime_error("Cannot open CSV: " + path);
@@ -42,6 +54,9 @@ static std::vector<std::map<std::string, double>> readCsv(const std::string & pa
 }
 
 // // 2) テスト対象関数を表す構造体
+// 单个被测函数的测试描述：名称（对应 CSV 文件名）、输入列、期望输出列、
+// 以及“CSV 一行 → 实际输出 vector”的调用函数
+
 struct FuncTest {
   std::string name;
   std::vector<std::string> inCols;   // 入力カラム名
@@ -51,6 +66,9 @@ struct FuncTest {
 };
 
 // 3) テストランナー本体
+// 运行器：对每个 FuncTest 读 CSV 逐行调用，比较期望与实际（容差 tol），
+// 写出 test_results_<name>.csv 并给出 gtest 断言
+
 inline void runCsvTests(
   const std::vector<FuncTest> &tests,
   double tol = 1e-3)

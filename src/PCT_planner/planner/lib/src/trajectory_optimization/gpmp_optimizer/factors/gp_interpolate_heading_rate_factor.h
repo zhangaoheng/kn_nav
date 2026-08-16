@@ -1,3 +1,12 @@
+// ============================================================
+// 文件：gp_interpolate_heading_rate_factor.h
+// 用途：插值点航向角速率约束因子：在相邻两节点间的插值点
+//       （段内时刻 tau）处约束航向角速率不超限，保证整段轨迹
+//       的转向速率都受控（而不只是节点处）。
+// 结构：GPInterpolateHeadingRateFactor 类（gtsam 二元因子，两个 Vector6）。
+// 关键逻辑：先用 GP 插值器求 tau 时刻状态，再算航向角速率；
+//       误差对 x1/x2 的雅可比 = 速率雅可比 * 插值雅可比（见 .cc）。
+// ============================================================
 #pragma once
 
 #include <memory>
@@ -6,6 +15,9 @@
 #include "map_manager/dense_elevation_map.h"
 #include "trajectory_optimization/gpmp_optimizer/interpolator/wnoj_interpolator.hpp"
 
+// GPInterpolateHeadingRateFactor：节点间插值点的航向角速率约束因子。
+// 参数：max_heading_rate_ 速率上限；tau_ 段内偏移；param_ 全局时间位置
+//       （调试用）；gp_interpolator_ 负责插值状态及其雅可比。
 class GPInterpolateHeadingRateFactor
     : public gtsam::NoiseModelFactor2<gtsam::Vector6, gtsam::Vector6> {
  public:
@@ -28,6 +40,8 @@ class GPInterpolateHeadingRateFactor
       boost::optional<gtsam::Matrix&> H2 = boost::none) const override;
 
  private:
+// tau_：段内时间偏移；param_：插值点全局时间位置（调试用）；
+// gp_interpolator_：GP 插值器，求插值状态与对两端节点的雅可比。
   double max_heading_rate_ = 0.5;
   double tau_ = 0.0;
   double param_ = 0.0;

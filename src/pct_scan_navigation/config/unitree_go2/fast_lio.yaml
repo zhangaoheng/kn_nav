@@ -1,3 +1,13 @@
+# ============================================================================
+# fast_lio.yaml —— FAST-LIO 里程计节点参数（旧式拆分配置）。
+#   feature_extract_enable 特征提取开关；point_filter_num 抽稀间隔；
+#   max_iteration 配准最大迭代；filter_size_surf/map 体素滤波尺寸；
+#   cube_side_length ikd-Tree 局部地图边长；map_file_path 地图保存路径。
+#   common.lid_topic/imu_topic 雷达与 IMU 话题；
+#   common.preprocess 雷达类型与预处理（lidar_type、盲区 blind、时间戳单位等）；
+#   common.mapping 滤波与 ESKF 协方差、外参（extrinsic_T/R）；
+#   publish.* 里程计/地图/点云发布开关；pcd_save 点云保存。
+# ============================================================================
 /**:
   ros__parameters:
     feature_extract_enable: false

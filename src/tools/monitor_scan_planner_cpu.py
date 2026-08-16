@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 """Record scan_planner_node CPU usage and generate a PNG report."""
 
+# ============================================================
+# 文件：monitor_scan_planner_cpu.py —— SCAN 局部规划器 CPU 监控工具。
+# 用途：等待 scan_planner_node 进程出现（或直接指定 PID），按固定间隔
+#       采样其 CPU/内存/线程数与系统负载，实时写 CSV 并定期打印状态，
+#       结束（进程退出/Ctrl+C/时长到）后生成 PNG 曲线报告；
+#       用于评估局部规划器的计算开销与性能瓶颈。
+# 结构：进程查找（process_executable_name/find_process/wait_for_process）
+#       -> 采样循环 monitor（写 CSV + 状态打印）-> 统计与绘图
+#       （percentile/save_plot）-> main 入口。
+# 依赖：psutil（缺失时提示安装并退出）、matplotlib（缺失时仅保留 CSV）。
+# 用法：python3 monitor_scan_planner_cpu.py [--interval 1.0 --duration 0]
+# ============================================================
 import argparse
 import csv
 from datetime import datetime
@@ -21,6 +33,7 @@ except ImportError:
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[1] / 'log' / 'cpu'
 
 
+# 命令行参数：PID/进程名、采样间隔、时长、状态打印间隔与报告输出目录。
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
@@ -63,6 +76,7 @@ def parse_args():
     return args
 
 
+# 尽力获取进程可执行名：优先 exe()，失败回退 cmdline 首项，再失败返回空串。
 def process_executable_name(process):
     try:
         executable = process.exe()
@@ -80,6 +94,7 @@ def process_executable_name(process):
     return ''
 
 
+# 按可执行名匹配进程（跳过自身），命中多个时取创建时间最新的一个。
 def find_process(name):
     matches = []
     own_pid = os.getpid()
@@ -94,6 +109,8 @@ def find_process(name):
     return max(matches, key=lambda process: process.info.get('create_time') or 0.0)
 
 
+# 等待目标进程出现：指定 PID 时直接校验存在性，否则循环查找并按
+# 5 秒间隔提示等待状态；Ctrl+C 可中止等待。
 def wait_for_process(args):
     if args.pid is not None:
         try:
@@ -118,6 +135,7 @@ def wait_for_process(args):
             raise SystemExit('Stopped while waiting for scan_planner_node')
 
 
+# 线性插值分位数：按 fraction 在排序后的样本间插值（如 p95）。
 def percentile(values, fraction):
     ordered = sorted(values)
     if not ordered:
@@ -129,6 +147,8 @@ def percentile(values, fraction):
     return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
 
 
+# 生成 PNG 报告：上图为进程/系统 CPU（含均值线与标题统计 avg/p95/max），
+# 下图为 RSS 内存曲线；matplotlib 缺失时只提示并跳过绘图。
 def save_plot(records, png_path, process_name, pid):
     if not records:
         print('No samples collected; PNG was not generated.', file=sys.stderr)
@@ -186,6 +206,9 @@ def save_plot(records, png_path, process_name, pid):
     plt.close(figure)
 
 
+# 主采样流程：等待进程后按间隔循环采样（oneshot 批量取 CPU/内存/线程数，
+# 进程退出或时长到即停止），逐条写 CSV 并定时打印状态，
+# 结束时生成 PNG 并输出汇总统计（avg/p95/max）。
 def monitor(args):
     process = wait_for_process(args)
     process_name = process_executable_name(process) or process.name()
@@ -278,6 +301,7 @@ def monitor(args):
     print(f'CSV: {csv_path}')
 
 
+# 入口：解析参数后直接进入监控流程。
 def main():
     monitor(parse_args())
 

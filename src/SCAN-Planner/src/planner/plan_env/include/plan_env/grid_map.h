@@ -1,3 +1,17 @@
+// ============================================================
+// 文件：grid_map.h
+// 模块：plan_env（占据栅格地图）
+// 职责：声明概率占据栅格地图 GridMap，以及地图参数
+//       MappingParameters 与地图数据 MappingData。
+// 地图维护：
+//   - occupancy_buffer_：体素占据概率的对数几率（log-odds）；
+//   - occupancy_buffer_inflate_：按机器人尺寸膨胀后的占据标记
+//     （规划与碰撞查询实际使用的层）；
+//   - 传感器输入（深度图/点云）+ 位姿，经射线投射更新占据；
+//   - 支持局部滑动窗口地图（跟随机器人移动）。
+// 对外接口：getInflateOccupancy(pos, yaw) 为规划器使用的
+//       碰撞查询（带航向的双圆柱模型）。
+// ============================================================
 #ifndef _GRID_MAP_H
 #define _GRID_MAP_H
 
@@ -49,6 +63,10 @@ struct matrix_hash {
 
 // constant parameters
 
+// MappingParameters：地图的静态参数集合。
+// 包括地图尺寸/分辨率/边界、膨胀半径、深度相机内参、
+// 射线投射概率（p_hit/p_miss/p_min/p_max/p_occ）、
+// 传感器类型与外部参数等，全部由参数服务器加载。
 struct MappingParameters {
 
   /* map properties */
@@ -98,6 +116,12 @@ struct MappingParameters {
 
 // intermediate mapping data for fusion
 
+// MappingData：地图的动态数据（缓冲区与中间量）。
+// occupancy_buffer_ 为对数几率缓冲区，occupancy_buffer_inflate_
+// 及其计数为膨胀层；ray_pos_/ray_q_ 为当前传感器位姿；
+// depth_image_/proj_points_ 为深度图与投影点云；
+// count_hit_/flag_rayend_/flag_traverse_/cache_voxel_ 等
+// 用于加速射线投射的缓存与去重。
 struct MappingData {
   // main map data, occupancy of each voxel and Euclidean distance
 
@@ -147,6 +171,12 @@ struct MappingData {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
 
+// GridMap：概率占据栅格地图（核心类）。
+// 数据流：传感器回调（深度图+位姿 或 点云）→ projectDepthImage/
+//         cloudCallback 生成投影点 → raycastProcess 射线投射更新
+//         占据与膨胀层 → 规划器通过 getInflateOccupancy 查询。
+// 关键成员函数：initMap 初始化；updateOccupancyCallback 定时触发
+//         更新；publishMap/publishMapInflate 发布可视化。
 class GridMap {
 public:
   GridMap() {}
@@ -368,6 +398,10 @@ inline int GridMap::getOccupancy(Eigen::Vector3d pos) {
   return md_.occupancy_buffer_[toAddress(id)] > mp_.min_occupancy_log_ ? 1 : 0;
 }
 
+// getInflateOccupancy：带航向的膨胀占据查询（规划碰撞检查入口）。
+// 以 yaw 构造航向向量，把查询点前后各平移 double_cylinder_offset_
+// 得到前/后两个采样点（双圆柱模型，近似机器人长度方向），
+// 任一点在膨胀层中被占据即视为碰撞。
 inline int GridMap::getInflateOccupancy(Eigen::Vector3d pos, double yaw) {
   Eigen::Vector3d heading(std::cos(yaw), std::sin(yaw), 0.0);
   Eigen::Vector3d front = pos + mp_.double_cylinder_offset_ * heading;

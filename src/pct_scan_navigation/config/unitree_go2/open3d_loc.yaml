@@ -1,3 +1,10 @@
+# ============================================================================
+# open3d_loc.yaml —— Open3D 全局定位节点参数（旧式拆分配置）。
+#   global_localization_node 全局定位主节点：path_map 离线地图、配准阈值、
+#     定位频率、体素降采样、ICP 阈值、丢失判定（localization_lost_fail_count）等。
+#   global_relocalization_node 全局重定位节点：描述子/瓦片检索 + ICP 验证。
+#   localization_service_node 定位服务节点：relocalize / get_pose / publish_goal。
+# ============================================================================
 global_localization_node:
   ros__parameters:
     map_name: "outdoor"

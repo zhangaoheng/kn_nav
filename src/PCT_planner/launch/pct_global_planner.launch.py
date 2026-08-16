@@ -7,6 +7,11 @@
 # Edit params in: params/pct_global_planner.yaml
 # =============================================================================
 
+# 中文补充说明：
+# 用途：PCT 全局规划节点（run_ros2_global_planner）的 ROS 2 启动入口，
+#       通过参数文件配置规划器并启动名为 pct_global_planner 的节点。
+# 参数：params_file 指定 pct_global_planner.yaml（默认取自安装目录 params/）。
+# 结构：generate_launch_description() 组装 LaunchDescription（唯一入口）。
 import os
 
 from launch import LaunchDescription
@@ -17,6 +22,7 @@ from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
 
+# 生成启动描述：解析 params_file 参数，并创建 run_ros2_global_planner 可执行节点。
 def generate_launch_description():
     pkg_share = get_package_share_directory('pct_planner')
     default_params = os.path.join(pkg_share, 'params', 'pct_global_planner.yaml')

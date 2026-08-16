@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+# ============================================================================
+# check_navigation_config.py
+# ----------------------------------------------------------------------------
+# 统一配置校验工具：不启动任何 ROS 节点，仅离线校验一份 navigation.yaml。
+#
+# 校验项：
+#   * 结构：version==1，launch/topics/maps/nodes 四段为字典。
+#   * launch：navigation_mode 必须为 1 或 2；initial_map_name 必须存在于 maps。
+#   * maps：每个地图 profile 必须含非空 pcd_path / tomo_path。
+#   * nodes：必需节点集合齐全且每项为字典；默认地图路径与定位/规划器
+#     配置里的 pcd_path / tomo_path 必须一致（避免"启动加载错地图"）。
+#   * 数值：扫描/控制/桥接的关键速度与网格参数必须为正。
+#
+# 用法：python3 check_navigation_config.py <config_file>
+# 退出码 0 表示通过，1 表示校验失败。
+# ============================================================================
+
 """Validate one unified navigation.yaml without starting ROS nodes."""
 
 import argparse
@@ -7,6 +24,7 @@ from pathlib import Path
 import yaml
 
 
+# 统一配置中必须出现的节点集合（launch 会按开关启动这些节点）。
 REQUIRED_NODES = {
     'fastlio_mapping',
     'global_localization_node',
@@ -20,6 +38,7 @@ REQUIRED_NODES = {
 }
 
 
+# 逐项校验配置并收集错误列表；返回空列表表示通过。
 def validate(config):
     errors = []
     if not isinstance(config, dict):
@@ -92,6 +111,8 @@ def validate(config):
     return errors
 
 
+# CLI 入口：解析参数 -> 加载 YAML（解析失败即 INVALID 退出）-> 校验 ->
+# 通过则打印 mode/map/bridge 摘要，失败则逐条列出错误并退出码 1。
 def main():
     parser = argparse.ArgumentParser(
         description='Validate a unified PCT + SCAN navigation YAML')

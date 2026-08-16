@@ -1,3 +1,12 @@
+# ============================================================================
+# 文件名：pure_pursuit_planner.py
+# 用途：仿真/调试用启动脚本——同时拉起 rviz2、路径发布与平滑节点、
+#       以及 pure_pursuit_planner 节点（加载 params.yaml）。
+# 结构：generate_launch_description() 组装 Node 列表并返回 LaunchDescription。
+# 注意：本脚本面向仿真演示（arcanain_simulator / path_smoother），
+#       实机链路请使用 pct_pure_pursuit.launch.py。
+# ============================================================================
+
 import os
 
 from launch import LaunchDescription
@@ -8,6 +17,8 @@ from launch_ros.substitutions import FindPackageShare
 
 from ament_index_python.packages import get_package_share_directory
 
+
+# 启动入口：构造 rviz2、路径发布/平滑、纯追踪节点并返回 LaunchDescription
 
 def generate_launch_description():
     package_name = 'pure_pursuit_planner'

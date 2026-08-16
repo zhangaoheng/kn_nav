@@ -1,3 +1,7 @@
+# 加载定位地图服务（/global_localization_node/load_map）：
+# 请求：map_name 地图名、pcd_path 全局点云路径、use_localization_thresholds 是否启用
+#       配准阈值（fitness_eval_threshold/threshold_fitness/threshold_fitness_init）。
+# 响应：success 是否成功、message 结果说明。
 string map_name
 string pcd_path
 bool use_localization_thresholds

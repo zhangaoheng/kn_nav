@@ -1,5 +1,10 @@
 #!/usr/bin/python3
 """ROS2 tomography runner - generates tomogram and publishes to RViz2."""
+# =============================================================================
+# run_ros2.py — ROS2 离线建图入口
+# 读取场景 PCD 点云 -> GPU 建图（tomogram）-> 导出 pickle -> 发布
+# 原始点云与简化后 tomogram 到 RViz2。
+# =============================================================================
 import os
 import sys
 import time
@@ -22,6 +27,7 @@ from config import SceneClinic, SceneBuilding, ScenePlaza
 
 rsg_root = os.path.dirname(os.path.abspath(__file__)) + '/../..'
 
+# 场景名到场景配置类的映射。
 SCENES = {
     'Clinic': SceneClinic,
     'Building': SceneBuilding,
@@ -29,6 +35,7 @@ SCENES = {
 }
 
 
+# 把 Nx3 / Nx4 float32 点阵打包成 PointCloud2 消息（自动判断是否含 intensity）。
 def make_pointcloud2(node, points, frame_id='map'):
     """Create a PointCloud2 message from Nx3 XYZ or Nx4 XYZI float32 points."""
     msg = PointCloud2()
@@ -54,7 +61,11 @@ def make_pointcloud2(node, points, frame_id='map'):
     return msg
 
 
+# ROS2 建图节点：构造时完成 读点云 -> 初始化建图环境 -> GPU 建图 -> 导出 ->
+# 发布 的全流程（一次性执行，之后仅保持节点存活供 RViz 查看）。
 class TomographyNode(Node):
+    # 依据场景配置加载 PCD，按点云范围推导地图尺寸/切片数/中心，
+    # 执行建图并把结果写成 pickle，最后发布原始点云与简化 tomogram。
     def __init__(self, scene_name):
         super().__init__('pointcloud_tomography')
         self.map_frame = 'map'
@@ -143,6 +154,7 @@ class TomographyNode(Node):
         self.get_logger().info('Published. Spinning (Ctrl-C to exit)...')
 
 
+# 入口：解析 --scene 参数，创建建图节点并 spin。
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--scene', type=str, default='Clinic',

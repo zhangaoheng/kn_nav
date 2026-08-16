@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 """Save named map poses from TF and republish them as navigation goals."""
 
+# ============================================================
+# 文件：goal_points_cli.py —— 导航目标点交互式 CLI 工具。
+# 用途：在终端交互式管理命名导航点：save 把当前 base_link 在 map 系下的
+#       位姿存入 JSON；publish 把保存点作为 /goal_pose 发布给导航；
+#       estimate 发布为 /initialpose（带协方差，用于重定位）；
+#       list/delete 浏览与删除；清单持久化到 goal_points.json。
+# 结构：四元数/欧拉角互转工具 -> GoalPointsCli 节点（TF 查询、JSON 存取、
+#       目标话题发布）-> command_loop 命令循环 -> main 入口。
+# 用法：python3 goal_points_cli.py [--map-frame map --base-frame base_link]
+# ============================================================
 import argparse
 import json
 import math
@@ -19,6 +29,7 @@ from rclpy.time import Time
 from tf2_ros import Buffer, TransformException, TransformListener
 
 
+# 四元数取偏航角 yaw（绕 Z 轴），用于保存/发布时的朝向换算。
 def yaw_from_quaternion(quaternion) -> float:
     siny_cosp = 2.0 * (
         quaternion.w * quaternion.z + quaternion.x * quaternion.y
@@ -29,6 +40,7 @@ def yaw_from_quaternion(quaternion) -> float:
     return math.atan2(siny_cosp, cosy_cosp)
 
 
+# 四元数转完整欧拉角（roll/pitch/yaw），pitch 接近 ±90 度时钳位。
 def rpy_from_quaternion(quaternion) -> tuple[float, float, float]:
     sinr_cosp = 2.0 * (
         quaternion.w * quaternion.x + quaternion.y * quaternion.z
@@ -50,6 +62,7 @@ def rpy_from_quaternion(quaternion) -> tuple[float, float, float]:
     return roll, pitch, yaw
 
 
+# 仅绕 Z 轴的偏航角转四元数字典，用于发布 /goal_pose 目标。
 def quaternion_from_yaw(yaw: float):
     half_yaw = 0.5 * yaw
     return {
@@ -60,6 +73,7 @@ def quaternion_from_yaw(yaw: float):
     }
 
 
+# 完整欧拉角转四元数字典，用于发布 /initialpose 重定位姿态。
 def quaternion_from_rpy(roll: float, pitch: float, yaw: float):
     cy = math.cos(yaw * 0.5)
     sy = math.sin(yaw * 0.5)
@@ -76,6 +90,8 @@ def quaternion_from_rpy(roll: float, pitch: float, yaw: float):
     }
 
 
+# 目标点 CLI 节点：持有 TF 缓冲（map -> base_link）、目标与初始位姿发布者，
+# 以及 JSON 存储的读写；提供保存/发布/预估/列表/删除五类操作。
 class GoalPointsCli(Node):
     def __init__(self, args):
         super().__init__('goal_points_cli')
@@ -105,6 +121,7 @@ class GoalPointsCli(Node):
             f'goal_topic={args.goal_topic}, initialpose_topic={args.initialpose_topic}'
         )
 
+# 从 JSON 加载已保存点；文件缺失、损坏或非对象结构时告警并返回空字典。
     def _load_points(self) -> dict[str, Any]:
         if not self.store_file.exists():
             return {}
@@ -119,6 +136,7 @@ class GoalPointsCli(Node):
             return {}
         return data
 
+# 原子写 JSON：先写 .tmp 临时文件再 replace，避免写一半损坏存储。
     def _save_points(self):
         self.store_file.parent.mkdir(parents=True, exist_ok=True)
         tmp_file = self.store_file.with_suffix(self.store_file.suffix + '.tmp')
@@ -127,6 +145,7 @@ class GoalPointsCli(Node):
             handle.write('\n')
         tmp_file.replace(self.store_file)
 
+# 查询当前 map -> base_link 变换，把位置与欧拉角存入命名点并落盘。
     def save_current_pose(self, name: str):
         try:
             transform = self.tf_buffer.lookup_transform(
@@ -160,6 +179,7 @@ class GoalPointsCli(Node):
             flush=True,
         )
 
+# 把保存点按偏航角构造位姿，在 /goal_pose 上按 publish_repeat 次重复发布。
     def publish_saved_pose(self, name: str):
         point = self.points.get(name)
         if point is None:
@@ -191,6 +211,8 @@ class GoalPointsCli(Node):
             flush=True,
         )
 
+# 把保存点（含 roll/pitch）构造为带协方差的 PoseWithCovarianceStamped，
+# 在 /initialpose 上重复发布，供定位节点重定位使用。
     def estimate_saved_pose(self, name: str):
         point = self.points.get(name)
         if point is None:
@@ -232,6 +254,7 @@ class GoalPointsCli(Node):
             flush=True,
         )
 
+# 按名称排序打印全部已保存点（位置 + 欧拉角）。
     def list_points(self):
         if not self.points:
             print('no saved points', flush=True)
@@ -248,6 +271,7 @@ class GoalPointsCli(Node):
                 flush=True,
             )
 
+# 删除指定名称的点并落盘。
     def delete_point(self, name: str):
         if name not in self.points:
             print(f'unknown point: {name}', flush=True)
@@ -257,6 +281,7 @@ class GoalPointsCli(Node):
         print(f'deleted {name}', flush=True)
 
 
+# 打印交互命令帮助（save/publish/estimate/list/delete/help/quit）。
 def print_help():
     print(
         'commands:\n'
@@ -271,6 +296,8 @@ def print_help():
     )
 
 
+# 命令行参数：地图/机体系、目标话题、初始位姿话题、TF 超时、重复发布
+# 次数与间隔、存储文件路径，并做基本合法性校验。
 def parse_arguments():
     default_store = Path(__file__).with_name('goal_points.json')
     parser = argparse.ArgumentParser(
@@ -299,6 +326,7 @@ def parse_arguments():
     return args
 
 
+# 未显式设置 ROS_LOG_DIR 时把日志目录固定到 /tmp，避免污染工作区。
 def configure_ros_log_dir():
     if 'ROS_LOG_DIR' in os.environ:
         return
@@ -307,6 +335,7 @@ def configure_ros_log_dir():
     os.environ['ROS_LOG_DIR'] = str(log_dir)
 
 
+# 交互主循环：读命令与参数，分发到节点的五种操作；EOF 或 quit/exit 退出。
 def command_loop(node: GoalPointsCli):
     print_help()
     while rclpy.ok():
@@ -355,6 +384,8 @@ def command_loop(node: GoalPointsCli):
             print(f'unknown command: {command}', flush=True)
 
 
+# 入口：解析参数、初始化 rclpy，单线程执行器在后台线程 spin，
+# 主线程运行命令循环，退出时统一清理节点与执行器。
 def main():
     args = parse_arguments()
     configure_ros_log_dir()

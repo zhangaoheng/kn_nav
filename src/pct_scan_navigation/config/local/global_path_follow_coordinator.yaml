@@ -1,3 +1,10 @@
+# ============================================================================
+# global_path_follow_coordinator.yaml —— 全局路径跟随协调器参数（测试链路）。
+#   订阅 PCT 全局路径（/pct_path），裁剪出机器人前方局部跟踪段，
+#   发布给 Pure Pursuit 跟踪节点，并汇报进度/终点状态。
+#   tracking_path_length 跟踪段长度；tracking_point_lookahead_distance 前视距离；
+#   goal_reached_* 终点判定阈值；crop_path_to_robot 是否裁剪到机器人附近。
+# ============================================================================
 pct_global_path_follow_coordinator:
   ros__parameters:
     global_frame: map

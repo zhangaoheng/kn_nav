@@ -1,3 +1,10 @@
+# =============================================================================
+# plan_rviz.py — ROS1 交互式规划演示节点（PCT 规划器）
+# 职责：加载离线生成的 tomogram（pickle），订阅 RViz 的 /clicked_point 点选
+#       （奇数次点选设起点、偶数次点选设终点），调用 TomogramPlanner 规划，
+#       并发布平滑轨迹 / 原始 A* 路径 / tomogram 点云 / 起终点标记。
+# 属于 ROS1（rospy）实现，与 ROS2 入口 run_ros2_global_planner.py 对应。
+# =============================================================================
 import argparse
 import os
 import pickle
@@ -35,7 +42,11 @@ POINT_FIELDS_XYZI = [
 ]
 
 
+# RvizPlannerNode：ROS1 规划演示节点。持有规划器实例与起终点状态，
+# 用锁保护回调与规划之间的共享数据，规划在点击回调中同步执行。
 class RvizPlannerNode(object):
+    # 初始化：创建路径 / A* 路径 / tomogram / 起终点标记等发布器，加载指定
+    # 场景的 tomogram 并立即发布到 /tomogram，同时订阅 /clicked_point。
     def __init__(self, scene, tomo_file):
         self.lock = threading.Lock()
         self.start_pos = None
@@ -60,6 +71,8 @@ class RvizPlannerNode(object):
 
         rospy.Subscriber('/clicked_point', PointStamped, self.clicked_point_cb, queue_size=1)
 
+    # 把 tomogram pickle 转成 PointCloud2 发布：按层间高差隐藏被下层遮挡的
+    # 体素，并把被隐藏层的代价并入可见层，与离线可视化逻辑保持一致。
     def publish_tomogram(self, tomo_file):
         tomo_path = os.path.join(self.planner.tomo_dir, tomo_file + '.pickle')
         with open(tomo_path, 'rb') as handle:
@@ -77,6 +90,8 @@ class RvizPlannerNode(object):
         point_proto[:, :2] += center
 
         global_points = []
+        # 逐层处理：高差小于 slice_dh 视为上下层重叠，下层置 NaN 隐藏，
+        # 上层代价取与下层的最小值，避免同一表面被重复显示。
         for i in range(n_slice - 1):
             mask_h = (layers_g[i + 1] - layers_g[i]) < slice_dh
             layers_g[i, mask_h] = np.nan
@@ -97,6 +112,8 @@ class RvizPlannerNode(object):
         rospy.loginfo('Tomogram published on /tomogram')
 
     @staticmethod
+    # 生成 xy 网格的索引原型与以地图中心为原点的点坐标原型
+    # （z 置 0、intensity 置 1），供逐层取点可视化复用。
     def grid_points_xyzi(resolution, dim_x, dim_y):
         index_proto = np.zeros((dim_x * dim_y, 2), dtype=int)
         lx = np.linspace(0, dim_x - 1, dim_x, dtype=int)
@@ -115,15 +132,19 @@ class RvizPlannerNode(object):
         return index_proto, point_proto
 
     @staticmethod
+    # 把单层高度/代价数组按网格索引填入点原型，并剔除含 NaN 的无效点。
     def layer_to_points(point_proto, index_proto, height_layer, cost_layer):
         layer_points = point_proto.copy()
         layer_points[:, 2] = height_layer[index_proto[:, 0], index_proto[:, 1]]
         layer_points[:, 3] = cost_layer[index_proto[:, 0], index_proto[:, 1]]
         return layer_points[~np.isnan(layer_points).any(axis=-1)]
 
+    # 点选回调：waiting_for_start 为真时本次点选记为起点并清空旧路径，
+    # 否则记为终点并触发规划。
     def clicked_point_cb(self, msg):
         pos = msg.point
         with self.lock:
+            # 起终点交替逻辑：第一次点选是起点，第二次点选是终点，如此循环。
             if self.waiting_for_start:
                 self.start_pos = np.array([pos.x, pos.y, pos.z], dtype=np.float32)
                 self.goal_pos = None
@@ -145,6 +166,7 @@ class RvizPlannerNode(object):
             self.publish_markers()
             self.plan_if_ready()
 
+    # 发布空路径消息，用于清掉 RViz 中上一次的规划轨迹。
     def clear_path(self):
         path_msg = Path()
         path_msg.header.frame_id = 'map'
@@ -152,6 +174,7 @@ class RvizPlannerNode(object):
         self.path_pub.publish(path_msg)
         self.astar_path_pub.publish(path_msg)
 
+    # 起终点齐备后执行规划：先发布原始 A* 路径（调试用），再发布平滑轨迹。
     def plan_if_ready(self):
         if self.start_pos is None or self.goal_pos is None:
             rospy.loginfo('Waiting for both start and goal from RViz')
@@ -181,6 +204,7 @@ class RvizPlannerNode(object):
         self.path_pub.publish(path_msg)
         rospy.loginfo('Trajectory published on /pct_path with %d poses', len(path_msg.poses))
 
+    # 发布起终点球体标记：先删除上一帧标记，再按当前状态添加起点（绿）/终点（红）。
     def publish_markers(self):
         markers = MarkerArray()
         now = rospy.Time.now()
@@ -198,6 +222,7 @@ class RvizPlannerNode(object):
         self.marker_pub.publish(markers)
 
     @staticmethod
+    # 构造删除动作的 Marker，用于清除上一帧的起终点标记。
     def make_delete_marker(marker_id, stamp):
         marker = Marker()
         marker.header.frame_id = 'map'
@@ -208,6 +233,7 @@ class RvizPlannerNode(object):
         return marker
 
     @staticmethod
+    # 构造起/终点球体 Marker：固定尺寸、颜色与文字标签。
     def make_sphere_marker(marker_id, stamp, pos, name, color):
         marker = Marker()
         marker.header.frame_id = 'map'
@@ -231,6 +257,7 @@ class RvizPlannerNode(object):
         return marker
 
 
+# 解析命令行参数：--scene 选择预置场景，--tomo-file 可覆盖 tomogram 文件名。
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(

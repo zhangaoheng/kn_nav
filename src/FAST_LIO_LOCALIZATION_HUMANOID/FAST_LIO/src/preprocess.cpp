@@ -1,3 +1,10 @@
+// ============================================================
+// preprocess.cpp —— FAST-LIO 点云预处理模块实现（上游开源算法）
+// 实现 Preprocess 类：各型雷达消息解析、按线分桶、时间戳归一化，
+// 以及基于几何判据的特征点提取（平面/边缘/跳变点），输出供里程计
+// 配准使用的面点云 pl_surf 与角点云 pl_corn。
+// 工作区内作为里程计前端的数据预处理环节使用。
+// ============================================================
 #include "preprocess.h"
 
 #include <pcl/common/common.h>
@@ -5,6 +12,8 @@
 #define RETURN0 0x00
 #define RETURN0AND1 0x10
 
+// 构造函数：初始化特征提取所需阈值（盲区距离、分桶尺寸、平面/边缘
+// 判定的角度与距离比例等），并把角度阈值预转为余弦值便于比较。
 Preprocess::Preprocess() : feature_enabled(0), lidar_type(AVIA), blind(0.01), point_filter_num(1)
 {
   inf_bound = 10;
@@ -36,6 +45,7 @@ Preprocess::~Preprocess()
 {
 }
 
+// 配置预处理参数：是否提取特征、雷达类型、盲区距离、点抽稀间隔。
 void Preprocess::set(bool feat_en, int lid_type, double bld, int pfilt_num)
 {
   feature_enabled = feat_en;
@@ -44,6 +54,7 @@ void Preprocess::set(bool feat_en, int lid_type, double bld, int pfilt_num)
   point_filter_num = pfilt_num;
 }
 
+// Livox 自定义消息处理入口：调用 avia_handler 预处理后输出面点云。
 void Preprocess::process(const livox_ros_driver2::msg::CustomMsg::UniquePtr &msg, PointCloudXYZI::Ptr &pcl_out)
 // void Preprocess::process(const livox_interfaces::msg::CustomMsg::UniquePtr &msg, PointCloudXYZI::Ptr &pcl_out)
 {
@@ -51,6 +62,8 @@ void Preprocess::process(const livox_ros_driver2::msg::CustomMsg::UniquePtr &msg
   *pcl_out = pl_surf;
 }
 
+// 标准 PointCloud2 消息处理入口：按时间戳单位换算比例，再按雷达类型
+// 分派到对应的 handler，处理完成后输出面点云。
 void Preprocess::process(const sensor_msgs::msg::PointCloud2::UniquePtr &msg, PointCloudXYZI::Ptr &pcl_out)
 {
   switch (time_unit)
@@ -93,6 +106,8 @@ void Preprocess::process(const sensor_msgs::msg::PointCloud2::UniquePtr &msg, Po
   *pcl_out = pl_surf;
 }
 
+// AVIA 雷达处理：按线(line)分桶并过滤无效点；使能特征提取时逐线计算
+// 相邻点几何量并提取特征，否则按抽稀间隔过滤盲区内点后直接输出。
 void Preprocess::avia_handler(const livox_ros_driver2::msg::CustomMsg::UniquePtr &msg)
 // void Preprocess::avia_handler(const livox_interfaces::msg::CustomMsg::UniquePtr &msg)
 {
@@ -192,6 +207,8 @@ void Preprocess::avia_handler(const livox_ros_driver2::msg::CustomMsg::UniquePtr
   }
 }
 
+// Ouster 雷达处理：解析到内部点类型，按环(ring)分桶并做盲区过滤，
+// 特征提取流程与 avia_handler 相同。
 void Preprocess::oust64_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg)
 {
   pl_surf.clear();
@@ -292,6 +309,8 @@ void Preprocess::oust64_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &
   // pub_func(pl_surf, pub_corn, msg->header.stamp);
 }
 
+// Velodyne 雷达处理：若无点时间戳，则用各线首点的偏航角与扫描角速度
+// 插值估算每个点的相对时间(offset time)，再按线分桶与特征提取。
 void Preprocess::velodyne_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg)
 {
   pl_surf.clear();
@@ -472,6 +491,8 @@ void Preprocess::velodyne_handler(const sensor_msgs::msg::PointCloud2::UniquePtr
   }
 }
 
+// Mid-360 雷达处理：从标准 PointCloud2 还原 Livox 点（含 line 线号），
+// 用偏航角插值估计各点相对时间，过滤盲区后直接输出面点云。
 void Preprocess::mid360_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg)
 {
   pl_surf.clear();
@@ -555,6 +576,7 @@ void Preprocess::mid360_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &
   }
 }
 
+// 兜底处理：仅做盲区过滤与抽稀，不做特征提取。
 void Preprocess::default_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg)
 {
   pl_surf.clear();
@@ -587,6 +609,9 @@ void Preprocess::default_handler(const sensor_msgs::msg::PointCloud2::UniquePtr 
   }
 }
 
+// 特征提取核心：逐段扫描单线点云——先用 plane_judge 判定平面段并标记
+// Real/Poss_Plane，再检测边缘跳变(Edge_Jump)与线状结构(Wire)，
+// 最后按 point_filter_num 抽稀输出面点，角点单独收集。
 void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &types)
 {
   int plsize = pl.size();
@@ -903,6 +928,7 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
   }
 }
 
+// 将点云转为 PointCloud2 消息（当前版本仅填充帧信息，未实际发布）。
 void Preprocess::pub_func(PointCloudXYZI &pl, const rclcpp::Time &ct)
 {
   pl.height = 1;
@@ -913,6 +939,8 @@ void Preprocess::pub_func(PointCloudXYZI &pl, const rclcpp::Time &ct)
   output.header.stamp = ct;
 }
 
+// 平面段判定：从当前点向前扩展一组相邻点，计算各点到组基线的垂直度
+// 与相邻点间距的分布，判断该段是否构成平面，并给出平面方向 curr_direct。
 int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, uint i_cur, uint &i_nex,
                             Eigen::Vector3d &curr_direct)
 {
@@ -1029,6 +1057,8 @@ int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, ui
   return 1;
 }
 
+// 边缘跳变判定：比较跳变点两侧相邻点间距的比例与差值是否满足
+// 边缘特征阈值，用于确认 Edge_Jump 特征。
 bool Preprocess::edge_jump_judge(const PointCloudXYZI &pl, vector<orgtype> &types, uint i, Surround nor_dir)
 {
   if (nor_dir == 0)

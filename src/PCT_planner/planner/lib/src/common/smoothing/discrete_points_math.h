@@ -14,6 +14,13 @@
  * limitations under the License.
  *****************************************************************************/
 
+// ============================================================================
+// 文件名: discrete_points_math.h
+// 用途:   离散路径点几何计算: 由一系列二维点计算航向、累积弧长、
+//         曲率及其导数(路径 profile), 供样条优化与轨迹生成使用
+// 结构:   DiscretePointsMath 静态工具类
+// ============================================================================
+
 #pragma once
 
 #include <utility>
@@ -21,6 +28,7 @@
 
 namespace common {
 
+// 纯静态工具类: 输入 xy_points, 输出 headings/accumulated_s/kappas/dkappas
 class DiscretePointsMath {
  public:
   DiscretePointsMath() = delete;

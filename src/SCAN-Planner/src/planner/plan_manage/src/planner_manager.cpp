@@ -1,3 +1,18 @@
+// ============================================================================
+// 文件名：planner_manager.cpp
+// 用途：SCAN 局部规划管理器（SCANPlannerManager）的实现文件。实现一次局部
+//       重规划的完整流水线：初始路径生成（多项式/上一段轨迹）--> B 样条参数化
+//       --> 走廊约束优化 --> 时间重分配细化 --> 动态可行性检查 -->
+//       整条轨迹安全校验（结合 PCT 走廊），并实现紧急停车与全局轨迹规划。
+// 结构：
+//   - 匿名命名空间：路径几何工具（最近点、投影、走廊截取、Z 参考映射）
+//   - reboundReplan：核心重规划流水线（STEP 1 INIT / STEP 2 OPTIMIZE /
+//     STEP 3 REFINE）
+//   - checkFullTrajectorySafety：整条轨迹安全校验（栅格碰撞 + 走廊偏离，最近新增）
+//   - planGlobalTraj / planGlobalTrajWaypoints：全局参考轨迹生成
+// 依赖：planner_manager.h（声明）、bspline_optimizer、uniform_bspline、
+//       plan_env/grid_map、traj_utils/polynomial_traj
+// ============================================================================
 // #include <fstream>
 #include <plan_manage/planner_manager.h>
 #include <chrono>
@@ -8,6 +23,8 @@ namespace scan_planner
 {
   namespace
   {
+    // 计算三维点到折线路径的最近点（逐段投影取最小距离），
+    // 供整条轨迹安全校验中计算走廊偏离度使用。
     Eigen::Vector3d nearestPointOnPath(const Eigen::Vector3d &point,
                                        const std::vector<Eigen::Vector3d> &path)
     {
@@ -34,6 +51,7 @@ namespace scan_planner
       return nearest;
     }
 
+    // 路径投影结果：记录最近投影点所在的线段索引、投影点坐标与距离平方。
     struct PathProjection
     {
       size_t segment_index{0};
@@ -41,6 +59,8 @@ namespace scan_planner
       double distance_sq{std::numeric_limits<double>::max()};
     };
 
+    // 将点投影到路径上，从 first_segment 线段开始向后搜索（支持增量搜索，
+    // 避免每次从 0 号线段全量扫描），返回最近的投影结果。
     PathProjection projectOnPath(const Eigen::Vector3d &point,
                                  const std::vector<Eigen::Vector3d> &path,
                                  size_t first_segment)
@@ -68,6 +88,8 @@ namespace scan_planner
       return result;
     }
 
+    // 截取走廊子段：以起点、目标点在走廊上的投影为界，取出中间这一段
+    // 折线路径，作为本次局部重规划的局部走廊（PCT 走廊约束的输入）。
     std::vector<Eigen::Vector3d> extractPathSegment(
         const std::vector<Eigen::Vector3d> &path, const Eigen::Vector3d &start,
         const Eigen::Vector3d &target)
@@ -87,6 +109,8 @@ namespace scan_planner
       return segment;
     }
 
+    // 把走廊路径的 Z 值按弧长比例映射到给定点列上（首尾强制为 start_z/
+    // target_z），使局部轨迹高度与 PCT 走廊的 Z 参考保持一致。
     void applyPathZReference(std::vector<Eigen::Vector3d> &points,
                              const std::vector<Eigen::Vector3d> &path,
                              double start_z, double target_z)
@@ -131,6 +155,8 @@ namespace scan_planner
 
   SCANPlannerManager::~SCANPlannerManager() { std::cout << "des manager" << std::endl; }
 
+  // 初始化各规划子模块：读取规划参数（速度/加速度/控制点间距/走廊最大偏离等）、
+  // 创建栅格地图、B 样条优化器与 A* 初始化，并绑定可视化对象。
   void SCANPlannerManager::initPlanModules(rclcpp::Node *node, PlanningVisualization::Ptr vis)
   {
     node_ = node;
@@ -166,6 +192,13 @@ namespace scan_planner
 
   // SECTION rebond replanning
 
+  // 核心重规划流水线（与头文件声明对应）。流程：
+  //   STEP 1 INIT：生成初始路径点集（首次/指定时用多项式轨迹，否则沿用
+  //                上一段轨迹重采样），参数化得到 B 样条控制点；
+  //   STEP 2 OPTIMIZE：调用优化器在 PCT 走廊约束下优化控制点；
+  //   STEP 3 REFINE：动态可行性检查失败时按比例重分配时间并再次优化；
+  //   最终通过动态可行性 + 整条轨迹安全校验（碰撞/走廊偏离）后写入 local_data_。
+  // 连续失败会累计 continuous_failures_count_（用于随机扰动幅度衰减）。
   bool SCANPlannerManager::reboundReplan(Eigen::Vector3d start_pt, Eigen::Vector3d start_vel,
                                         Eigen::Vector3d start_acc, Eigen::Vector3d local_target_pt,
                                         Eigen::Vector3d local_target_vel, bool flag_polyInit,
@@ -337,6 +370,9 @@ namespace scan_planner
       }
     } while (flag_regenerate);
 
+    // 点睛：从全局走廊中截取起点到局部目标之间的子段作为局部走廊，
+    // 并施加 Z 参考；走廊约束（corridor_max_deviation_）在优化器与
+    // 整条轨迹安全校验中被共用。
     const std::vector<Eigen::Vector3d> local_corridor =
         extractPathSegment(corridor_path, start_pt, local_target_pt);
     applyPathZReference(point_set, local_corridor, start_pt(2), local_target_pt(2));
@@ -407,6 +443,8 @@ namespace scan_planner
     return true;
   }
 
+  // 紧急停车：把全部控制点压到 stop_pos 处（零速 B 样条），立即刷新
+  // local_data_ 使轨迹变为原地停住。
   bool SCANPlannerManager::EmergencyStop(Eigen::Vector3d stop_pos)
   {
     Eigen::MatrixXd control_points(3, 6);
@@ -420,6 +458,9 @@ namespace scan_planner
     return true;
   }
 
+  // 全局轨迹规划（waypoint 模式）：把起点与各航点连成折线，距离过大的
+  // 航段自动插值细分，用最小 snap 多项式生成全局参考轨迹并写入 global_data_
+  // （终点不约束位置，只约束速度/加速度）。
   bool SCANPlannerManager::planGlobalTrajWaypoints(const Eigen::Vector3d &start_pos, const Eigen::Vector3d &start_vel, const Eigen::Vector3d &start_acc,
                                                   const std::vector<Eigen::Vector3d> &waypoints, const Eigen::Vector3d &end_vel, const Eigen::Vector3d &end_acc)
   {
@@ -502,6 +543,8 @@ namespace scan_planner
     return true;
   }
 
+  // 全局轨迹规划（单目标模式）：起点到终点的最小 snap 全局参考轨迹
+  // （planGlobalTrajWaypoints 的单点特例）。
   bool SCANPlannerManager::planGlobalTraj(const Eigen::Vector3d &start_pos, const Eigen::Vector3d &start_vel, const Eigen::Vector3d &start_acc,
                                          const Eigen::Vector3d &end_pos, const Eigen::Vector3d &end_vel, const Eigen::Vector3d &end_acc)
   {
@@ -566,6 +609,8 @@ namespace scan_planner
     return true;
   }
 
+  // 轨迹细化：按 ratio 重分配时间（reparamBspline）后，以重采样点作为
+  // 参考点再次调用优化器细化，返回最终最优控制点。
   bool SCANPlannerManager::refineTrajAlgo(UniformBspline &traj, vector<Eigen::Vector3d> &start_end_derivative, double ratio, double &ts, Eigen::MatrixXd &optimal_control_points)
   {
     double t_inc;
@@ -587,6 +632,8 @@ namespace scan_planner
     return success;
   }
 
+  // 刷新局部轨迹数据：写入位置/速度/加速度 B 样条、起点与时长，轨迹编号 +1；
+  // 是 local_data_ 的唯一写入入口（供可视化与闭环控制读取）。
   void SCANPlannerManager::updateTrajInfo(const UniformBspline &position_traj, const rclcpp::Time time_now)
   {
     local_data_.start_time_ = time_now;
@@ -598,6 +645,8 @@ namespace scan_planner
     local_data_.traj_id_ += 1;
   }
 
+  // 动态可行性检查：按采样步长遍历整条轨迹，任何时刻速度/加速度模长
+  // 超过（物理限制 + 容差）即告失败。
   bool SCANPlannerManager::checkDynamicFeasibility(UniformBspline position_traj)
   {
     UniformBspline vel_traj = position_traj.getDerivative();
@@ -632,6 +681,9 @@ namespace scan_planner
     return true;
   }
 
+  // 整条轨迹安全校验（重点，最近新增逻辑）：按分辨率自适应步长密集采样
+  // 整条轨迹，逐点用带偏航的膨胀占据查询检测碰撞；若传入 PCT 走廊路径，
+  // 还校验轨迹点到走廊最近点的偏离不超过 corridor_max_deviation_。
   bool SCANPlannerManager::checkFullTrajectorySafety(
       UniformBspline position_traj,
       const std::vector<Eigen::Vector3d> &corridor_path)
@@ -678,6 +730,8 @@ namespace scan_planner
     return true;
   }
 
+  // B 样条重参数化：将轨迹时间整体缩放 ratio 倍，按新时间步长重采样
+  // 点集并重新参数化为 B 样条，返回新控制点、时间步长与时间增量。
   void SCANPlannerManager::reparamBspline(UniformBspline &bspline, vector<Eigen::Vector3d> &start_end_derivative, double ratio,
                                          Eigen::MatrixXd &ctrl_pts, double &dt, double &time_inc)
   {

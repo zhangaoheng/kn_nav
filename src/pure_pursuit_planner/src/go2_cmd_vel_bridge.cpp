@@ -1,3 +1,19 @@
+// ============================================================================
+// 文件名：go2_cmd_vel_bridge.cpp
+// 用途：Go2 底盘命令桥节点。订阅纯追踪输出的 /cmd_vel，经 Go2SafetyController
+//       安全校验/限幅/平滑后，通过 Unitree SDK（SportClient）网络协议
+//       下发给宇树 Go2 底盘，并对外提供使能服务与状态话题。
+// 结构：
+//   - UnitreeSportCommandClient：SportCommandInterface 的 SDK 适配实现；
+//   - Go2CmdVelBridge（rclcpp::Node）：话题/服务接线与控制定时器；
+//   - 内部持有 Go2SafetyController 完成全部安全逻辑。
+// 话题/服务：
+//   订阅 /cmd_vel、/Odometry_open3d；Unitree DDS 订阅 rt/sportmodestate；
+//   发布 /go2_cmd_vel_bridge/armed 与 /safe_cmd_vel；
+//   服务 /go2_cmd_vel_bridge/enable（SetBool）控制使能。
+// 依赖：unitree SDK、go2_safety_controller.hpp
+// ============================================================================
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -26,6 +42,8 @@ namespace pure_pursuit_planner
 namespace
 {
 
+// Unitree SDK 适配层：封装 SportClient（Move/StopMove），隔离第三方依赖
+
 class UnitreeSportCommandClient final : public SportCommandInterface
 {
 public:
@@ -49,6 +67,8 @@ private:
   unitree::robot::go2::SportClient client_;
 };
 
+// 校验里程计消息位姿各分量均为有限值，避免 NaN 破坏安全心跳
+
 bool finiteOdometry(const nav_msgs::msg::Odometry & message)
 {
   const auto & position = message.pose.pose.position;
@@ -61,9 +81,15 @@ bool finiteOdometry(const nav_msgs::msg::Odometry & message)
 
 }  // namespace
 
+// 命令桥节点：ROS 与 Unitree 网络之间的转发与安全闸门。
+// 线程模型：所有对 safety_controller_ 的访问都经 controller_mutex_ 互斥
+
 class Go2CmdVelBridge : public rclcpp::Node
 {
 public:
+  // 构造函数：读取并校验参数 → 初始化 Unitree 通道与 SDK 客户端 →
+  // 构建安全控制器 → 创建话题/服务/定时器 → 初始状态为未使能
+
   Go2CmdVelBridge()
   : Node("go2_cmd_vel_bridge")
   {
@@ -151,6 +177,8 @@ public:
       network_interface.c_str(), sport_state_topic.c_str());
   }
 
+  // 析构：先关闭 sport 状态订阅，再持锁关闭安全控制器（发停车）
+
   ~Go2CmdVelBridge() override
   {
     sport_state_subscription_.reset();
@@ -164,6 +192,8 @@ private:
   using SportStateSubscriber =
     unitree::robot::ChannelSubscriber<unitree_go::msg::dds_::SportModeState_>;
 
+  // 参数声明辅助：要求有限且 > 0，否则抛异常
+
   double declarePositiveParameter(const std::string & name, double default_value)
   {
     const double value = declare_parameter<double>(name, default_value);
@@ -173,6 +203,8 @@ private:
     return value;
   }
 
+  // 参数声明辅助：要求有限且 ≥ 0，否则抛异常
+
   double declareNonNegativeParameter(const std::string & name, double default_value)
   {
     const double value = declare_parameter<double>(name, default_value);
@@ -181,6 +213,9 @@ private:
     }
     return value;
   }
+
+  // /cmd_vel 回调：交给安全控制器校验/限幅；使能状态变化时发布 armed，
+  // 并发布经安全处理后的指令（/safe_cmd_vel）
 
   void commandCallback(const geometry_msgs::msg::Twist::SharedPtr message)
   {
@@ -205,6 +240,8 @@ private:
     publishSafeCommand(command);
   }
 
+  // 里程计回调：仅用于刷新安全控制器的心跳（不做位姿运算）
+
   void odometryCallback(const nav_msgs::msg::Odometry::SharedPtr message)
   {
     if (!finiteOdometry(*message)) {
@@ -217,6 +254,8 @@ private:
     safety_controller_->updateOdometryHeartbeat(std::chrono::steady_clock::now());
   }
 
+  // Unitree sport 状态（DDS 回调）：刷新 sport 状态心跳，供使能与超时判定
+
   void sportStateCallback(const void * message)
   {
     if (message == nullptr) {
@@ -227,6 +266,8 @@ private:
       safety_controller_->updateSportStateHeartbeat(std::chrono::steady_clock::now());
     }
   }
+
+  // 使能服务：true→安全使能（要求心跳新鲜），false→停用并发停车；结果回写响应
 
   void enableCallback(
     const std_srvs::srv::SetBool::Request::SharedPtr request,
@@ -255,6 +296,9 @@ private:
     }
   }
 
+  // 周期控制（默认 20Hz）：推进安全控制器 tick（超时检查+平滑发送），
+  // 同步 /armed 与 /safe_cmd_vel 话题
+
   void controlTick()
   {
     bool was_armed = false;
@@ -279,12 +323,16 @@ private:
     }
   }
 
+  // 发布使能状态（transient_local，便于晚到订阅者获取当前状态）
+
   void publishArmed(bool armed)
   {
     std_msgs::msg::Bool message;
     message.data = armed;
     armed_publisher_->publish(message);
   }
+
+  // 把安全输出转成 Twist 发布到 /safe_cmd_vel（监控用）
 
   void publishSafeCommand(const Go2VelocityCommand & command)
   {
@@ -309,6 +357,8 @@ private:
 };
 
 }  // namespace pure_pursuit_planner
+
+// 可执行入口：异常时打印致命日志并返回非零
 
 int main(int argc, char ** argv)
 {

@@ -1,3 +1,12 @@
+// ============================================================================
+// 文件名：test_pp_component.cpp
+// 用途：DWA（Dynamic Window Approach）组件的 gtest 单元测试。
+// 注意：本文件虽位于 pure_pursuit_planner 包内，但测试对象是 dwa_planner
+//       的 DWA 算法（继承自旧工程），与纯追踪组件无关；
+//       且未列入 CMakeLists.txt 的测试目标，仅作历史存档。
+// 结构：一组 TEST 用例覆盖无障碍/全障碍/空评价表/距离评估/归一化/近障碍等分支。
+// ============================================================================
+
 #include <gtest/gtest.h>
 #include "dwa_planner/dwa_planner_component.hpp"
 
@@ -6,6 +15,8 @@ using namespace dwa_planner;
 //---------------------------------------------
 // テスト1: DynamicWindowApproach 基本テスト
 //---------------------------------------------
+// 测试模式说明：以固定输入调用 DWA::DynamicWindowApproach 并断言输出
+
 TEST(TestDWAComponent, BasicNoObstacles)
 {
   std::array<double, 5> x = {0.0, 0.0, 0.0, 0.0, 0.0};

@@ -1,3 +1,14 @@
+// ============================================================================
+// 文件名：polynomial_traj.h
+// 用途：分段多项式轨迹（minimum-snap 轨迹）的数据结构与求值类头文件。
+//       以分段系数（x/y/z 三轴）与每段时间表示轨迹，提供位置/速度/加速度
+//       求值、轨迹采样、长度/成本/极值统计，以及最小 snap 轨迹生成。
+// 结构：
+//   - PolynomialTraj：分段多项式轨迹类
+//   - minSnapTraj / one_segment_traj_gen：静态轨迹生成接口
+// 注意：轨迹系数按“次数从高到低”存储；evaluate 系列按段内相对时间求值。
+// 依赖：Eigen
+// ============================================================================
 #ifndef _POLYNOMIAL_TRAJ_H
 #define _POLYNOMIAL_TRAJ_H
 
@@ -6,6 +17,8 @@
 
 using std::vector;
 
+  // 分段多项式轨迹类：times 记录每段时长，cxs/cys/czs 记录各段三轴系数
+  // （从最高次到常数项）。支持任意分段数与次数，由 minSnapTraj 等生成。
 class PolynomialTraj
 {
 private:
@@ -29,17 +42,20 @@ public:
   {
   }
 
+    // 清空全部段数据与统计量。
   void reset()
   {
     times.clear(), cxs.clear(), cys.clear(), czs.clear();
     time_sum = 0.0, num_seg = 0;
   }
 
+    // 追加一段轨迹（三轴系数 + 段时长）。
   void addSegment(vector<double> cx, vector<double> cy, vector<double> cz, double t)
   {
     cxs.push_back(cx), cys.push_back(cy), czs.push_back(cz), times.push_back(t);
   }
 
+    // 初始化统计量：段数与总时长由已添加的段计算。
   void init()
   {
     num_seg = times.size();
@@ -55,6 +71,7 @@ public:
     return times;
   }
 
+    // 取某轴（0/1/2 -> x/y/z）的全部段系数。
   vector<vector<double>> getCoef(int axis)
   {
     switch (axis)
@@ -73,6 +90,7 @@ public:
     return empty;
   }
 
+    // 求 t 时刻位置：先定位所在段（累积时间偏移），再按段内时间多项式求值。
   Eigen::Vector3d evaluate(double t)
   {
     /* detetrmine segment num */
@@ -97,6 +115,7 @@ public:
     return pt;
   }
 
+    // 求 t 时刻速度：对位置系数求一次导后求值。
   Eigen::Vector3d evaluateVel(double t)
   {
     /* detetrmine segment num */
@@ -128,6 +147,7 @@ public:
     return vel;
   }
 
+    // 求 t 时刻加速度：对位置系数求二次导后求值。
   Eigen::Vector3d evaluateAcc(double t)
   {
     /* detetrmine segment num */
@@ -165,6 +185,7 @@ public:
     return this->time_sum;
   }
 
+    // 以 0.01s 步长采样整条轨迹，返回离散点序列（须按时间顺序调用）。
   vector<Eigen::Vector3d> getTraj()
   {
     double eval_t = 0.0;
@@ -178,6 +199,7 @@ public:
     return traj_vec3d;
   }
 
+    // 按采样点折线累加估算轨迹总长度。
   double getLength()
   {
     length = 0.0;
@@ -192,11 +214,13 @@ public:
     return length;
   }
 
+    // 平均速度（总长 / 总时）。
   double getMeanVel()
   {
     double mean_vel = length / time_sum;
   }
 
+    // 加速度代价：各段常加速度项的平方和乘段时长（近似最小加加速度指标）。
   double getAccCost()
   {
     double cost = 0.0;
@@ -212,6 +236,7 @@ public:
     return cost;
   }
 
+    // 加加速度（jerk）代价：各段 jerk 二次型求和。
   double getJerk()
   {
     double jerk = 0.0;
@@ -246,6 +271,7 @@ public:
     return jerk;
   }
 
+    // 统计平均/最大速度（逐段按 0.01s 采样）。
   void getMeanAndMaxVel(double &mean_v, double &max_v)
   {
     int num = 0;
@@ -285,6 +311,7 @@ public:
     mean_v = mean_v / double(num);
   }
 
+    // 统计平均/最大加速度（逐段按 0.01s 采样）。
   void getMeanAndMaxAcc(double &mean_a, double &max_a)
   {
     int num = 0;
@@ -324,10 +351,14 @@ public:
     mean_a = mean_a / double(num);
   }
 
+  // 最小 snap 轨迹生成（静态）：给定途经点、起终点速度/加速度与各段时间，
+  // 构造并求解 minimum-snap 二次规划，返回分段多项式轨迹。
   static PolynomialTraj minSnapTraj(const Eigen::MatrixXd &Pos, const Eigen::Vector3d &start_vel,
                                     const Eigen::Vector3d &end_vel, const Eigen::Vector3d &start_acc,
                                     const Eigen::Vector3d &end_acc, const Eigen::VectorXd &Time);
 
+  // 单段轨迹生成（静态）：给定起终点位置/速度/加速度与时长 t，
+  // 生成一段（默认 5 阶）多项式轨迹。
   static PolynomialTraj one_segment_traj_gen(const Eigen::Vector3d &start_pt, const Eigen::Vector3d &start_vel, const Eigen::Vector3d &start_acc,
                                              const Eigen::Vector3d &end_pt, const Eigen::Vector3d &end_vel, const Eigen::Vector3d &end_acc,
                                              double t);

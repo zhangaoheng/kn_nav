@@ -23,6 +23,9 @@ from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
 
+# 启动入口：拉起 pure_pursuit_node（读 pct_params.yaml）与 go2_cmd_vel_bridge
+# （读 go2_bridge_params.yaml，network_interface 由命令行参数覆盖）
+
 def generate_launch_description():
     pkg_dir = get_package_share_directory('pure_pursuit_planner')
     config_path = os.path.join(pkg_dir, 'config', 'pct_params.yaml')
@@ -34,6 +37,8 @@ def generate_launch_description():
         description='Network interface connected to the Go2, e.g. eth0',
     )
 
+    # PCT 全局路径直接跟踪节点：/pct_path → /cmd_vel
+
     pure_pursuit_node = Node(
         package='pure_pursuit_planner',
         executable='pure_pursuit_planner',
@@ -41,6 +46,8 @@ def generate_launch_description():
         output='screen',
         parameters=[config_path],
     )
+
+    # Go2 底盘命令桥：/cmd_vel → Unitree SDK（安全使能/限幅后下发）
 
     go2_bridge_node = Node(
         package='pure_pursuit_planner',

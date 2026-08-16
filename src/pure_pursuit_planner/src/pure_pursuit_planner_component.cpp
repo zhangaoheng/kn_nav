@@ -1,3 +1,16 @@
+// ============================================================================
+// 文件名：pure_pursuit_planner_component.cpp
+// 用途：PurePursuitComponent 纯追踪算法的实现。
+// 结构：
+//   - setPath/setPose：装载路径与位姿（同时触发最近点搜索初始化）；
+//   - computeVelocity：主入口，编排终段对准/原地转向/前视追踪；
+//   - searchTargetIndex：最近点 + 前视点搜索；
+//   - 其余为限速、角度归一化、转向律等可单测的辅助函数。
+// 关键逻辑：Lf = k*v + Lfc；w = v*sin(alpha)/Lf；曲率越大速度越低；
+//           路径方向偏差过大时先原地转向（rotating_to_path_ 状态机）。
+// 依赖：无 ROS，仅标准库；被 node 与测试复用。
+// ============================================================================
+
 // Directory: pure_pursuit_planner/src/pure_pursuit_component.cpp
 #include "pure_pursuit_planner/pure_pursuit_planner_component.hpp"
 #include <cmath>
@@ -7,8 +20,12 @@
 
 namespace pure_pursuit_planner {
 
+// 构造函数：保存算法参数配置
+
 PurePursuitComponent::PurePursuitComponent(const PurePursuitConfig& config)
 : cfg_(config) {}
+
+// 装载路径数组；首次装载时置 odom_sub_flag 并复位最近点索引（触发全路径搜索）
 
 void PurePursuitComponent::setPath(const std::vector<double>& cx,
                                     const std::vector<double>& cy,
@@ -25,10 +42,18 @@ void PurePursuitComponent::setPath(const std::vector<double>& cx,
     }
 }
 
+// 更新当前位姿与速度
+
 void PurePursuitComponent::setPose(const Pose2D& pose, double velocity) {
     current_pose_ = pose;
     current_velocity_ = velocity;
 }
+
+// 主入口：返回 {v, w}。流程——
+//   1) 终段对准（final_approach 且距终点近）：原地转至目标朝向；
+//   2) 独立完成判定（可选）：到位即停；
+//   3) 目标点偏差过大 → 原地转向对准（rotating_to_path_ 状态机）；
+//   4) 常规纯追踪：前视点 + 曲率限速 + 转向律
 
 std::vector<double> PurePursuitComponent::computeVelocity(
     const std::vector<double>& cx,
@@ -117,6 +142,8 @@ std::vector<double> PurePursuitComponent::computeVelocity(
     return cmd_velocity;
 }
 
+// 角度偏差归一化到 [-π, π]；π 附近（朝向反转点）加 0.15 补偿避免抖动
+
 double PurePursuitComponent::alphaExceptionHandling(double tempAlpha) const {
     // 角度を -π〜π の範囲に正規化
     tempAlpha = std::fmod(tempAlpha + M_PI, 2 * M_PI);
@@ -134,15 +161,21 @@ double PurePursuitComponent::alphaExceptionHandling(double tempAlpha) const {
 }
 
 
+// 纯追踪转向律：w = v * sin(alpha) / Lf
+
 double PurePursuitComponent::calculateAngularVelocity(double v, double alpha, double Lf) const {
     return v * std::sin(alpha) / Lf;
 }
 
 
+// 角度归一化到 [-π, π]
+
 double PurePursuitComponent::normalizeAngle(double angle) const {
     return std::atan2(std::sin(angle), std::cos(angle));
 }
 
+
+// 原地转向角速度：比例增益 + 最大角速度限幅
 
 double PurePursuitComponent::calculateRotationAngularVelocity(double yaw_error) const {
     return std::clamp(
@@ -150,6 +183,8 @@ double PurePursuitComponent::calculateRotationAngularVelocity(double yaw_error) 
         -cfg_.maxAngularVelocity,
         cfg_.maxAngularVelocity);
 }
+
+// 终段朝向对准角速度：比例输出但保证最小角速度（避免末端“爬行”），再限幅
 
 double PurePursuitComponent::calculateFinalRotationAngularVelocity(double yaw_error) const {
     double command = calculateRotationAngularVelocity(yaw_error);
@@ -165,17 +200,25 @@ double PurePursuitComponent::calculateFinalRotationAngularVelocity(double yaw_er
 }
 
 
+// 曲率→目标速度：曲率大（急弯）减速，直道接近 maxVelocity
+
 double PurePursuitComponent::curvatureToVelocity(double curvature) const {
     return (cfg_.maxVelocity- cfg_.minVelocity) * pow(sin(acos(std::cbrt(curvature))), 3) + cfg_.minVelocity;
 }
+
+// 目标到达判定：当前实现仅透传 v/w（停车决策已上移），保留接口兼容
 
 std::pair<double, double> PurePursuitComponent::isGoalReached(double v, double w) const {
     return {v, w};
 }
 
+// 前视距离：Lf = k * v + Lfc（速度越快，注视点越远）
+
 double PurePursuitComponent::calcLf(double k, double current_velocity, double Lfc) const {
     return k * current_velocity + Lfc;
 }
+
+// 首次搜索：遍历整条路径找最近点（仅在 oldNearestPointIndex == -1 时调用）
 
 int PurePursuitComponent::calcFirstNearestPointIndex() const {
     if (cx_.empty() || cx_.size() != cy_.size()) {
@@ -192,6 +235,9 @@ int PurePursuitComponent::calcFirstNearestPointIndex() const {
     }
     return min_index;
 }
+
+// 增量搜索：在上一最近点 ±20 邻域内寻找“距离先降后升”的拐点，
+// 并限制索引前移量 < 100，兼顾效率与防止跳变
 
 int PurePursuitComponent::calcOldNearestPointIndex() const {
     if (cx_.empty() || cx_.size() != cy_.size()) {
@@ -242,6 +288,9 @@ int PurePursuitComponent::calcOldNearestPointIndex() const {
     return min_index;
 }
 
+// 前视点搜索：先确定最近点（首帧全搜索，之后窗口搜索），
+// 再从最近点沿路径前进直到距离 ≥ Lf，返回 {索引, Lf}
+
 std::pair<int, double> PurePursuitComponent::searchTargetIndex() {
     if (odom_sub_flag && !cx_.empty() && cx_.size() == cy_.size()){
         double Lf = calcLf(cfg_.k, current_velocity_, cfg_.Lfc);
@@ -279,6 +328,8 @@ std::pair<int, double> PurePursuitComponent::searchTargetIndex() {
         return {-1, 0.0};
     }
 }
+
+// 两点欧氏距离（hypot）
 
 double PurePursuitComponent::calcDistance(double x1, double y1, double x2, double y2) const {
     return std::hypot(x2 - x1, y2 - y1);

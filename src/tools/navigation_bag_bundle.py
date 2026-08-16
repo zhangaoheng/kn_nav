@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 """Snapshot navigation configuration and immutable map inputs into a rosbag."""
 
+# ============================================================
+# 文件：navigation_bag_bundle.py —— 导航复现包打包工具。
+# 用途：把导航配置文件与不可变的地图输入（PCD 定位图、tomogram 体素图、
+#       IMU 标定文件）快照进 rosbag 目录的 repro/ 子目录：原样保留
+#       navigation.recorded.yaml，同时生成回放版 navigation.replay.yaml
+#       （use_sim_time=True、关闭 GO2 桥），并写出 manifest.json 记录
+#       每个文件的来源、落点、大小与 SHA256，保证导航任务可完整复现。
+# 结构：file_sha256 / copy_input 工具 -> main（解析配置 -> 复制地图与
+#       标定文件 -> 改写回放配置 -> 写 manifest）。
+# 用法：python3 navigation_bag_bundle.py <navigation.yaml> <bag_directory>
+# ============================================================
 import argparse
 import hashlib
 import json
@@ -11,6 +22,7 @@ from pathlib import Path
 import yaml
 
 
+# 分块计算文件 SHA256，用于判断目标文件是否已是最新、避免重复拷贝。
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -19,6 +31,8 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+# 拷贝一个导航输入文件到快照目录：内容未变（SHA256 相同）则跳过，
+# 并把来源/落点/大小/哈希记入 manifest 清单；源文件不存在时抛错。
 def copy_input(source_text: str, destination: Path, manifest: list) -> str:
     source = Path(source_text).expanduser().resolve()
     if not source.is_file():
@@ -37,6 +51,10 @@ def copy_input(source_text: str, destination: Path, manifest: list) -> str:
     return str(destination)
 
 
+# 主流程：读取导航配置 -> 对每个地图 profile 把 pcd_path/tomo_path 拷入
+# repro/maps/<安全名>/（并改写为回放路径）-> 拷贝 IMU 标定文件 ->
+# 写出 recorded/replay 两份 YAML（回放版置 use_sim_time、关 GO2 桥，
+# 并把初始地图的定位图/体素图路径指向快照文件）-> 汇总 manifest.json。
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("config", type=Path)

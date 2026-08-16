@@ -1,3 +1,10 @@
+// ============================================================================
+// 文件名: osqp_sparse_matrix.h
+// 用途:   Eigen 稀疏/稠密矩阵与 OSQP CSC 稀疏格式 (csc 结构) 之间的转换工具,
+//         是 osqp_interface 的数据准备层, 均为内联模板函数。
+// 结构:   CreateOsqpSparseMatrix (Eigen 稀疏 -> csc) +
+//         DenseToCSCMatrix (稠密矩阵 -> CSC 三元组向量)
+// ============================================================================
 #pragma once
 
 // #include <glog/logging.h>
@@ -7,6 +14,9 @@
 
 namespace common {
 
+// 将 Eigen 稀疏矩阵转为 OSQP 的 csc 结构: 统一拷贝为列主序 (CSC) 后
+// 逐列填充行号数组 i、数值数组 x 与列指针数组 p;
+// 调用前 osqpSparseMatrix 必须为 nullptr, 否则返回 false。
 template <typename Derived>
 bool CreateOsqpSparseMatrix(
     const Eigen::SparseCompressedBase<Derived>& eigenSparseMatrix,
@@ -67,6 +77,8 @@ bool CreateOsqpSparseMatrix(
   return true;
 }
 
+// 稠密矩阵转 CSC 三元组表示: 忽略绝对值小于 epsilon 的近似零元素,
+// 输出 data/indices/indptr 三个向量供 OSQP 使用。
 template <typename T, int M, int N, typename D>
 void DenseToCSCMatrix(const Eigen::Matrix<T, M, N>& dense_matrix,
                       std::vector<T>* data, std::vector<D>* indices,

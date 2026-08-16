@@ -1,3 +1,12 @@
+// ============================================================================
+// 文件：common_lib.h
+// 用途：FAST-LIO 公共类型与工具库：集中定义 EKF 状态/测量数据结构、关键常量宏、
+//       位姿打包与平面拟合等通用函数，供激光里程计各模块复用。
+// 结构：常量与宏定义、MeasureGroup（一帧测量包）、StatesGroup（ESKF 状态及其流形运算）、
+//       工具函数（set_pose6d / esti_normvector / esti_plane / 时间转换）。
+// 依赖：so3_math.h（Exp/Log）、Eigen、PCL、fast_lio 自定义消息（Pose6D）。
+// 说明：上游开源算法（FAST-LIO，HKUST），工作区内作为里程计前端使用。
+// ============================================================================
 #ifndef COMMON_LIB_H
 #define COMMON_LIB_H
 
@@ -16,6 +25,7 @@ using namespace Eigen;
 
 #define PI_M (3.14159265358)
 #define G_m_s2 (9.81)         // Gravaty const in GuangDong/China
+// 状态维数 18：旋转(3)+位置(3)+速度(3)+陀螺零偏(3)+加计零偏(3)+重力(3)；过程噪声维数 12
 #define DIM_STATE (18)        // Dimension of states (Let Dim(SO(3)) = 3)
 #define DIM_PROC_N (12)       // Dimension of process noise (Let Dim(SO(3)) = 3)
 #define CUBE_LEN  (6.0)
@@ -31,6 +41,7 @@ using namespace Eigen;
 #define STD_VEC_FROM_EIGEN(mat)  vector<decltype(mat)::Scalar> (mat.data(), mat.data() + mat.rows() * mat.cols())
 #define DEBUG_FILE_DIR(name)     (string(string(ROOT_DIR) + "Log/"+ name))
 
+// 类型别名：Pose6D 为自定义位姿消息；PointType 为带法向量的 PCL 点类型（PointXYZINormal）
 typedef fast_lio::msg::Pose6D Pose6D;
 typedef pcl::PointXYZINormal PointType;
 typedef pcl::PointCloud<PointType> PointCloudXYZI;
@@ -50,6 +61,8 @@ M3F Eye3f(M3F::Identity());
 V3D Zero3d(0, 0, 0);
 V3F Zero3f(0, 0, 0);
 
+// 一帧测量数据组：由 sync_packages() 按时间对齐打包，
+// 包含当前帧点云（lidar）与时间上覆盖该帧的 IMU 消息队列（imu）
 struct MeasureGroup     // Lidar data and imu dates for the curent process
 {
     MeasureGroup()
@@ -63,6 +76,8 @@ struct MeasureGroup     // Lidar data and imu dates for the curent process
     deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu;
 };
 
+// ESKF 误差状态：旋转/位置/速度/陀螺零偏/加计零偏/重力 + 状态协方差；
+// 重载 + - += 使状态可在流形上做增量更新（旋转用 Exp/Log，其余为向量加减）
 struct StatesGroup
 {
     StatesGroup() {
@@ -164,6 +179,7 @@ T deg2rad(T degrees)
 }
 
 template<typename T>
+// 把某一时刻的状态（加速度/角速度/速度/位置/旋转矩阵）打包为 Pose6D 消息
 auto set_pose6d(const double t, const Matrix<T, 3, 1> &a, const Matrix<T, 3, 1> &g, \
                 const Matrix<T, 3, 1> &v, const Matrix<T, 3, 1> &p, const Matrix<T, 3, 3> &R)
 {
@@ -180,6 +196,7 @@ auto set_pose6d(const double t, const Matrix<T, 3, 1> &a, const Matrix<T, 3, 1> 
     return move(rot_kp);
 }
 
+// 由 N 个邻近点最小二乘拟合平面（平面方程见下），返回归一化法向量；残差超阈值返回 false
 /* comment
 plane equation: Ax + By + Cz + D = 0
 convert to: A/D*x + B/D*y + C/D*z = -1
@@ -215,12 +232,14 @@ bool esti_normvector(Matrix<T, 3, 1> &normvec, const PointVector &point, const T
     return true;
 }
 
+// 两点欧氏距离平方（ikd-Tree 近邻判距与体素去重用）
 float calc_dist(PointType p1, PointType p2){
     float d = (p1.x - p2.x) * (p1.x - p2.x) + (p1.y - p2.y) * (p1.y - p2.y) + (p1.z - p2.z) * (p1.z - p2.z);
     return d;
 }
 
 template<typename T>
+// 由 NUM_MATCH_POINTS 个邻近点拟合平面，输出归一化平面参数 (nx, ny, nz, d)
 bool esti_plane(Matrix<T, 4, 1> &pca_result, const PointVector &point, const T &threshold)
 {
     Matrix<T, NUM_MATCH_POINTS, 3> A;
@@ -254,11 +273,13 @@ bool esti_plane(Matrix<T, 4, 1> &pca_result, const PointVector &point, const T &
     return true;
 }
 
+// 时间工具：ROS2 Time -> 秒
 double get_time_sec(const builtin_interfaces::msg::Time &time)
 {
     return rclcpp::Time(time).seconds();
 }
 
+// 时间工具：double 秒 -> ROS2 Time
 rclcpp::Time get_ros_time(double timestamp)
 {
     int32_t sec = std::floor(timestamp);

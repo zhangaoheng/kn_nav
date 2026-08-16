@@ -14,6 +14,14 @@
  * limitations under the License.
  *****************************************************************************/
 
+// ============================================================================
+// 文件名: spline1d.h
+// 用途:   一维分段多项式样条: 以 x_knots 划分区间, 每个区间用一段
+//         Spline1dSeg 多项式表示, 提供求值及 1~3 阶导数
+// 结构:   Spline1d 类, 内部含 std::vector<Spline1dSeg> 与节点 x_knots_
+// 依赖:   common/smoothing/spline1d_seg.h
+// ============================================================================
+
 #pragma once
 
 #include <Eigen/Core>
@@ -22,6 +30,7 @@
 
 #include "common/smoothing/spline1d_seg.h"
 
+// 一维样条: 由多段 Spline1dSeg 拼接, 通过 FindSegStartIndex 定位查询点所在区间
 namespace common {
 
 class Spline1d {
@@ -34,6 +43,7 @@ class Spline1d {
   double SecondOrderDerivative(const double x) const;
   double ThirdOrderDerivative(const double x) const;
 
+// 用参数矩阵设置各段系数(param_matrix 每行对应一段)
   bool set_splines(const Eigen::MatrixXd& param_matrix, const uint32_t order);
 
   const std::vector<double>& x_knots() const;

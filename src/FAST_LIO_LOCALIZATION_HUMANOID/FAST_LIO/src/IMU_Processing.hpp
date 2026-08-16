@@ -1,3 +1,12 @@
+// ============================================================
+// IMU_Processing.hpp —— FAST-LIO 的 IMU 处理与点云去畸变模块（上游开源算法）
+// 核心职责：
+//   1) IMU 初始化：估计重力方向、陀螺/加计零偏与噪声协方差；
+//   2) 前向传播：用一帧内的 IMU 测量驱动 ESKF 状态预测（数值积分）；
+//   3) 点云去畸变：利用预测轨迹对一帧内各激光点做运动补偿。
+// 状态向量与误差状态卡尔曼滤波(esekf)定义在 use-ikfom.hpp 中。
+// 工作区内作为机器人前端连续里程计的一部分使用。
+// ============================================================
 #include <cmath>
 #include <math.h>
 #include <deque>
@@ -28,6 +37,8 @@
 const bool time_list(PointType &x, PointType &y) {return (x.curvature < y.curvature);};
 
 /// *************IMU Process and undistortion
+// 雷达惯性里程计的 IMU 处理类：缓存一帧内的 IMU 序列，完成初始化、
+// 状态预测与点云去畸变，输出对齐到帧尾坐标系下的去畸变点云。
 class ImuProcess
 {
  public:
@@ -153,6 +164,8 @@ void ImuProcess::set_acc_bias_cov(const V3D &b_a)
   cov_bias_acc = b_a;
 }
 
+// IMU 初始化：统计多帧 IMU 测量的均值与协方差，估计重力方向与陀螺零偏，
+// 设置初始状态与协方差矩阵；需累计 MAX_INI_COUNT 帧后完成初始化。
 void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, int &N)
 {
   /** 1. initializing the gravity, gyro bias, acc and gyro covariance
@@ -210,6 +223,9 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
 
 }
 
+// 点云去畸变：先用帧内 IMU 序列做前向传播得到各时刻位姿预测，
+// 再从帧尾向帧首反向积分，把每个激光点按各自时间戳补偿到帧尾坐标系，
+// 消除一帧扫描期间机器人运动造成的点云畸变。
 void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI &pcl_out)
 {
   /*** add the imu of the last frame-tail to the of current frame-head ***/
@@ -336,6 +352,8 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   }
 }
 
+// IMU 处理对外主入口：需要时先触发 IMU 初始化（多帧累计），
+// 初始化完成后对当前帧点云执行去畸变，结果写入 cur_pcl_un_。
 void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI::Ptr cur_pcl_un_)
 {
   double t1,t2,t3;

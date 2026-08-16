@@ -1,3 +1,17 @@
+// ============================================================================
+// 文件名：pure_pursuit_planner_node.cpp
+// 用途：PurePursuitNode 节点实现——把 PCT 全局路径与里程计接入纯追踪算法，
+//       周期性发布 /cmd_vel（PCT 全局路径直接跟踪，不走 SCAN 局部规划）。
+// 结构：
+//   - 两个静态辅助函数：由路径几何计算切向角 cyaw、离散曲率 ck；
+//   - 构造/参数声明与校验；
+//   - 回调：pathCallback / finalApproachCallback / odomCallback / timerCallback。
+// 数据流：/pct_path → 重建 (cx,cy,cyaw,ck) → planner_.computeVelocity()
+//          → /cmd_vel；里程计超时或计算异常 → 发布零速兜底。
+// 注意：PCT 路径 z 轴存的是高度而非曲率、四元数无朝向信息，
+//       因此 cyaw/ck 均由相邻路径点几何推导（见下方原有注释）。
+// ============================================================================
+
 // Modified for PCT integration:
 //   - Path topic: /pct_path (was tgt_path)
 //   - Odometry topic: /Odometry_open3d (was odom), frame_id=map, child=base_link
@@ -19,6 +33,8 @@
 namespace pure_pursuit_planner {
 
 // ── helper: compute tangent yaw from consecutive points ──────────────────
+// 由相邻路径点计算切向角 cyaw（atan2 相邻点向量）；末点继承前一点朝向
+
 static std::vector<double> compute_yaw_from_path(const std::vector<double>& cx,
                                                   const std::vector<double>& cy) {
     std::vector<double> cyaw(cx.size(), 0.0);
@@ -34,6 +50,8 @@ static std::vector<double> compute_yaw_from_path(const std::vector<double>& cx,
 
 // ── helper: compute discrete curvature from path geometry ────────────────
 // κ_i = Δθ / Δs  where Δθ is turning angle at point i, Δs is avg segment length
+// 由相邻点向量夹角 Δθ 与平均弧长 Δs 估算离散曲率 κ=Δθ/Δs（单位 rad/m）
+
 static std::vector<double> compute_curvature_from_path(const std::vector<double>& cx,
                                                         const std::vector<double>& cy) {
     std::vector<double> ck(cx.size(), 0.0);
@@ -67,6 +85,9 @@ static std::vector<double> compute_curvature_from_path(const std::vector<double>
 }
 
 
+// 构造函数：声明/校验参数后建立话题订阅与发布、100ms 控制定时器，
+// 并以填充后的配置重建 planner_（成员初始化时默认配置会被覆盖）
+
 PurePursuitNode::PurePursuitNode(const rclcpp::NodeOptions& options)
 : Node("pure_pursuit_node", options), planner_(config_) {
 
@@ -97,6 +118,8 @@ PurePursuitNode::PurePursuitNode(const rclcpp::NodeOptions& options)
         odom_topic_.c_str(), config_.odom_timeout,
         config_.standalone_goal_completion ? "true" : "false");
 }
+
+// 声明全部 ROS 参数并做合法性校验；任一参数非法即抛异常，避免带病运行
 
 void PurePursuitNode::declareAndGetParameters() {
     config_.k = this->declare_parameter("k", 0.5);
@@ -189,6 +212,9 @@ void PurePursuitNode::declareAndGetParameters() {
     }
 }
 
+// 路径回调：把 /pct_path 转为纯追踪路径数组（提取 x/y → 切向角 → 曲率 → 保存），
+// 并重置最近点搜索缓存；空路径或含非有限点的路径一律清空并停车
+
 void PurePursuitNode::pathCallback(const nav_msgs::msg::Path::SharedPtr msg) {
     if (msg->poses.empty()) {
         cx_.clear(); cy_.clear(); cyaw_.clear(); ck_.clear();
@@ -272,10 +298,16 @@ void PurePursuitNode::pathCallback(const nav_msgs::msg::Path::SharedPtr msg) {
         cx_.size(), msg->header.frame_id.c_str());
 }
 
+// 终段接近标志回调：上游（PCT 导航状态机）进入终段对准时置位，
+// 之后算法只做原地转向以对准目标朝向
+
 void PurePursuitNode::finalApproachCallback(
     const std_msgs::msg::Bool::SharedPtr msg) {
     final_approach_ = msg->data;
 }
+
+// 里程计回调：读取 map 系位姿（位置+四元数转 yaw）与线速度，
+// 非有限值直接丢弃；更新心跳时间供超时判定
 
 void PurePursuitNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
     // Odometry_open3d: header.frame_id = 'map', child_frame_id = 'base_link'
@@ -313,6 +345,9 @@ void PurePursuitNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
     last_odom_time_ = std::chrono::steady_clock::now();
     odom_timeout_stop_published_ = false;
 }
+
+// 100ms 周期控制：优先处理里程计超时与无路径两种安全情形（发零速），
+// 否则调用纯追踪计算并发布；非法输出同样兜底为零速
 
 void PurePursuitNode::timerCallback() {
     if (!pose_received_) return;
@@ -354,6 +389,8 @@ void PurePursuitNode::timerCallback() {
 
     cmd_vel_pub_->publish(cmd_vel);
 }
+
+// 兜底发布：零速指令（清空 Twist 即为 0），用于超时/异常/空路径停车
 
 void PurePursuitNode::publishZeroVelocity() {
     geometry_msgs::msg::Twist cmd_vel;

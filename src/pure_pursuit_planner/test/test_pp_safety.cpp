@@ -1,3 +1,11 @@
+// ============================================================================
+// 文件名：test_pp_safety.cpp
+// 用途：PurePursuitComponent 安全相关行为的 gtest 测试。
+// 覆盖点：空/长度不匹配路径返回零速、目标在身后时原地转向、
+//         终段朝向对准（含最小角速度）、独立完成判定、isGoalReached 不再强制停车。
+// 结构：匿名命名空间内的多个 TEST 用例，直接构造组件并断言输出。
+// ============================================================================
+
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -45,6 +53,8 @@ TEST(PurePursuitSafety, SearchOnEmptyPathReturnsInvalidIndexSafely)
   EXPECT_EQ(index, -1);
   EXPECT_DOUBLE_EQ(lookahead, 0.0);
 }
+
+// 目标点在身后（偏差超阈值）时先原地旋转对准，再恢复前进
 
 TEST(PurePursuitSafety, RotatesInPlaceWhenPathTargetIsBehind)
 {
@@ -118,6 +128,8 @@ TEST(PurePursuitSafety, StandaloneGoalCompletionStopsAtPathEnd)
   EXPECT_DOUBLE_EQ(command[0], 0.0);
   EXPECT_DOUBLE_EQ(command[1], 0.0);
 }
+
+// 终段朝向对准：输出带最小角速度下限，死区内输出零
 
 TEST(PurePursuitSafety, AlignsFinalYawWithMinimumAngularVelocity)
 {

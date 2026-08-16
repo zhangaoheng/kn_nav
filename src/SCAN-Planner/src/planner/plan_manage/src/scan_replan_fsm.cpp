@@ -1,4 +1,21 @@
 
+// ============================================================================
+// 文件名：scan_replan_fsm.cpp
+// 用途：SCAN 局部规划“重规划状态机”（SCANReplanFSM）的实现文件。以 10ms 定时器
+//       驱动状态机在 INIT / WAIT_TARGET / GEN_NEW_TRAJ / REPLAN_TRAJ / EXEC_TRAJ /
+//       FINAL_YAW_ALIGN / EMERGENCY_STOP 之间迁移，串联目标接收、全局参考轨迹
+//       维护、局部重规划、轨迹发布与碰撞检查；另以 50ms 安全定时器做碰撞检查。
+// 状态转移（核心逻辑）：
+//   INIT --有里程计且触发--> WAIT_TARGET --有目标--> GEN_NEW_TRAJ --成功--> EXEC_TRAJ
+//   EXEC_TRAJ --轨迹近终点/远离参考--> REPLAN_TRAJ --成功--> EXEC_TRAJ
+//   --接近终点--> FINAL_YAW_ALIGN --航向对齐完成--> WAIT_TARGET
+//   --重规划失败过多/碰撞紧急--> EMERGENCY_STOP
+// 数据流：
+//   目标/航点/走廊/里程计话题 --> 回调更新状态 --> execFSMCallback 驱动状态机
+//   --> callReboundReplan 调用规划管理器 --> 发布 B 样条轨迹与状态可视化
+// 依赖：scan_replan_fsm.h（声明）、planner_manager（规划管理器）、
+//       planning_visualization（可视化）、pct_scan_navigation 消息
+// ============================================================================
 #include <plan_manage/scan_replan_fsm.h>
 #include <cmath>
 #include <stdexcept>
@@ -6,6 +23,7 @@
 namespace
 {
   template <typename T>
+  // 参数读取辅助：参数不存在时先声明默认值再读取（简化 ROS2 参数访问）。
   T load_parameter(rclcpp::Node *node, const std::string &name, const T &default_value)
   {
     if (!node->has_parameter(name)) node->declare_parameter<T>(name, default_value);
@@ -16,6 +34,9 @@ namespace
 namespace scan_planner
 {
 
+  // 初始化状态机：重置内部标志、读取 fsm 参数、创建规划管理器与可视化、
+  // 按 navi_mode_ 绑定订阅（手动目标/航点/参考路径），创建执行与安全定时器、
+  // 发布器及重置服务。
   void SCANReplanFSM::init(rclcpp::Node *node)
   {
     node_ = node;
@@ -109,6 +130,8 @@ namespace scan_planner
       throw std::runtime_error("fsm.navi_mode must be 1, 2, or 3");
   }
 
+  // rviz 目标回调：未收到初始位姿前忽略目标；收到后包装为单点 Path 交给
+  // waypointCallback 走统一的航点触发流程（手动目标模式）。
   void SCANReplanFSM::rvizGoalCallback(const geometry_msgs::msg::PoseStamped::ConstSharedPtr &msg)
   {
     if (!msg)
@@ -126,6 +149,8 @@ namespace scan_planner
     waypointCallback(path);
   }
 
+  // 目标触发回调（手动目标/单点）：校验输入后置 trigger_、更新目标航向，
+  // 生成单目标全局轨迹；成功后根据当前状态迁移到 GEN_NEW_TRAJ 或 REPLAN_TRAJ。
   void SCANReplanFSM::waypointCallback(const nav_msgs::msg::Path::ConstSharedPtr &msg)
   {
     if (!msg || msg->poses.empty())
@@ -184,6 +209,8 @@ namespace scan_planner
     }
   }
 
+  // 按航点序列生成全局参考轨迹：可视化各航点与全局路径，调用规划管理器的
+  // planGlobalTrajWaypoints，目标被占据时尝试调整；成功后置 have_target_。
   bool SCANReplanFSM::planGlobalTrajByWaypoints(const std::vector<Eigen::Vector3d> &waypoints)
   {
     if (waypoints.empty())
@@ -233,6 +260,8 @@ namespace scan_planner
     return true;
   }
 
+  // 全局目标占据调整：若全局轨迹终点在膨胀地图中被占据，则沿全局轨迹
+  // 从终点向前回退搜索最近的自由点作为新的 end_pt_，找不到则返回失败。
   bool SCANReplanFSM::adjustGlobalTargetIfOccupied()
   {
     auto map = planner_manager_->grid_map_;
@@ -274,6 +303,8 @@ namespace scan_planner
     return false;
   }
 
+  // 参考路径回调（REFERENCE_PATH 模式）：把收到的初始路径转交给
+  // acceptWaypointPath 统一处理（高度取 body_height_）。
   void SCANReplanFSM::pathCallback(const nav_msgs::msg::Path::ConstSharedPtr &msg)
   {
     if (!msg || msg->poses.empty())
@@ -286,6 +317,8 @@ namespace scan_planner
     acceptWaypointPath(*msg, body_height_, "Reference path");
   }
 
+  // PCT 走廊回调：校验并存储全局规划器下发的走廊路径（Z 加 corridor_z_offset_），
+  // 作为局部重规划的走廊约束与 Z 参考；存在非法点则清空走廊。
   void SCANReplanFSM::corridorPathCallback(
       const nav_msgs::msg::Path::ConstSharedPtr &msg)
   {
@@ -311,6 +344,8 @@ namespace scan_planner
                 active_corridor_path_.size());
   }
 
+  // 动态航点回调（WAYPOINT_PATH 模式）：空消息触发取消导航；无里程计先暂存，
+  // 有里程计则立即接受航点路径。
   void SCANReplanFSM::dynamicWaypointCallback(const nav_msgs::msg::Path::ConstSharedPtr &msg)
   {
     if (!msg || msg->poses.empty())
@@ -328,6 +363,8 @@ namespace scan_planner
     acceptWaypointPath(*msg, 0.0, "Dynamic waypoint path");
   }
 
+  // 航点路径接收主入口：逐点校验合法性、置 trigger_、更新目标航向、
+  // 生成全局轨迹并初始化航点弧长进度；随后按当前状态迁移状态机。
   bool SCANReplanFSM::acceptWaypointPath(const nav_msgs::msg::Path &path, double z_offset,
                                          const std::string &label)
   {
@@ -378,12 +415,15 @@ namespace scan_planner
     return true;
   }
 
+  // 取消导航：直接以 “canceled” 原因重置导航。
   void SCANReplanFSM::cancelWaypointNavigation()
   {
     resetNavigation("canceled");
     RCLCPP_INFO(node_->get_logger(), "Dynamic waypoint path cleared; navigation stopped");
   }
 
+  // 里程计回调：更新位置/速度/姿态；手动模式下用首帧 z 作为 rviz 目标高度；
+  // 若航点模式有待处理的暂存路径则在此触发处理。
   void SCANReplanFSM::odometryCallback(const nav_msgs::msg::Odometry::ConstSharedPtr &msg)
   {
     odom_pos_(0) = msg->pose.pose.position.x;
@@ -418,11 +458,14 @@ namespace scan_planner
     }
   }
 
+  // 执行冻结回调：记录外部冻结请求，冻结期间局部轨迹时间停止推进。
   void SCANReplanFSM::go2ExecutionFrozenCallback(const std_msgs::msg::Bool::ConstSharedPtr &msg)
   {
     go2_execution_frozen_ = msg->data;
   }
 
+  // 当前地图状态回调：记录地图名与状态（加载中/失败/已加载），
+  // 并刷新对外发布的导航状态原因。
   void SCANReplanFSM::currentMapCallback(
       const pct_scan_navigation::msg::MapStatus::ConstSharedPtr &msg)
   {
@@ -443,6 +486,8 @@ namespace scan_planner
     publishNavigationStatus();
   }
 
+  // 执行冻结逻辑：go2_execution_frozen_ 置位时把 local_data_.start_time_ 顺延，
+  // 使轨迹在时间轴上“暂停”（dt 非法或过大则跳过，防止时间跳变）。
   void SCANReplanFSM::updateLocalTrajTimeFreeze()
   {
     const rclcpp::Time now = node_->now();
@@ -457,6 +502,7 @@ namespace scan_planner
       info->start_time_ += rclcpp::Duration::from_seconds(dt);
   }
 
+  // 从里程计姿态矩阵取机器人当前偏航角。
   double SCANReplanFSM::getOdomYaw() const
   {
     Eigen::Vector3d heading = odom_orient_.toRotationMatrix().col(0);
@@ -465,6 +511,8 @@ namespace scan_planner
     return std::atan2(heading(1), heading(0));
   }
 
+  // 解析目标四元数为目标偏航角 end_yaw_；四元数非法（模长过小）时
+  // 置 have_end_yaw_ = false，仅用位置判到达。
   void SCANReplanFSM::updateGoalYaw(const geometry_msgs::msg::Quaternion &orientation,
                                     const std::string &label)
   {
@@ -486,6 +534,7 @@ namespace scan_planner
     have_end_yaw_ = std::isfinite(end_yaw_);
   }
 
+  // 到达判定：水平距离 <= finish_dist_，且（未要求航向或航向偏差 <= finish_yaw_）。
   bool SCANReplanFSM::goalReached() const
   {
     if ((odom_pos_ - end_pt_).head<2>().norm() > finish_dist_)
@@ -498,6 +547,7 @@ namespace scan_planner
     return std::abs(yaw_error) <= finish_yaw_;
   }
 
+  // 用两点连线方向估计期望偏航角（航向无显式给定时的默认朝向）。
   double SCANReplanFSM::estimateYawFromSegment(const Eigen::Vector3d &from, const Eigen::Vector3d &to) const
   {
     Eigen::Vector2d diff(to(0) - from(0), to(1) - from(1));
@@ -506,6 +556,8 @@ namespace scan_planner
     return std::atan2(diff(1), diff(0));
   }
 
+  // 发布机器人自身体积（前后双圆柱）膨胀可视化 Marker，用于调试验证
+  // 栅格地图的膨胀参数是否覆盖机器人外形。
   void SCANReplanFSM::publishSelfInflationMarker()
   {
     const double radius = std::max(0.0, self_double_cylinder_radius_);
@@ -549,6 +601,7 @@ namespace scan_planner
     self_inflation_pub_->publish(marker);
   }
 
+  // 发布/隐藏当前局部目标点的球体 Marker（visible=false 时发 DELETE）。
   void SCANReplanFSM::publishLocalTargetMarker(bool visible)
   {
     visualization_msgs::msg::Marker marker;
@@ -574,6 +627,9 @@ namespace scan_planner
     local_target_pub_->publish(marker);
   }
 
+  // 状态迁移核心：新状态与旧状态相同则连续调用计数 +1，否则重置为 1
+  // （供 timesOfConsecutiveStateCalls 判断死循环/加大随机扰动）；打印迁移
+  // 并刷新导航状态发布。
   void SCANReplanFSM::changeFSMExecState(FSM_EXEC_STATE new_state, string pos_call)
   {
 
@@ -590,11 +646,13 @@ namespace scan_planner
     publishNavigationStatus();
   }
 
+  // 返回（连续调用次数, 当前状态），供状态机判断是否需要加大随机扰动。
   std::pair<int, SCANReplanFSM::FSM_EXEC_STATE> SCANReplanFSM::timesOfConsecutiveStateCalls()
   {
     return std::pair<int, FSM_EXEC_STATE>(continuously_called_times_, exec_state_);
   }
 
+  // 周期性打印当前状态（调试辅助）。
   void SCANReplanFSM::printFSMExecState()
   {
     static string state_str[7] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ",
@@ -603,6 +661,15 @@ namespace scan_planner
     cout << "[FSM]: state: " + state_str[int(exec_state_)] << endl;
   }
 
+  // 状态机主回调（10ms 定时器）：先做执行冻结时间维护，再按 exec_state_
+  // 分派状态逻辑——
+  //   INIT：等待里程计与触发；WAIT_TARGET：等待目标；
+  //   GEN_NEW_TRAJ：生成新轨迹（成功 -> EXEC_TRAJ，失败累计重规划计数）；
+  //   REPLAN_TRAJ：基于当前轨迹重规划（成功 -> EXEC_TRAJ）；
+  //   EXEC_TRAJ：轨迹执行中，判断是否接近终点/偏离参考需要重规划；
+  //   FINAL_YAW_ALIGN：对齐终点航向后回 WAIT_TARGET；
+  //   EMERGENCY_STOP：急停并等待速度归零后按 fail_safe 配置恢复。
+  // 每轮结束调用 finishProcess 兜底并发布数据展示消息。
   void SCANReplanFSM::execFSMCallback()
   {
     updateLocalTrajTimeFreeze();
@@ -794,6 +861,8 @@ namespace scan_planner
     data_disp_pub_->publish(data_disp_);
   }
 
+  // 失败兜底：重规划失败次数达到上限时进入 EMERGENCY_STOP（need_hover_stop_ 置位
+  // 表示急停后需等待新目标）。
   void SCANReplanFSM::finishProcess()
   {
     if (replan_fail_count_ >= max_replan_fail_count_)
@@ -808,6 +877,7 @@ namespace scan_planner
     }
   }
 
+  // 将内部 FSM 状态与地图状态映射为对外 NavigationStatus 枚举。
   uint8_t SCANReplanFSM::navigationStateFromFSM() const
   {
     using Status = pct_scan_navigation::msg::NavigationStatus;
@@ -839,6 +909,7 @@ namespace scan_planner
     return Status::FAILED;
   }
 
+  // 到目标的水平距离（无目标时为 0）。
   double SCANReplanFSM::distanceToGoal() const
   {
     if (!have_target_ && active_waypoints_.empty())
@@ -846,6 +917,7 @@ namespace scan_planner
     return (odom_pos_ - end_pt_).head<2>().norm();
   }
 
+  // 用航点弧长累计表二分查找，返回尚未越过的剩余航点数量。
   uint32_t SCANReplanFSM::remainingWaypointCount() const
   {
     const auto first_remaining = std::upper_bound(
@@ -855,6 +927,7 @@ namespace scan_planner
         std::distance(first_remaining, waypoint_arc_lengths_.end()));
   }
 
+  // 组装并发布 NavigationStatus：状态、地图名、目标激活、距离、剩余航点与原因。
   void SCANReplanFSM::publishNavigationStatus()
   {
     if (!navigation_status_pub_)
@@ -881,6 +954,8 @@ namespace scan_planner
       navigation_status_reason_ = "ok";
   }
 
+  // 重置导航：清空航点/走廊/目标/轨迹相关状态并回 WAIT_TARGET；若之前有
+  // 活动目标且已有里程计，先发一次急停再等待新目标。
   void SCANReplanFSM::resetNavigation(const std::string &reason)
   {
     const bool was_active = have_target_ || !active_waypoints_.empty();
@@ -903,6 +978,7 @@ namespace scan_planner
     publishNavigationStatus();
   }
 
+  // 重置服务回调：执行 soft reset 并应答成功。
   void SCANReplanFSM::handleResetNavigation(
       const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
       std::shared_ptr<std_srvs::srv::Trigger::Response> response)
@@ -912,6 +988,8 @@ namespace scan_planner
     response->message = "navigation reset";
   }
 
+  // 基于当前轨迹重规划：非航点模式先刷新全局参考轨迹（必要时清零反向速度），
+  // 再调用 reboundReplan；失败时用带随机扰动的多项式初值再试一次。
   bool SCANReplanFSM::planFromCurrentTraj()
   {
     setStartStateFromOdomOrCurrentTraj();
@@ -957,6 +1035,8 @@ namespace scan_planner
     return true;
   }
 
+  // 设定规划起点状态：默认取里程计；若局部轨迹有效且当前时刻落在轨迹时间
+  // 窗内，则用轨迹上的速度/加速度作为起点（保证重规划连续性）。
   void SCANReplanFSM::setStartStateFromOdomOrCurrentTraj()
   {
     start_pt_ = odom_pos_;
@@ -976,6 +1056,8 @@ namespace scan_planner
     start_acc_ = info->acceleration_traj_.evaluateDeBoorT(t_cur);
   }
 
+  // 安全定时器回调（50ms）：沿当前局部轨迹前视采样做膨胀占据检查；发现碰撞时
+  // 先尝试重规划；距碰撞点 < emergency_time_ 则直接急停，否则进入 REPLAN_TRAJ。
   void SCANReplanFSM::checkCollisionCallback()
   {
     updateLocalTrajTimeFreeze();
@@ -1019,6 +1101,9 @@ namespace scan_planner
     }
   }
 
+  // 重新规划的统一入口：先求局部目标，再调用规划管理器的 reboundReplan
+  // （有走廊时用走廊路径做约束，否则用航点序列），成功后把轨迹封装为
+  // Bspline 消息发布并显示最优轨迹。
   bool SCANReplanFSM::callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj)
   {
 
@@ -1074,6 +1159,7 @@ namespace scan_planner
     return plan_success;
   }
 
+  // 紧急停车统一入口：调用规划管理器的 EmergencyStop 并立即发布急停 Bspline。
   bool SCANReplanFSM::callEmergencyStop(Eigen::Vector3d stop_pos)
   {
 
@@ -1110,6 +1196,10 @@ namespace scan_planner
     return true;
   }
 
+  // 计算局部目标（点睛）：把机器人位置投影到全局参考轨迹上，向前取
+  // planning_horizon_ 弧长处的点作为局部目标；若该点被占据则沿参考轨迹
+  // 回退找最近自由点；同时维护进度弧长，参考速度与当前速度反向时清零
+  // 起点速度以保证局部规划可收敛。
   bool SCANReplanFSM::getLocalTarget()
   {
     auto &global = planner_manager_->global_data_;

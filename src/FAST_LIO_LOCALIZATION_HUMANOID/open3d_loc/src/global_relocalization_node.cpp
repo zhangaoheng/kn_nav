@@ -1,3 +1,11 @@
+// ============================================================================
+// 文件：global_relocalization_node.cpp
+// 说明：全局重定位节点（GlobalRelocalizationNode），定位丢失后的兜底恢复：
+//       监听地图 /map_3d 与当前扫描 /scan_base_link，构建"环形-扇形描述子"
+//       数据库（Scan Context 风格），由 ~/trigger 服务触发粗匹配 + 多尺度 ICP
+//       验证，输出候选位姿；apply=true 时把结果发布到 /initialpose 交给
+//       全局定位节点重新初始化。节点从不主动控制机器人。
+// ============================================================================
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -35,6 +43,7 @@ namespace
 
 constexpr double kPi = 3.14159265358979323846;
 
+// 把角度归一化到 [-pi, pi)。
 double normalizeAngle(double angle)
 {
   while (angle > kPi) angle -= 2.0 * kPi;
@@ -42,6 +51,7 @@ double normalizeAngle(double angle)
   return angle;
 }
 
+// 校验 4x4 矩阵是否为合法刚体变换（有限值、末行为 0 0 0 1、旋转部分近似正交）。
 bool finiteTransform(const Eigen::Matrix4d & transform)
 {
   if (!transform.allFinite()) return false;
@@ -66,6 +76,8 @@ double transformYaw(const Eigen::Matrix4d & transform)
 }  // namespace
 
 
+// 全局重定位节点类：维护描述子瓦片/关键帧数据库、最新扫描与地图，
+// 提供描述子检索、候选 ICP 验证、歧义判定与 /initialpose 回灌能力。
 class GlobalRelocalizationNode : public rclcpp::Node
 {
 public:
@@ -75,6 +87,8 @@ public:
   using LocalizationStatus =
     pct_scan_navigation::msg::LocalizationStatus;
 
+// 构造函数：声明全部参数并做安全下限钳制（min_fitness 不低于 0.7 等），
+// 订阅地图/扫描/定位状态，创建候选位姿与对齐点云发布器及触发服务。
   GlobalRelocalizationNode()
   : Node("global_relocalization_node")
   {
@@ -375,6 +389,8 @@ private:
   };
 
 
+// 由点云生成"环形-扇形"二维描述子：按半径分环、按方位角分扇区，
+// 记录每格高度信息并计算每环均值 ring_key，用于旋转不变检索。
   Descriptor makeDescriptor(
     const open3d::geometry::PointCloud & cloud,
     const Eigen::Vector3d & origin) const
@@ -491,6 +507,8 @@ private:
   }
 
 
+// 描述子比对：遍历扇区循环位移求余弦相似度，返回最佳得分与位移量
+// （位移量即候选相对偏航角）。
   Candidate compareDescriptor(
     const Descriptor & query,
     const Descriptor & target) const
@@ -573,6 +591,8 @@ private:
   }
 
 
+// 从关键帧数据库目录加载离线关键帧（metadata.yaml + keyframes.csv + PCD），
+// 校验地图名/frame 一致性后构建瓦片列表；仅在 map 未切换时生效。
   bool loadKeyframeDatabase(const std::string & map_name)
   {
     if (keyframe_database_root_.empty() || map_name.empty()) return false;
@@ -681,6 +701,8 @@ private:
   }
 
 
+// 地图回调：对地图做指纹去重（内容哈希），体素降采样后按瓦片切分
+// （含 4 种偏移网格避免瓦片边界割裂），生成描述子瓦片数据库。
   void mapCallback(
     const sensor_msgs::msg::
     PointCloud2::ConstSharedPtr message)
@@ -895,6 +917,7 @@ private:
   }
 
 
+// 扫描回调：把最新扫描保存为 base_link 系点云并记录时间戳，供触发时使用。
   void scanCallback(
     const sensor_msgs::msg::
     PointCloud2::ConstSharedPtr message)
@@ -953,6 +976,8 @@ private:
 
 
   std::vector<Candidate>
+// 描述子检索：对查询扫描生成描述子并与所有瓦片比对，
+// 返回按得分降序、数量不超过 max_candidates 的候选列表。
   findCandidates(
     const open3d::geometry::
     PointCloud & scan,
@@ -1027,6 +1052,8 @@ private:
 
 
   std::shared_ptr<open3d::geometry::PointCloud>
+// 剔除主导水平面（地面/天花板）：只移除法向量接近竖直的平面，
+// 保留竖直墙体结构（其对全局 x/y/偏航约束最关键）。
   removeDominantHorizontalPlane(
     const std::shared_ptr<open3d::geometry::PointCloud> & cloud,
     size_t minimum_remaining_points,
@@ -1068,6 +1095,8 @@ private:
   }
 
 
+// 关键帧模式候选验证：FPFH+RANSAC 粗配准到关键帧局部系，
+// 再以关键帧位姿合成全局初值做广义 ICP 精配准，经多项几何门限判定有效。
   Match matchKeyframeCandidate(
     const open3d::geometry::PointCloud & scan,
     const Tile & keyframe,
@@ -1192,6 +1221,9 @@ private:
   }
 
 
+// 地图瓦片模式候选验证：以描述子位移量给出偏航初值（正负两个方向），
+// 多尺度 ICP（4x/2x/1x 体素）逐级细化，粗尺度用点到点、末级用点到面，
+// 最后评估 fitness/rmse 并做几何门限判定。
   Match matchCandidate(
     const open3d::geometry::
     PointCloud & scan,
@@ -1746,6 +1778,9 @@ private:
   }
 
 
+// 触发服务主处理：检查使能/运行互斥/数据就绪/地图新鲜度/扫描时效后，
+// 依次执行描述子检索与候选匹配，做歧义判定（第二候选分离度与 fitness 裕度），
+// 通过则填充响应位姿并可选发布 /initialpose 与候选调试话题。
   void handleTrigger(
     const std::shared_ptr<
       GlobalRelocalize::
@@ -2482,6 +2517,7 @@ private:
 };
 
 
+// 节点入口：单线程执行器运行全局重定位节点。
 int main(
   int argc,
   char ** argv)

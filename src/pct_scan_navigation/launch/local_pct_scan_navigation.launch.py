@@ -1,3 +1,25 @@
+# ============================================================================
+# local_pct_scan_navigation.launch.py
+# ----------------------------------------------------------------------------
+# PCT 全局规划 + SCAN 局部规划的统一启动入口（A2/Go2/Go2-W 共用的底层 launch）。
+#
+# 职责：
+#   * 从统一配置文件 navigation.yaml（config_profile 指定机型目录）读取全部
+#     节点参数并启动：FAST-LIO、open3d 定位、PCT 全局规划、SCAN 规划、
+#     closed_loop_controller、pct_scan_coordinator、nav_manager、go2 桥。
+#   * 关键 launch 参数：navigation_mode（1=RViz 目标直连 SCAN；
+#     2=完整 PCT 参考路径链路）、config_profile、start_go2_bridge、
+#     start_open3d_loc、start_pct_planner、start_global_relocalization。
+#   * 统一规划 ROS 日志目录 run_YYYYmmdd_HHMMSS，并维护 latest 软链接。
+#
+# 数据流（Mode 2）：
+#   RViz goal -> pct_global_planner(/pct_path) -> pct_scan_coordinator
+#   (/scan_planner/waypoints) -> scan_planner_node -> closed_loop_controller
+#   (/cmd_vel) -> go2_cmd_vel_bridge -> 机器人。
+#   定位链路：fastlio_mapping(/Odometry_loc) -> global_localization_node
+#   (/Odometry_open3d) -> SCAN 规划与闭环控制。
+# ============================================================================
+
 """Bring up PCT + SCAN navigation from one unified YAML configuration."""
 
 import os
@@ -19,6 +41,8 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
+# 计算日志根目录：优先取环境变量 KN_NAV_WS_LOG_DIR，
+# 否则从 install 树反推工作区 src/log，保证日志落在源码树而不是 install 目录。
 def _workspace_log_root():
     override = os.environ.get('KN_NAV_WS_LOG_DIR')
     if override:
@@ -34,6 +58,8 @@ def _workspace_log_root():
     return share.parent / 'log'
 
 
+# 创建本次运行的日志目录并软链 latest：ROS 日志、节点控制台日志都汇入其中；
+# 只保留最近 20 次运行，旧的 run_* 目录会被清理。
 def _prepare_log_directory(context):
     launch_log_file = Path(launch.logging.launch_config.log_dir).resolve() / 'launch.log'
     log_root = _workspace_log_root()
@@ -81,6 +107,7 @@ def _prepare_log_directory(context):
     ]
 
 
+# 宽松解析布尔型 launch 参数（支持 1/true/yes/on 等写法），解析失败直接报错。
 def _bool_value(value, setting_name):
     if isinstance(value, bool):
         return value
@@ -92,12 +119,16 @@ def _bool_value(value, setting_name):
     raise ValueError(f'{setting_name} must be true or false, got: {value!r}')
 
 
+# 取值规则：非空的 launch 命令行覆盖优先，否则回落到统一 YAML 的 launch 段，
+# 最后才是函数默认值。这样既能在命令行临时覆盖，又不重复维护两处配置。
 def _setting(context, name, config, default):
     """Use a non-empty launch override, otherwise read the unified YAML."""
     override = LaunchConfiguration(name).perform(context).strip()
     return override if override else config.get(name, default)
 
 
+# 从统一配置的 nodes.<node_name> 段取出某节点的参数字典，
+# 缺失或类型错误时抛异常，保证 launch 阶段尽早失败。
 def _node_parameters(config, node_name):
     parameters = config.get('nodes', {}).get(node_name)
     if not isinstance(parameters, dict):
@@ -106,6 +137,7 @@ def _node_parameters(config, node_name):
     return dict(parameters)
 
 
+# 加载并校验统一配置：要求 version==1，且 launch/topics/maps/nodes 四段齐全。
 def _load_unified_config(config_path):
     if not config_path.is_file():
         raise FileNotFoundError(
@@ -123,6 +155,10 @@ def _load_unified_config(config_path):
     return config
 
 
+# 启动描述核心：读统一配置 -> 解析 launch 开关 -> 按开关组装节点列表。
+# 定位组（FAST-LIO/open3d）由 start_open3d_loc 控制；PCT 规划器仅在
+# navigation_mode==2 时启动（Mode 1 不需要全局路径）；机器人侧执行器
+# （scan_planner/closed_loop_controller/coordinator/nav_manager）始终启动。
 def _launch_setup(context):
     config_path = Path(
         LaunchConfiguration('config_file').perform(context)
@@ -212,6 +248,8 @@ def _launch_setup(context):
                 ],
             ))
 
+    # Mode 2（PCT 参考路径）才启动全局规划器；Mode 1 下 SCAN 直接
+    # 消费 RViz 的 /goal_pose，无需 /pct_path。
     if navigation_mode == 2 and start_pct_planner:
         actions.append(Node(
             package='pct_planner', executable='run_ros2_global_planner',
@@ -230,6 +268,8 @@ def _launch_setup(context):
                 _node_parameters(config, 'scan_planner_node'),
                 {'fsm.navi_mode': navigation_mode, **common_overrides},
             ],
+            # scan_planner 话题重映射统一取自配置 topics 段（缺省值保证旧行为
+            # 不变），例如机器人位姿 body_pose/sensor_pose 默认都是 /Odometry_open3d。
             remappings=[
                 ('body_pose', topics.get('body_pose', '/Odometry_open3d')),
                 ('sensor_pose', topics.get('sensor_pose', '/Odometry_open3d')),
@@ -257,6 +297,7 @@ def _launch_setup(context):
                 _node_parameters(config, 'pct_scan_coordinator'),
                 {'mode': navigation_mode, **common_overrides},
             ],
+            # coordinator 异常退出时触发整体 Shutdown，避免机器人停在半路。
             on_exit=Shutdown(reason='pct_scan_coordinator exited'),
         ),
         Node(
@@ -274,6 +315,7 @@ def _launch_setup(context):
         ),
     ])
 
+    # go2 桥（cmd_vel -> 宇树机器人底盘）按需启动，通常实机开启、仿真关闭。
     if start_go2_bridge:
         actions.append(Node(
             package='pure_pursuit_planner', executable='go2_cmd_vel_bridge',
@@ -295,6 +337,8 @@ def _launch_setup(context):
     return actions
 
 
+# launch 入口：声明全部可覆盖参数（config_profile/config_file/各开关），
+# 先准备日志目录，再注入宇树 SDK 动态库路径，最后执行 _launch_setup 组装节点。
 def generate_launch_description():
     navigation_share = FindPackageShare('pct_scan_navigation')
     config_profile = LaunchConfiguration('config_profile')

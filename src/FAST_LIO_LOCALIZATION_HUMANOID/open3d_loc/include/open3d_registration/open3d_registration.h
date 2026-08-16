@@ -1,3 +1,10 @@
+// ============================================================================
+// 文件：open3d_registration.h
+// 说明：pcd_tools 命名空间的点云配准接口（Open3D）：FPFH+RANSAC 粗配准、
+//       ICP 精配准（点到点/点到面/广义）、多尺度 ICP 与配准评估等工具函数，
+//       以及封装完整"预处理-粗配准-精配准"流程的 Open3dRegistration 类。
+//       该模块服务于全局定位中"当前扫描配准到离线 PCD 全局地图"。
+// ============================================================================
 #pragma once
 
 #include <iostream>
@@ -11,6 +18,8 @@
 namespace pcd_tools
 {
 
+// FPFH 特征 + RANSAC 粗配准：适合初始位姿未知的大范围搜索；
+// seed_ 固定时结果可复现，mutual_filter 开启双向最近邻过滤。
     open3d::pipelines::registration::RegistrationResult RegistrationFpfh(
         std::shared_ptr<open3d::geometry::PointCloud> source,
         std::shared_ptr<open3d::geometry::PointCloud> target,
@@ -28,6 +37,8 @@ namespace pcd_tools
     /// @param icp_method 0: point2point 1: point2plane 2: generalizedIcp
     /// @param icp_iteration icp iteration times
     /// @return
+// ICP 精配准：init_matrix 作为初值，icp_method 选择
+// 0=点到点 / 1=点到面 / 2=广义 ICP(generalized-ICP)。
     open3d::pipelines::registration::RegistrationResult RegistrationIcp(
         std::shared_ptr<open3d::geometry::PointCloud> source,
         std::shared_ptr<open3d::geometry::PointCloud> target,
@@ -42,13 +53,18 @@ namespace pcd_tools
     /// @param icp_method 0: point2point 1: point2plane 2: generalizedIcp
     /// @param multiscale use multi scale for icp
     /// @return
+// 多尺度 ICP：按 scale 列表逐级降采样（由粗到细），
+// 上一级结果作为下一级初值，提高收敛鲁棒性与精度。
     Eigen::Matrix4d RegistrationMultiScaleIcp(std::shared_ptr<open3d::geometry::PointCloud> source,
                                               std::shared_ptr<open3d::geometry::PointCloud> target,
                                               double voxel_size, int icp_method = 1, std::vector<double> scale = {1.5});
 
+// 配准质量评估：降采样后计算 fitness（内点占比）与 inlier_rmse。
     open3d::pipelines::registration::RegistrationResult RegistrationEvaluate(const std::shared_ptr<open3d::geometry::PointCloud> src, const std::shared_ptr<open3d::geometry::PointCloud> tgt, double voxel_size, Eigen::Matrix4d transformation);
 
     /// @brief Implementation of point cloud registration pipeline
+// 配准流程封装类：持有 source/target 点云、FPFH 特征、裁剪框及各阶段变换矩阵，
+// 按"预处理-FPFH 粗配准-多尺度 ICP 精配准"的顺序执行完整配准。
     class Open3dRegistration
     {
     private:
@@ -68,6 +84,8 @@ namespace pcd_tools
         /// @return downsampled pcd with normal, fpfh features
         std::tuple<std::shared_ptr<open3d::geometry::PointCloud>,
                    std::shared_ptr<open3d::pipelines::registration::Feature>>
+// 点云预处理流水线：去非有限点 -> 可选裁剪/统计滤波 -> 体素降采样 ->
+// 估计法向量（统一朝向）-> 计算 FPFH 特征，返回 (点云, 特征) 元组。
         PreprocessPointCloud(
             std::shared_ptr<open3d::geometry::PointCloud> pcd,
             float voxel_size_ = 2.0,
@@ -76,6 +94,8 @@ namespace pcd_tools
 
         /// @brief implementation of registration pipeline
         /// @return is registration failed?
+// 执行完整配准流程：源点云施加初值 -> FPFH 粗配准 -> ICP 精配准，
+// 最终矩阵 = icp * fpfh * initial，并用原始点云评估 overlap。
         bool RegistrationPipeline();
 
         Eigen::Matrix4d GetFinalMatrix();

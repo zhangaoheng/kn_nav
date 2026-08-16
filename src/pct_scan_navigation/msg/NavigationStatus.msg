@@ -1,3 +1,9 @@
+# 导航状态消息：描述整条导航链路（PCT 全局 + SCAN 局部）的运行状态。
+# 状态：IDLE -> WAITING_GOAL -> PLANNING_GLOBAL -> GLOBAL_READY
+#      -> PLANNING_LOCAL -> NAVIGATING，遇障 AVOIDING，终点 GOAL_REACHED，
+#      异常 BLOCKED/CANCELED/FAILED/LOCALIZATION_LOST/MAP_SWITCHING。
+# 其余字段：map_name 地图、goal_active 目标是否激活、distance_to_goal 距目标距离、
+#       remaining_waypoints 剩余 waypoint 数、reason 补充说明。
 std_msgs/Header header
 
 uint8 IDLE=0

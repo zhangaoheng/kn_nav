@@ -1,7 +1,14 @@
+# =============================================================================
+# kernels.py — CuPy GPU 核函数与 CUDA 代码生成
+# 用 string.Template 按建图尺寸动态生成 CUDA 源码，再经 cp.ElementwiseKernel
+# 编译：tomographyKernel（点云体素化）、travKernel（可通行性代价）、
+# inflationKernel（代价膨胀）。utils_point / utils_map 提供公共设备端工具。
+# =============================================================================
 import string
 import cupy as cp
 
 
+# 生成通用 CUDA 工具代码：世界坐标到网格索引、float 原子最大/最小值等。
 def utils_point(resolution, n_row, n_col):
     util_preamble = string.Template(
         '''
@@ -67,6 +74,7 @@ def utils_point(resolution, n_row, n_col):
     return util_preamble
 
 
+# 生成网格邻域索引工具（getIdxRelative），供可通行性与膨胀核使用。
 def utils_map(n_row, n_col):
     util_preamble=string.Template(
         '''
@@ -96,6 +104,8 @@ def utils_map(n_row, n_col):
     return util_preamble
 
 
+# 点云体素化核：把每个点按高度分派到对应切片，向上层写最大 z（地面层），
+# 向下层写最小 z（悬空层），得到各切片的高度层 layers_g 与间隙层 layers_c。
 def tomographyKernel(resolution, n_row, n_col, n_slice, slice_h0, slice_dh):
     tomography_kernel = cp.ElementwiseKernel(
         in_params='raw U points, raw U center',
@@ -130,6 +140,8 @@ def tomographyKernel(resolution, n_row, n_col, n_slice, slice_h0, slice_dh):
     return tomography_kernel
 
 
+# 可通行性代价核：依据层间距、坡度梯度与“可站立邻域比例”给每个体素打分，
+# 不满足通行条件（间距过小/台阶过高/可站立邻域不足）时置为代价屏障。
 def travKernel(
     n_row, n_col, half_kernel_size,
     interval_min, interval_free, step_cross, step_stand, standable_th, cost_barrier
@@ -198,6 +210,7 @@ def travKernel(
     return trav_kernel
 
 
+# 膨胀核：用距离衰减表对周围核窗口内的通行代价做加权取最大，扩大障碍影响区。
 def inflationKernel(n_row, n_col, half_kernel_size):
     inflation_kernel = cp.ElementwiseKernel(
         in_params='raw U trav_cost, raw U score_table',

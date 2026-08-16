@@ -1,10 +1,20 @@
+# =============================================================================
+# tomogram.py — 体素代价地图（tomogram）核心数据结构与 GPU 建图实现
+# Tomogram 类管理切片缓冲区、编译好的 CuPy 核与建图流程：
+# 点云体素化 -> 坡度/可通行性代价 -> 代价膨胀 -> 层简化，输出五通道数据
+# （layers_t, trav_gx, trav_gy, layers_g, layers_c），即 pickle 的 data 字段。
+# =============================================================================
 import numpy as np
 import cupy as cp
 
 from kernels import *
 
 
+# Tomogram：离线建图核心类。从场景配置推导核参数，持有各层 GPU 缓冲区，
+# 提供 initMappingEnv / point2map 完成建图并返回简化后的各层数据。
 class Tomogram(object):
+    # 从配置换算核参数：可站立台阶高度、跨台阶高度、可站立比例阈值、
+    # 膨胀核半径（由安全边距与膨胀量决定）。
     def __init__(self, cfg):
         self.resolution = cfg.map.resolution
         self.slice_dh = cfg.map.slice_dh
@@ -19,6 +29,7 @@ class Tomogram(object):
         self.inflation = cfg.trav.inflation
         self.half_inf_k_size = int((self.safe_margin + self.inflation) / self.resolution)
 
+    # 按地图尺寸编译体素化/可通行性/膨胀三个 CUDA 核，并预计算距离衰减膨胀表。
     def initKernel(self):
         self.tomography_kernel = tomographyKernel(
             self.resolution, 
@@ -62,6 +73,7 @@ class Tomogram(object):
                     a_min=0.0, a_max=1.0
                 )
 
+    # 分配各层 GPU 缓冲区：高度层、间隙层、梯度、通行代价、膨胀代价。
     def initBuffers(self):
         self.layers_g = cp.zeros((self.n_slice_init, self.map_dim_x, self.map_dim_y), dtype=cp.float32)
         self.layers_c = cp.zeros((self.n_slice_init, self.map_dim_x, self.map_dim_y), dtype=cp.float32)
@@ -70,6 +82,7 @@ class Tomogram(object):
         self.trav_cost = cp.zeros((self.n_slice_init, self.map_dim_x, self.map_dim_y), dtype=cp.float32)
         self.inflated_cost = cp.zeros((self.n_slice_init, self.map_dim_x, self.map_dim_y), dtype=cp.float32)
 
+    # 设置建图环境（中心/尺寸/切片数）并初始化缓冲区与核。
     def initMappingEnv(self, center, map_dim_x, map_dim_y, n_slice_init, slice_h0):
         self.center = cp.array(center, dtype=cp.float32)
         self.map_dim_x = int(map_dim_x)
@@ -80,6 +93,7 @@ class Tomogram(object):
         self.initBuffers()
         self.initKernel()
 
+    # 清空各缓冲区：高度层重置为极小值、间隙层重置为极大值，代价层归零。
     def clearMap(self):
         self.layers_g *= 0.
         self.layers_c *= 0.
@@ -91,6 +105,10 @@ class Tomogram(object):
         self.trav_cost *= 0.
         self.inflated_cost *= 0.
 
+    # 建图主流程（GPU）：
+    #   1) 体素化：点云写入各切片高度/间隙层并计梯度；
+    #   2) 可通行性：travKernel 打分 + inflationKernel 膨胀；
+    #   3) 层简化：仅保留代价/高度有显著变化的切片，输出五通道数据与耗时统计。
     def point2map(self, points):
         points = cp.asarray(points)
         points = points[~cp.isnan(points).any(axis=1)]
@@ -150,6 +168,7 @@ class Tomogram(object):
         end_gpu = cp.cuda.Event()
         start_gpu.record()
 
+        # 层简化：保留“高度上升或代价下降”且可通行的切片，去掉冗余层。
         idx_simp = [0]
         if self.layers_g.shape[0] > 1:
             l_idx, m_idx = 0, 1

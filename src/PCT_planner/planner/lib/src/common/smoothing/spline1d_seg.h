@@ -14,12 +14,21 @@
  * limitations under the License.
  *****************************************************************************/
 
+// ============================================================================
+// 文件名: spline1d_seg.h
+// 用途:   一维样条的单个分段: 用 PolynomialXd 表示本段多项式,
+//         并预缓存 1~3 阶导数多项式, 提供求值接口
+// 结构:   Spline1dSeg 类, 含 spline_func_ 及一至三阶导数多项式
+// 依赖:   common/smoothing/polynomialxd.h
+// ============================================================================
+
 #pragma once
 
 #include <vector>
 
 #include "common/smoothing/polynomialxd.h"
 
+// 一维样条段: 封装本段多项式及其导数, x 为本段内坐标
 namespace common {
 
 class Spline1dSeg {
@@ -29,6 +38,7 @@ class Spline1dSeg {
   explicit Spline1dSeg(const std::vector<double>& params);
   ~Spline1dSeg() = default;
 
+// 设置本段多项式系数, 并同步更新各阶导数多项式
   void SetParams(const std::vector<double>& params);
   double operator()(const double x) const;
   double Derivative(const double x) const;

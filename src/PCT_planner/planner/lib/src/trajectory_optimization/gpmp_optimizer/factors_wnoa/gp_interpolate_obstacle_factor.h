@@ -1,3 +1,12 @@
+// ============================================================
+// 文件：gp_interpolate_obstacle_factor.h（factors_wnoa/ 目录）
+// 用途：插值点避障因子（wnoa 加速度模型，Vector4）：与基础版
+//       GPInterpolateObstacleFactor 逻辑一致，仅状态维度不同，
+//       平面位置取 x(0) 与 x(2)。
+// 结构：GPInterpolateObstacleFactorWnoa 类（gtsam 二元因子）。
+// 关键逻辑：同基础版（层切换、高度提示、二次惩罚），
+//       误差 = (cost - threshold)^2，雅可比 = 地图梯度 * 插值雅可比。
+// ============================================================
 #pragma once
 
 #include <memory>
@@ -6,6 +15,8 @@
 #include "map_manager/dense_elevation_map.h"
 #include "trajectory_optimization/gpmp_optimizer/interpolator/wnoa_interpolator.hpp"
 
+// GPInterpolateObstacleFactorWnoa：wnoa 变体的插值点避障因子，
+// 行为同基础版（层切换、高度提示、二次惩罚），供 GPMPOptimizerWnoa 使用。
 class GPInterpolateObstacleFactorWnoa
     : public gtsam::NoiseModelFactor2<gtsam::Vector4, gtsam::Vector4> {
  public:
@@ -25,6 +36,7 @@ class GPInterpolateObstacleFactorWnoa
         gp_interpolator_(qc, interval, tau) {}
   ~GPInterpolateObstacleFactorWnoa() = default;
 
+// 返回因子当前所在层（优化过程中可能发生层切换）。
   int GetNodeLayer() const { return current_layer_; }
 
   gtsam::Vector evaluateError(
@@ -33,10 +45,13 @@ class GPInterpolateObstacleFactorWnoa
       boost::optional<gtsam::Matrix&> H2 = boost::none) const override;
 
  private:
+// 可变状态：首次求误差时用插值点初始化层与高度提示，
+// 之后随当前位置更新，保证地图查询在优化迭代间保持连续。
   mutable int count_ = 0;
   mutable bool initialized_ = false;
   mutable int current_layer_ = 0;
   mutable double height_hint_ = 0.0;
+// cost_threshold_：避障代价阈值；tau_：段内偏移；param_：全局时间位置（调试用）。
   double cost_threshold_ = 0.0;
   double tau_ = 0.0;
   double param_ = 0.0;

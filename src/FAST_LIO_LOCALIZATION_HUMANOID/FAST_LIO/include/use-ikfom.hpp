@@ -1,14 +1,26 @@
+// ============================================================================
+// 文件：use-ikfom.hpp
+// 用途：为 ESKF（esekfom 库）实例化 FAST-LIO 的状态流形与运动模型：
+//       定义状态/输入/过程噪声流形，并给出连续时间运动方程 f 及其雅可比 df/dx、df/dw。
+// 结构：state_ikfom（23 维状态流形）、input_ikfom、process_noise_ikfom、
+//       process_noise_cov()、get_f()、df_dx()、df_dw()、SO3ToEuler()。
+// 依赖：IKFoM_toolkit/esekfom/esekfom.hpp（MTK 流形库）。
+// 说明：上游开源算法（FAST-LIO），工作区内作为里程计前端使用。
+// ============================================================================
 #ifndef USE_IKFOM_H
 #define USE_IKFOM_H
 
 #include <IKFoM_toolkit/esekfom/esekfom.hpp>
 
+// 流形基础类型：vect3 三维向量、SO3 旋转群、S2 单位球面（重力方向，2 自由度）
 typedef MTK::vect<3, double> vect3;
 typedef MTK::SO3<double> SO3;
 typedef MTK::S2<double, 98090, 10000, 1> S2; 
 typedef MTK::vect<1, double> vect1;
 typedef MTK::vect<2, double> vect2;
 
+// 23 维误差状态流形：位置(3)+旋转(3)+雷达-IMU 外参旋转(3)+平移(3)+速度(3)+
+// 陀螺零偏(3)+加计零偏(3)+重力方向(2，S2 流形)
 MTK_BUILD_MANIFOLD(state_ikfom,
 ((vect3, pos))
 ((SO3, rot))
@@ -20,11 +32,13 @@ MTK_BUILD_MANIFOLD(state_ikfom,
 ((S2, grav))
 );
 
+// 滤波器输入流形：加计与陀螺的原始测量
 MTK_BUILD_MANIFOLD(input_ikfom,
 ((vect3, acc))
 ((vect3, gyro))
 );
 
+// 过程噪声流形：陀螺/加计白噪声 + 零偏随机游走
 MTK_BUILD_MANIFOLD(process_noise_ikfom,
 ((vect3, ng))
 ((vect3, na))
@@ -32,6 +46,7 @@ MTK_BUILD_MANIFOLD(process_noise_ikfom,
 ((vect3, nba))
 );
 
+// 返回过程噪声协方差矩阵 Q（按流形块填充各噪声方差）
 MTK::get_cov<process_noise_ikfom>::type process_noise_cov()
 {
 	MTK::get_cov<process_noise_ikfom>::type cov = MTK::get_cov<process_noise_ikfom>::type::Zero();
@@ -44,6 +59,8 @@ MTK::get_cov<process_noise_ikfom>::type process_noise_cov()
 
 //double L_offset_to_I[3] = {0.04165, 0.02326, -0.0284}; // Avia 
 //vect3 Lidar_offset_to_IMU(L_offset_to_I, 3);
+// 连续时间运动方程 f(x,u)：位置导数=速度、旋转导数=角速度、速度导数=重力+比力；
+// 23 维状态对应 24 维导数（SO3 旋转展开为 3 维）
 Eigen::Matrix<double, 24, 1> get_f(state_ikfom &s, const input_ikfom &in)
 {
 	Eigen::Matrix<double, 24, 1> res = Eigen::Matrix<double, 24, 1>::Zero();
@@ -58,6 +75,7 @@ Eigen::Matrix<double, 24, 1> get_f(state_ikfom &s, const input_ikfom &in)
 	return res;
 }
 
+// 运动方程对状态 x 的雅可比（24x23），用于协方差传播
 Eigen::Matrix<double, 24, 23> df_dx(state_ikfom &s, const input_ikfom &in)
 {
 	Eigen::Matrix<double, 24, 23> cov = Eigen::Matrix<double, 24, 23>::Zero();
@@ -77,6 +95,7 @@ Eigen::Matrix<double, 24, 23> df_dx(state_ikfom &s, const input_ikfom &in)
 }
 
 
+// 运动方程对过程噪声 w 的雅可比（24x12）
 Eigen::Matrix<double, 24, 12> df_dw(state_ikfom &s, const input_ikfom &in)
 {
 	Eigen::Matrix<double, 24, 12> cov = Eigen::Matrix<double, 24, 12>::Zero();
@@ -87,6 +106,7 @@ Eigen::Matrix<double, 24, 12> df_dw(state_ikfom &s, const input_ikfom &in)
 	return cov;
 }
 
+// SO3（四元数）-> 欧拉角（度），含两极奇异处理
 vect3 SO3ToEuler(const SO3 &orient) 
 {
 	Eigen::Matrix<double, 3, 1> _ang;

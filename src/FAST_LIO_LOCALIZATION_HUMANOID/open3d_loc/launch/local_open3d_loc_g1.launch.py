@@ -1,3 +1,9 @@
+# ============================================================================
+# 文件：local_open3d_loc_g1.launch.py
+# 说明：宇树 G1 机器人 open3d_loc 局部定位节点启动入口：
+#       同时拉起全局定位节点 global_localization_node 与
+#       定位服务节点 localization_service_node，并设置 ROS 日志目录。
+# ============================================================================
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
 from launch.substitutions import LaunchConfiguration
@@ -12,6 +18,8 @@ LOG_KEEP_DAYS = 7
 LOG_MAX_FILES = 50
 
 
+# 清理 open3d_loc/log 目录下的旧日志：保留最近 LOG_KEEP_DAYS 天、
+# 最多 LOG_MAX_FILES 个文件，防止日志无限膨胀。
 def clean_open3d_logs(log_dir):
     if not os.path.isdir(log_dir):
         return
@@ -44,6 +52,8 @@ def clean_open3d_logs(log_dir):
             pass
 
 
+# 定位源目录解析与日志目录准备 -> 声明 use_sim_time ->
+# 以 loc_param_g1_local.yaml 为参数启动全局定位节点与定位服务节点。
 def generate_launch_description():
     # 获取包路径
     open3d_loc_share = get_package_share_directory('open3d_loc')

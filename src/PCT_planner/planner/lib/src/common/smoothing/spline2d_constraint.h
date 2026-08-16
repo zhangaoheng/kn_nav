@@ -14,6 +14,14 @@
  * limitations under the License.
  *****************************************************************************/
 
+// ============================================================================
+// 文件名: spline2d_constraint.h
+// 用途:   二维样条的约束构造器: 把边界约束、点约束、光滑性约束与
+//         运动学约束等整理为统一的线性不等式/等式 (约束矩阵 + 上下界),
+//         供 QP 求解器使用。x/y 独立约束与 x/y 协同约束并存。
+// 结构:   Spline2dConstraint 类: 内部组合 Spline1dConstraint (x/y 独立)
+//         与 AffineConstraint (协同), 对外暴露合并后的矩阵与上下界。
+// ============================================================================
 #pragma once
 
 #include <Eigen/Core>
@@ -30,12 +38,15 @@ namespace common {
  * @class Spline2dConstraint
  * @brief specify two-dimension polynomial spline constraint in matrix form
  */
+// 二维样条约束集: 所有 Add 系列接口向内部约束矩阵追加行,
+// 最终经 constraint_matrix()/lower_bound()/upper_bound() 供求解器读取。
 class Spline2dConstraint {
  public:
   Spline2dConstraint() = default;
 
   Spline2dConstraint(const std::vector<double>& t_knots, const uint32_t order);
 
+// 位置边界约束: 在给定节点处约束样条取值落在 [下界, 上界] 区间。
   bool Add2dBoundary(const std::vector<double>& t,
                      const vector_Eigen<Eigen::Vector2d>& lower_bound,
                      const vector_Eigen<Eigen::Vector2d>& upper_bound);
@@ -69,6 +80,8 @@ class Spline2dConstraint {
   bool Add2dPointThirdDerivativeConstraint(const double t,
                                            const Eigen::Vector2d dddft);
 
+// 光滑性约束: 约束相邻分段在节点处连续 (另有导数/二阶/三阶导数光滑版本),
+// 消除分段拼接处的跳变, 保证整条样条平滑。
   bool Add2dSmoothConstraint();
   bool Add2dDerivativeSmoothConstraint();
   bool Add2dSecondDerivativeSmoothConstraint();
@@ -81,6 +94,9 @@ class Spline2dConstraint {
                                       const int gear, const double a_direction);
 
   /* velocity and acceleration contraint according to kinetic bicycle model */
+// 运动学自行车模型约束: 由速度/加速度/前轮转角/航向角/轴距推算出
+// 该点的期望位置、速度与加速度, 再分别对 x/y 施加位置、一阶导数与
+// 二阶导数点约束, 使优化路径满足车辆运动学特性。
   bool AddPointKineticBicycleModelConstraint(const double t,
                                              const Eigen::Vector2d position,
                                              const double v, const double a,

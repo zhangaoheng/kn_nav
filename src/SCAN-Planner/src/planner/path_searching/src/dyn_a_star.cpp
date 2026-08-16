@@ -1,3 +1,16 @@
+// ============================================================
+// 文件：dyn_a_star.cpp
+// 模块：path_searching（动力学路径搜索）
+// 职责：实现体素栅格 A* 搜索器。
+// 关键流程（AstarSearch）：
+//   1) 起终点坐标转池内索引，若落在障碍内则沿起终点连线
+//      方向逐步外推至自由空间；
+//   2) 起点入 openSet_，循环取 f 值最小节点扩展 8 邻域
+//      （z 索引由起终点平面插值得到），跳过障碍与 closed 节点；
+//   3) 到达终点则回溯路径；超过 0.2 秒时间上限返回 SEARCH_ERR。
+// 说明：getDiagHeu 为对角距离启发（带 tie_breaker），使搜索
+//       结果更直且更稳定。
+// ============================================================
 #include "path_searching/dyn_a_star.h"
 #include <algorithm>
 #include <chrono>
@@ -6,6 +19,7 @@
 using namespace std;
 using namespace Eigen;
 
+// 析构：释放整个节点池（GridNodeMap_）的内存。
 AStar::~AStar()
 {
     for (int i = 0; i < POOL_SIZE_(0); i++)
@@ -14,6 +28,8 @@ AStar::~AStar()
                 delete GridNodeMap_[i][j][k];
 }
 
+// initGridMap：分配 pool_size 大小的三维节点池并全部 new 出
+// GridNode，绑定占据栅格地图；CENTER_IDX_ 为池中心索引。
 void AStar::initGridMap(GridMap::Ptr occ_map, const Eigen::Vector3i pool_size)
 {
     POOL_SIZE_ = pool_size;
@@ -36,6 +52,9 @@ void AStar::initGridMap(GridMap::Ptr occ_map, const Eigen::Vector3i pool_size)
     grid_map_ = occ_map;
 }
 
+// getDiagHeu：对角距离启发（3D 网格）。
+// 先走三维对角步（代价 sqrt(3)），再走二维对角（sqrt(2)），
+// 最后沿轴向（代价 1）；该启发满足可采纳性且比曼哈顿更紧。
 double AStar::getDiagHeu(GridNodePtr node1, GridNodePtr node2)
 {
     double dx = abs(node1->index(0) - node2->index(0));
@@ -77,6 +96,8 @@ double AStar::getEuclHeu(GridNodePtr node1, GridNodePtr node2)
     return (node2->index - node1->index).norm();
 }
 
+// retrievePath：沿 cameFrom 指针从终点回溯到起点，返回节点序列
+// （顺序为终点到起点，由 getPath 负责逆序）。
 vector<GridNodePtr> AStar::retrievePath(GridNodePtr current)
 {
     vector<GridNodePtr> path;
@@ -91,6 +112,9 @@ vector<GridNodePtr> AStar::retrievePath(GridNodePtr current)
     return path;
 }
 
+// ConvertToIndexAndAdjustStartEndPoints：起终点转索引。
+// 若起点/终点在障碍内，则沿起终点方向以 step_size 步长外推，
+// 直到落在自由空间或超出地图范围（返回 false）。
 bool AStar::ConvertToIndexAndAdjustStartEndPoints(Vector3d start_pt, Vector3d end_pt, Vector3i &start_idx, Vector3i &end_idx)
 {
     if (!Coord2Index(start_pt, start_idx) || !Coord2Index(end_pt, end_idx))
@@ -143,6 +167,14 @@ bool AStar::ConvertToIndexAndAdjustStartEndPoints(Vector3d start_pt, Vector3d en
     return true;
 }
 
+// AstarSearch：A* 主搜索流程（详见文件头说明）。
+// 关键实现点：
+//   - neighborIdx 的 z 分量由 interpolateZIndexOnSearchPlane 按
+//     起终点连线在 XY 平面上的投影比例线性插值，把搜索约束在
+//     起终点所在斜面附近，显著减小搜索空间；
+//   - 每个邻居的占用查询带邻居方向航向（atan2(dy,dx)），与
+//     机器人朝向相关的膨胀模型一致；
+//   - rounds_ 机制避免重复搜索时清空整池节点状态。
 ASTAR_RET AStar::AstarSearch(const double step_size, Vector3d start_pt, Vector3d end_pt)
 {
     const auto time_1 = std::chrono::steady_clock::now();
@@ -297,6 +329,8 @@ ASTAR_RET AStar::AstarSearch(const double step_size, Vector3d start_pt, Vector3d
     return ASTAR_RET::SEARCH_ERR;
 }
 
+// getPath：把 gridPath_ 中的节点索引转成世界坐标，逆序后返回
+// （gridPath_ 是终点到起点的回溯序列）。
 vector<Vector3d> AStar::getPath()
 {
     vector<Vector3d> path;

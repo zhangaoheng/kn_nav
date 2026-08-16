@@ -1,4 +1,24 @@
 #!/usr/bin/env python3
+# ============================================================================
+# global_path_follow_coordinator_node.py
+# ----------------------------------------------------------------------------
+# 纯全局路径跟踪协调器（测试场景专用，无局部规划）：
+# 订阅 PCT 全局路径 /pct_path，按机器人当前位置裁剪出"可跟踪路径窗口"，
+# 周期性发布给 pure_pursuit 控制器，并负责目标完成判定与最终朝向控制。
+#
+# 状态机：
+#   WAIT_PATH -> TRACKING -> FINAL_APPROACH -> GOAL_REACHED（完成清路）
+#                     |-> BLOCKED（TF 查不到 / 路径坐标系错误）
+#
+# 关键机制：
+#   * 路径签名去重：_completed_signature 记住已完成的路径，避免 PCT 重发
+#     同一路径时再次跟踪。
+#   * 进度定位：把机器人位置投影到路径上（带高度权重的最近段搜索），
+#     支持"沿路径前进"的鲁棒匹配，而非简单取最近点。
+#   * 跟踪路径裁剪：只发布机器人前方 tracking_path_length 米的路径窗口，
+#     并给每个点赋切向朝向；到达全局终点时保留全局目标朝向。
+# ============================================================================
+
 """Coordinate direct PCT global-path following without ART local planning."""
 
 from copy import deepcopy
@@ -15,6 +35,8 @@ from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 
 
+# 协调器状态机常量：WAIT_PATH 等待路径 / TRACKING 跟踪中 /
+# FINAL_APPROACH 接近终点（只调姿态）/ GOAL_REACHED 完成 / BLOCKED 阻塞。
 class GlobalPathFollowState:
     WAIT_PATH = 'WAIT_PATH'
     TRACKING = 'TRACKING'
@@ -23,6 +45,7 @@ class GlobalPathFollowState:
     BLOCKED = 'BLOCKED'
 
 
+# 四元数 -> 偏航角（Z 轴），用于目标朝向误差计算。
 def quaternion_to_yaw(quaternion) -> float:
     siny_cosp = 2.0 * (
         quaternion.w * quaternion.z + quaternion.x * quaternion.y
@@ -33,10 +56,12 @@ def quaternion_to_yaw(quaternion) -> float:
     return math.atan2(siny_cosp, cosy_cosp)
 
 
+# 角度归一化到 [-pi, pi]。
 def normalize_angle(angle: float) -> float:
     return math.atan2(math.sin(angle), math.cos(angle))
 
 
+# 把 Pose 的朝向设置为给定偏航角（纯绕 Z 旋转的四元数）。
 def set_pose_yaw(pose, yaw: float):
     pose.orientation.x = 0.0
     pose.orientation.y = 0.0
@@ -44,13 +69,19 @@ def set_pose_yaw(pose, yaw: float):
     pose.orientation.w = math.cos(0.5 * yaw)
 
 
+# 两点 XY 平面距离（路径裁剪按平面距离累计，忽略高度）。
 def pose_distance_xy(a, b) -> float:
     return math.hypot(a.position.x - b.position.x, a.position.y - b.position.y)
 
 
+# 纯跟踪协调器节点：latch 发布跟踪路径/跟踪点/最终接近标志/状态；
+# 定时器驱动 _update 做进度判定与路径重发。
 class GlobalPathFollowCoordinator(Node):
     """Latch completion and final-heading control for direct global path tests."""
 
+    # 初始化：声明/读取参数 -> 建 latch 发布器（跟踪路径、跟踪段、
+    # 跟踪点、final_approach、状态）-> 订阅全局路径 -> 初始化 TF ->
+    # 进入 WAIT_PATH 状态并发布空路径 -> 启动更新与重发定时器。
     def __init__(self):
         super().__init__('pct_global_path_follow_coordinator')
         self._declare_parameters()
@@ -107,6 +138,8 @@ class GlobalPathFollowCoordinator(Node):
             f'goal_yaw={self.goal_yaw_tolerance:.3f}'
         )
 
+    # 声明全部可配置参数（话题名、帧名、速率、终点/朝向容差、裁剪窗口、
+    # 进度搜索窗口与高度权重）。
     def _declare_parameters(self):
         self.declare_parameter('global_frame', 'map')
         self.declare_parameter('robot_frame', 'base_link')
@@ -141,6 +174,7 @@ class GlobalPathFollowCoordinator(Node):
         self.declare_parameter('progress_backtrack_segments', 20)
         self.declare_parameter('progress_forward_segments', 300)
 
+    # 读取参数并做合法性校验（正数、容差范围、窗口约束），启动即失败。
     def _read_parameters(self):
         def get(name):
             return self.get_parameter(name).value
@@ -204,6 +238,9 @@ class GlobalPathFollowCoordinator(Node):
                 'progress search windows must satisfy backtrack >= 0 and forward >= 1'
             )
 
+    # 全局路径回调：空路径清路；坐标系错误进入 BLOCKED；计算路径签名，
+    # 若与"已完成路径"签名相同则忽略（发布空路径）；否则更新活动路径、
+    # 重置进度索引并进入 TRACKING。
     def _global_path_cb(self, message: Path):
         if not message.poses:
             self._clear_active_path('received empty global path')
@@ -242,6 +279,9 @@ class GlobalPathFollowCoordinator(Node):
         self._publish_final_approach(False)
         self._publish_tracking_path()
 
+    # 周期主逻辑：查机器人位姿 -> 计算到全局终点的距离/高度/偏航误差 ->
+    # 进入终点圈（final_heading_entry_distance）时发布 FINAL_APPROACH；
+    # 满足距离+高度+偏航容差即完成目标；否则重发裁剪后的跟踪路径。
     def _update(self):
         if self._active_path is None:
             return
@@ -292,6 +332,7 @@ class GlobalPathFollowCoordinator(Node):
 
         self._publish_tracking_path(robot_pose)
 
+    # 查询 map -> base_link 变换（可带超时），失败返回 None（进入 BLOCKED）。
     def _lookup_robot_pose(self):
         try:
             transform = self._tf_buffer.lookup_transform(
@@ -308,6 +349,8 @@ class GlobalPathFollowCoordinator(Node):
         yaw = quaternion_to_yaw(transform.transform.rotation)
         return translation.x, translation.y, translation.z, yaw
 
+    # 路径签名 = (起点xyz, 终点xyz, 终点偏航, 点数) 四舍五入到 3 位小数；
+    # 用于识别"同一路径"与"已完成路径"，任何非有限值则视为无效。
     def _path_signature(self, message: Path) -> Optional[Tuple[float, ...]]:
         first = message.poses[0].pose
         last = message.poses[-1].pose
@@ -325,6 +368,8 @@ class GlobalPathFollowCoordinator(Node):
             return None
         return tuple(round(value, 3) for value in values)
 
+    # 目标完成：记住当前路径签名（防止重发重复跟踪），清空活动路径并
+    # 进入 GOAL_REACHED。
     def _complete_goal(
         self, goal_distance: float, goal_z_error: float, yaw_error: float
     ):
@@ -336,6 +381,8 @@ class GlobalPathFollowCoordinator(Node):
             state=GlobalPathFollowState.GOAL_REACHED,
         )
 
+    # 清空活动路径/签名/进度，发布空跟踪路径与 final_approach=False，
+    # 并切换到指定状态。
     def _clear_active_path(self, reason: str, state: str = GlobalPathFollowState.WAIT_PATH):
         self._active_path = None
         self._active_signature = None
@@ -344,6 +391,8 @@ class GlobalPathFollowCoordinator(Node):
         self._publish_empty_tracking_path(reason)
         self._set_state(state, reason)
 
+    # 发布跟踪路径：默认裁剪到机器人前方（crop_path_to_robot），
+    # 同时发布跟踪段与跟踪点，统一刷新时间戳。
     def _publish_tracking_path(self, robot_pose=None):
         if self._active_path is None:
             return
@@ -368,10 +417,13 @@ class GlobalPathFollowCoordinator(Node):
         self._publish_tracking_point(message)
         self._last_tracking_publish_time = self.get_clock().now()
 
+    # 周期重发定时器回调：活动路径存在时按最新位姿重新发布，
+    # 保证 latched 订阅者拿到的是新鲜路径。
     def _republish_tracking_path(self):
         if self._active_path is not None:
             self._publish_tracking_path()
 
+    # 发布空路径（latched）告知下游"没有可跟踪路径"，避免残留旧路径。
     def _publish_empty_tracking_path(self, reason: str):
         message = Path()
         message.header.stamp = self.get_clock().now().to_msg()
@@ -381,6 +433,9 @@ class GlobalPathFollowCoordinator(Node):
         self._last_tracking_publish_time = self.get_clock().now()
         self.get_logger().info(f'published empty tracking path: {reason}')
 
+    # 裁剪跟踪路径：以机器人到路径的投影点为起点，沿路径累积 XY 距离
+    # 直到 tracking_path_length 或路径末尾（至少 min_points 个点），
+    # 末尾若即全局终点则保留其原朝向。
     def _make_cropped_tracking_path(self, robot_pose) -> Optional[Path]:
         if self._active_path is None:
             return None
@@ -431,6 +486,10 @@ class GlobalPathFollowCoordinator(Node):
         self._assign_tracking_orientations(output, reached_global_goal)
         return output
 
+    # 把机器人投影到活动路径上：在上一次进度索引附近的搜索窗口
+    # （backtrack/forward 段数）内做线段最近点匹配；use_height_for_progress
+    # 开启时按高度误差加权打分，并优先选择高度误差可接受的最佳匹配，
+    # 防止路径上下起伏时进度乱跳。
     def _project_robot_to_path(self, robot_x: float, robot_y: float, robot_z: float):
         if self._active_path is None or len(self._active_path.poses) < 2:
             return None
@@ -492,6 +551,8 @@ class GlobalPathFollowCoordinator(Node):
             return best_height_valid
         return best_any
 
+    # 为裁剪路径各点赋切向朝向（相邻点方位角）；若末尾即全局终点，
+    # 则直接采用全局路径终点的原始朝向，保证最终到位姿态正确。
     def _assign_tracking_orientations(self, path: Path, reached_global_goal: bool):
         if not path.poses:
             return
@@ -512,6 +573,8 @@ class GlobalPathFollowCoordinator(Node):
         else:
             set_pose_yaw(path.poses[-1].pose, last_tangent_yaw)
 
+    # 发布跟踪点：在裁剪路径上按 lookahead 弧长插值出一个前瞻点，
+    # 供可视化/调试查看控制器应追赶的位置。
     def _publish_tracking_point(self, path: Path):
         point = self._interpolate_pose_on_path(
             path, self.tracking_point_lookahead_distance
@@ -522,6 +585,8 @@ class GlobalPathFollowCoordinator(Node):
         point.header.frame_id = self.global_frame
         self._tracking_point_pub.publish(point)
 
+    # 沿路径按 XY 弧长插值出前瞻点（含高度线性插值与切向朝向），
+    # 超过路径末尾时回退为最后一个点。
     def _interpolate_pose_on_path(
         self, path: Path, arc_distance: float
     ) -> Optional[PoseStamped]:
@@ -553,6 +618,7 @@ class GlobalPathFollowCoordinator(Node):
 
         return deepcopy(path.poses[-1])
 
+    # 发布最终接近标志（仅在状态变化时发布一次，避免刷屏）。
     def _publish_final_approach(self, active: bool):
         if active == self._final_approach_active:
             return
@@ -561,6 +627,7 @@ class GlobalPathFollowCoordinator(Node):
         message.data = active
         self._final_approach_pub.publish(message)
 
+    # 更新状态机并发布 "状态: 原因" 字符串（同样只在变化时发布）。
     def _set_state(self, state: str, reason: str):
         if state == self._state and reason == self._state_reason:
             return
@@ -572,6 +639,7 @@ class GlobalPathFollowCoordinator(Node):
         self.get_logger().info(message.data)
 
 
+# 入口：单线程 spin。
 def main(args=None):
     rclpy.init(args=args)
     node = GlobalPathFollowCoordinator()

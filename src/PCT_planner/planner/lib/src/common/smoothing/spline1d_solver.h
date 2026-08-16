@@ -14,6 +14,13 @@
  * limitations under the License.
  *****************************************************************************/
 
+// ============================================================================
+// 文件名: spline1d_solver.h
+// 用途:   一维样条求解器抽象基类: 组合样条、约束与核三个对象,
+//         定义 Reset/求解/结果提取接口, 具体实现见 osqp_spline1d_solver
+// 结构:   Spline1dSolver 抽象类, 含 spline_/constraint_/kernel_ 三成员
+// ============================================================================
+
 #pragma once
 
 #include <Eigen/Core>
@@ -23,6 +30,7 @@
 #include "common/smoothing/spline1d_constraint.h"
 #include "common/smoothing/spline1d_kernel.h"
 
+// 抽象基类: 通过 mutable_*() 暴露约束与核供调用方配置, Solve() 完成求解
 namespace common {
 
 class Spline1dSolver {
@@ -49,6 +57,7 @@ class Spline1dSolver {
   virtual const Spline1d& spline() const = 0;
 
  protected:
+// 求解器统一持有的三要素: 样条对象、约束、核
   Spline1d spline_;
   Spline1dConstraint constraint_;
   Spline1dKernel kernel_;

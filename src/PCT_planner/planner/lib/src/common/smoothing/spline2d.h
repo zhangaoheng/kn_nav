@@ -14,6 +14,13 @@
  * limitations under the License.
  *****************************************************************************/
 
+// ============================================================================
+// 文件名: spline2d.h
+// 用途:   二维分段多项式样条: x(t) 与 y(t) 各由一组分段多项式 (Spline2dSeg)
+//         表达, 提供位置/航向/各阶导数求值、曲率计算与批量系数装载。
+//         与 spline2d_kernel/spline2d_constraint 配合构成 2D 样条平滑体系。
+// 结构:   Spline2d (整条样条, 分段管理 + 求值) + Spline2dPoint (采样点快照)
+// ============================================================================
 #pragma once
 
 #include <Eigen/Core>
@@ -25,6 +32,8 @@
 
 namespace common {
 
+// 二维样条: 由多个 Spline2dSeg 按节点序列 t_knots_ 拼接而成,
+// 求值时先用 find_index 定位 t 所在分段, 再委派给该段多项式 (参数 t - t_knots_[i])。
 class Spline2d {
  public:
   Spline2d() = default;
@@ -50,6 +59,7 @@ class Spline2d {
   double GetCurvature(const double t) const;
 
  private:
+// 定位参数 t 所属的样条分段下标: 二分上界搜索减一得到分段号, 越界钳制到末段。
   uint32_t find_index(const double x) const;
 
  private:
@@ -58,6 +68,8 @@ class Spline2d {
   uint32_t spline_order_;
 };
 
+// 样条采样点快照: 在参数 t 处一次性缓存位置及一至三阶导数,
+// 供约束/因子重复读取, 避免多次求值。
 class Spline2dPoint {
  public:
   Spline2dPoint() = default;

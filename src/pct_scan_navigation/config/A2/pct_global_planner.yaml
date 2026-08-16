@@ -5,6 +5,15 @@
 # Edit parameters here instead of passing --ros-args on the command line.
 # =============================================================================
 
+# ============================================================================
+# pct_global_planner.yaml —— PCT 全局规划节点参数（旧式拆分配置）。
+#   tomo_path          全局代价地图 tomogram 路径（pickle）
+#   global_frame/robot_frame 全局/机器人坐标系
+#   goal_pose_topic    导航目标话题（/goal_pose）
+#   path_topic         规划结果全局路径话题（/pct_path）
+#   odom_topic         里程计话题（/Odometry_open3d）
+#   publish_visualization / publish_tomogram 可视化与代价地图发布开关
+# ============================================================================
 pct_global_planner:
   ros__parameters:
 

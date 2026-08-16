@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
 """Interactive RViz2 runner for planning from two Publish Point clicks."""
+# 文件：plan_click_rviz2.py
+# 用途：RViz2 交互式规划器——在 RViz 中用 "Publish Point" 点击两次
+#       （起点、终点），调用 PCT 规划并发布路径，用于快速调试与演示。
+# 结构：ClickPlannerNode —— ROS 2 节点（订阅 /clicked_point，发布 /tomogram、
+#       /pct_path、/pct_astar_path、/pct_marker）；若干消息构造辅助函数；
+#       main —— 参数解析与节点启动。
+# 依赖：config 与 planner_wrapper 模块；需先加载 lib 目录下的 GTSAM 动态库。
 import argparse
 import ctypes
 import os
@@ -38,6 +45,7 @@ from config import Config
 from planner_wrapper import TomogramPlanner
 
 
+# 解析 tomogram 路径：接受绝对/相对 .pickle 路径，或 rsc/tomogram 下的名称（自动补 .pickle）。
 def resolve_tomo_path(tomo_arg):
     if tomo_arg.endswith('.pickle') or os.path.sep in tomo_arg:
         path = os.path.abspath(tomo_arg)
@@ -49,6 +57,7 @@ def resolve_tomo_path(tomo_arg):
     return path
 
 
+# 将 float32 点数组转为 PointCloud2 消息（has_intensity 决定 XYZ 还是 XYZI 字段）。
 def make_pointcloud2(node, points, has_intensity=False, frame_id='map'):
     msg = PointCloud2()
     msg.header.stamp = node.get_clock().now().to_msg()
@@ -75,6 +84,7 @@ def make_pointcloud2(node, points, has_intensity=False, frame_id='map'):
     return msg
 
 
+# 将 (N,3) 轨迹转为 nav_msgs/Path 消息（默认 map 坐标系）。
 def traj_to_path(node, traj, frame_id='map'):
     msg = Path()
     msg.header.stamp = node.get_clock().now().to_msg()
@@ -90,6 +100,7 @@ def traj_to_path(node, traj, frame_id='map'):
     return msg
 
 
+# 生成球体 Marker，用于可视化起点/终点。
 def sphere_marker(node, marker_id, xyz, rgba, frame_id='map'):
     marker = Marker()
     marker.header.stamp = node.get_clock().now().to_msg()
@@ -109,6 +120,7 @@ def sphere_marker(node, marker_id, xyz, rgba, frame_id='map'):
     return marker
 
 
+# 生成折线（LINE_STRIP）Marker，用于可视化规划路径。
 def path_marker(
     node,
     traj,
@@ -135,6 +147,7 @@ def path_marker(
     return marker
 
 
+# 生成 DELETE 动作的 Marker，用于清除 RViz 中的旧路径。
 def delete_marker(node, ns, marker_id, frame_id='map'):
     marker = Marker()
     marker.header.stamp = node.get_clock().now().to_msg()
@@ -145,6 +158,8 @@ def delete_marker(node, ns, marker_id, frame_id='map'):
     return marker
 
 
+# ClickPlannerNode：核心交互节点。维护两次点击（起点→终点），加载 tomogram 并
+# 周期发布 /tomogram 点云，点击完成后调用规划器并发布 A* 与平滑路径。
 class ClickPlannerNode(Node):
     def __init__(self, tomo_path, frame_id='map', publish_period=1.0):
         super().__init__('pct_click_planner')
@@ -177,6 +192,7 @@ class ClickPlannerNode(Node):
             'RViz ready: select "Publish Point", click start once, then click goal.'
         )
 
+    # 从 pickle 读取 tomogram 原始数据（data/resolution/center 等），统一转为 float32。
     def load_tomo_data(self, tomo_path):
         with open(tomo_path, 'rb') as handle:
             data = pickle.load(handle)
@@ -185,6 +201,8 @@ class ClickPlannerNode(Node):
         data['center'] = np.asarray(data['center'], dtype=np.float32)
         return data
 
+    # 将多层 tomogram 转为可视点云：隐藏被上层覆盖的切片（相邻层高差小于 slice_dh
+    # 视为遮挡），并把下层通行代价传递到可见层，输出带强度（代价）的 XYZI 点云。
     def build_tomo_cloud(self):
         tomogram = self.tomo_data['data']
         traversability = tomogram[0].copy()
@@ -227,12 +245,14 @@ class ClickPlannerNode(Node):
         self.get_logger().info(f'Tomogram cloud points: {len(points)}')
         return make_pointcloud2(self, points, has_intensity=True, frame_id=self.frame_id)
 
+    # 发布 /tomogram 点云（刷新时间戳，可选打印日志）。
     def publish_tomo(self, log=False):
         self.tomo_msg.header.stamp = self.get_clock().now().to_msg()
         self.tomo_pub.publish(self.tomo_msg)
         if log:
             self.get_logger().info('Published /tomogram')
 
+    # /clicked_point 回调：第一次点击记起点并清除旧路径，第二次点击记终点并触发规划。
     def on_clicked_point(self, msg):
         xyz = np.array([msg.point.x, msg.point.y, msg.point.z], dtype=np.float32)
 
@@ -262,6 +282,7 @@ class ClickPlannerNode(Node):
         self.plan_from_clicks()
         self.clicks.clear()
 
+    # 用两次点击的坐标调用规划器；发布 A* 原始路径与平滑轨迹，并保存 .npy 文件。
     def plan_from_clicks(self):
         start_xyz = np.array(self.clicks[0], dtype=np.float32, copy=True)
         goal_xyz = self.infer_goal_height(self.clicks[1])
@@ -311,6 +332,7 @@ class ClickPlannerNode(Node):
             f'z_span={self.z_span(traj):.3f}, saved to {out}'
         )
 
+    # 若终点 z 接近 0（RViz 点击常见），尝试从 tomogram 反推真实高度，用于切片查找。
     def infer_goal_height(self, xyz):
         effective_xyz = np.array(xyz, dtype=np.float32, copy=True)
         if abs(float(effective_xyz[2])) >= self.click_z_epsilon:
@@ -331,6 +353,7 @@ class ClickPlannerNode(Node):
         )
         return effective_xyz
 
+    # 在目标 XY 附近（z_search_radius_cells 半径）搜索最近的有限高程作为目标 z。
     def infer_goal_z_from_tomogram(self, x, y, reference_z):
         if self.planner.elev_g is None:
             return None
@@ -363,6 +386,7 @@ class ClickPlannerNode(Node):
         return float(local_elev[np.unravel_index(np.argmin(scores), scores.shape)])
 
     @staticmethod
+    # 统计轨迹 z 方向跨度（调试输出用）。
     def z_span(traj):
         if traj is None or len(traj) == 0:
             return 0.0
@@ -372,11 +396,13 @@ class ClickPlannerNode(Node):
             return 0.0
         return float(z[finite].max() - z[finite].min())
 
+    # 获取 A* 原始路径（兼容不同版本封装器的接口差异）。
     def get_astar_path(self):
         if hasattr(self.planner, 'getLastAstarPath'):
             return self.planner.getLastAstarPath()
         return getattr(self.planner, 'last_astar_traj', None)
 
+    # 由世界坐标查找最匹配的 tomogram 切片索引（在 XY 邻域内按高程差最小选取）。
     def find_slice(self, xyz):
         elevation = self.tomo_data['data'][3]
         resolution = self.tomo_data['resolution']
@@ -405,11 +431,13 @@ class ClickPlannerNode(Node):
         scores[~finite] = np.inf
         return int(np.unravel_index(np.argmin(scores), scores.shape)[0])
 
+    # 由高度 z 直接换算切片层号（z - slice_h0）/ slice_dh，并裁剪到合法范围。
     def z_to_slice_layer(self, z):
         layer = int(round((z - float(self.tomo_data['slice_h0'])) / float(self.tomo_data['slice_dh'])))
         return int(np.clip(layer, 0, self.tomo_data['data'][3].shape[0] - 1))
 
 
+# 启动 rviz2 子进程加载指定配置文件（找不到 rviz2 时仅告警）。
 def launch_rviz(rviz_config):
     try:
         return subprocess.Popen(['rviz2', '-d', rviz_config])
@@ -418,6 +446,7 @@ def launch_rviz(rviz_config):
         return None
 
 
+# 入口：解析参数、初始化 rclpy、创建节点并 spin；退出时清理节点与 rviz 进程。
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(

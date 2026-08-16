@@ -1,3 +1,5 @@
+# 加载 PCT 全局规划 tomogram（代价地图）服务（/pct_global_planner/load_tomogram）：
+# 请求：map_name 地图名、tomo_path pickle 路径。响应：success、message。
 string map_name
 string tomo_path
 ---

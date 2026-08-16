@@ -21,11 +21,24 @@ Usage:
       -p tomo_path:=/path/to/tomogram.pickle
 """
 
+# =============================================================================
+# run_ros2_global_planner.py — PCT 全局规划器 ROS2 在线节点（重点文件）
+# 职责：加载离线 tomogram（pickle），通过 TF 获取机器人当前位置作为起点，
+#       订阅 /goal_pose（2D Goal Pose）或 /clicked_point（Publish Point）得到
+#       单个目标点，调用 TomogramPlanner 规划全局路径，并发布：
+#         /pct_path        平滑后的 PCT 全局轨迹（nav_msgs/Path）
+#         /pct_astar_path  原始 A* 路径（调试用）
+#         /pct_marker      轨迹线带与目标球体标记
+#         /tomogram        tomogram 体素可视化点云
+#       另提供 ~/load_tomogram 服务，支持在线热切换 tomogram。
+# =============================================================================
 import os, sys, argparse, pickle, time, math, threading
 import ctypes
 import numpy as np
 
 
+# 定位 PCT_planner 工程根目录：依次探测若干候选路径，
+# 以存在 planner/lib/libmetis-gtsam.so 为准。
 def _find_project_root():
     script_dir = os.path.dirname(os.path.realpath(__file__))
     candidates = [
@@ -50,6 +63,7 @@ LIB_PATH = os.path.join(ROOT, 'planner', 'lib')
 
 
 # ── GTSAM + smoothing libs preload (must happen before pybind11 imports) ──
+# 在 pybind11 导入前用 ctypes 全局预加载 GTSAM / metis / 平滑库，避免符号冲突。
 for _lib in [
     os.path.join(LIB_PATH, 'libmetis-gtsam.so'),
     os.path.join(LIB_PATH, 'libgtsam.so.4'),
@@ -74,6 +88,7 @@ from pct_scan_navigation.srv import LoadTomogram
 import importlib.util as _ilu
 
 
+# 从指定文件路径动态加载 Python 模块（与交互式入口一致的加载方式）。
 def _load(path, module_name):
     spec = _ilu.spec_from_file_location(module_name, path)
     mod = _ilu.module_from_spec(spec)
@@ -92,6 +107,7 @@ from planner_wrapper import TomogramPlanner
 
 # ─── helpers ────────────────────────────────────────────────────────────────
 
+# 把 Nx3（xyz）或 Nx4（xyzi）的 float32 点数组打包成 PointCloud2 消息。
 def make_pc2(node, points_f32, fields_xyz=True, frame='map'):
     msg = PointCloud2()
     msg.header.stamp = node.get_clock().now().to_msg()
@@ -120,6 +136,8 @@ def make_pc2(node, points_f32, fields_xyz=True, frame='map'):
     return msg
 
 
+# 把 (N,3) 轨迹转成 nav_msgs/Path：逐点按“指向下一点”的方向计算 yaw，
+# 末点使用 goal_yaw（若提供），否则沿用上一段方向。
 def traj_to_path(traj_3d, node, frame='map', goal_yaw=None):
     """
     Convert a PCT (N,3) trajectory to nav_msgs/Path with proper orientation.
@@ -162,6 +180,7 @@ def traj_to_path(traj_3d, node, frame='map', goal_yaw=None):
     return msg
 
 
+# 把轨迹画成 LINE_STRIP 线带 Marker，供 RViz 调试显示。
 def traj_to_marker(traj_3d, node, frame='map', marker_id=0,
                    color=None, width=0.1):
     if color is None:
@@ -180,6 +199,7 @@ def traj_to_marker(traj_3d, node, frame='map', marker_id=0,
     return m
 
 
+# 构造目标点球体 Marker（RViz 中显示目标位置）。
 def sphere_marker(pos, node, marker_id, color, frame='map', radius=0.5):
     m = Marker()
     m.header.stamp = node.get_clock().now().to_msg()
@@ -197,6 +217,7 @@ def sphere_marker(pos, node, marker_id, color, frame='map', radius=0.5):
     return m
 
 
+# 从四元数提取偏航角 yaw（绕 z 轴），用于目标朝向。
 def yaw_from_quaternion(q):
     """Extract yaw from geometry_msgs/Quaternion."""
     siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
@@ -206,9 +227,13 @@ def yaw_from_quaternion(q):
 
 # ─── global planner node ────────────────────────────────────────────────────
 
+# PctGlobalPlannerNode：PCT 全局规划 ROS2 节点。只输出全局路径，不做运动控制。
+# 内部按“参数解析 -> TF 初始化 -> 加载 tomogram -> 发布可视化 -> 订阅目标”组织。
 class PctGlobalPlannerNode(Node):
     """Standalone PCT global planner — outputs /pct_path, no motion control."""
 
+    # 声明并解析全部 ROS2 参数（tomogram 路径、坐标系、话题名、可视化开关、
+    # 目标 z 推断等），随后创建 TF、发布器、load_tomogram 服务并加载规划器。
     def __init__(self):
         super().__init__('pct_global_planner')
 
@@ -291,6 +316,7 @@ class PctGlobalPlannerNode(Node):
 
         # ── Step 1: load planner ────────────────────────────────────────
         self.get_logger().info(f'Loading tomogram: {self.tomo_path}')
+        # 核心初始化：加载 tomogram 并构建规划器，之后即可响应目标请求。
         self.planner = self._create_planner_for_tomogram(self.tomo_path)
         self.get_logger().info('Planner ready.')
 
@@ -323,9 +349,11 @@ class PctGlobalPlannerNode(Node):
 
     # ── odom fallback ───────────────────────────────────────────────────────
 
+    # odom 回退源：缓存最新里程计位姿，供 TF 获取失败时使用。
     def _odom_cb(self, msg: Odometry):
         self._latest_odom = msg
 
+    # 按 tomogram 文件路径构建 TomogramPlanner：目录与文件名分离后加载。
     def _create_planner_for_tomogram(self, tomo_path):
         tomo_path = os.path.abspath(tomo_path)
         tomo_dir = os.path.dirname(tomo_path) + os.sep
@@ -335,6 +363,7 @@ class PctGlobalPlannerNode(Node):
         planner.loadTomogram(tomo_name)
         return planner
 
+    # 在锁内热切换规划器与 tomogram，同时清空可视化缓存。
     def _replace_tomogram(self, tomo_path, planner):
         with self._planner_lock:
             self.planner = planner
@@ -343,6 +372,7 @@ class PctGlobalPlannerNode(Node):
             self._tomo_msg = None
             self._tomo_points_count = 0
 
+    # load_tomogram 服务回调：校验路径、重建规划器并重发可视化；失败时返回错误。
     def _on_load_tomogram(self, request, response):
         if not request.tomo_path:
             response.success = False
@@ -372,6 +402,7 @@ class PctGlobalPlannerNode(Node):
 
     # ── goal callbacks ──────────────────────────────────────────────────────
 
+    # /goal_pose 回调：必要时把目标变换到全局坐标系，提取 xyz 与 yaw 后进入统一处理。
     def _on_goal_pose(self, msg: PoseStamped):
         # Transform to global_frame if needed
         if msg.header.frame_id and msg.header.frame_id != self.global_frame:
@@ -394,6 +425,7 @@ class PctGlobalPlannerNode(Node):
 
         self._handle_goal(gx, gy, gz, gyaw, source='goal_pose')
 
+    # /clicked_point 回调：点选目标无朝向，变换到全局系后进入统一处理。
     def _on_clicked_point(self, msg: PointStamped):
         # Transform to global_frame if needed
         if msg.header.frame_id and msg.header.frame_id != self.global_frame:
@@ -419,6 +451,7 @@ class PctGlobalPlannerNode(Node):
 
         self._handle_goal(gx, gy, gz, None, source='clicked_point')
 
+    # 目标统一入口：空闲则立即规划；规划中则按参数决定排队等待或忽略新目标。
     def _handle_goal(self, gx, gy, gz, gyaw, source):
         """Queue a goal and start planning (or defer if busy)."""
         goal = (gx, gy, gz, gyaw, source)
@@ -438,6 +471,8 @@ class PctGlobalPlannerNode(Node):
 
     # ── planning ────────────────────────────────────────────────────────────
 
+    # 规划主流程：取机器人位姿 -> 推断目标 z（z≈0 时用 tomogram 高度） ->
+    # 转切片并做边界检查 -> 调 planner.plan -> 发布 A* 路径与平滑路径（含可视化）。
     def _start_planning(self, goal):
         gx, gy, gz, gyaw, source = goal
         self._planning = True
@@ -502,6 +537,7 @@ class PctGlobalPlannerNode(Node):
                 return
 
             # ── run planner ──────────────────────────────────────────────
+            # 核心调用：底层规划（A* 搜索 + 轨迹优化），结果与耗时随后发布。
             t0 = time.time()
             traj = self.planner.plan(start_pos, end_pos)
             elapsed = time.time() - t0
@@ -557,6 +593,7 @@ class PctGlobalPlannerNode(Node):
 
         self._finish_planning()
 
+    # 收尾：标记规划结束，若有排队目标则立即开始下一次规划。
     def _finish_planning(self):
         """Mark planning done; start pending goal if any."""
         self._planning = False
@@ -568,6 +605,7 @@ class PctGlobalPlannerNode(Node):
 
     # ── robot pose ──────────────────────────────────────────────────────────
 
+    # 通过 TF（map -> base_link）获取机器人位置；失败时按配置回退到 odom 位姿。
     def _get_robot_pose(self):
         """
         Get robot (x, y, z) in global_frame via TF.
@@ -599,6 +637,7 @@ class PctGlobalPlannerNode(Node):
 
     # ── empty path for failure ──────────────────────────────────────────────
 
+    # 发布空路径，向 RViz/下游节点通告本次规划失败（可附带原因日志）。
     def _publish_empty_path(self, reason=''):
         """Publish an empty path to signal planning failure."""
         msg = Path()
@@ -610,6 +649,8 @@ class PctGlobalPlannerNode(Node):
 
     # ── slice mapping ───────────────────────────────────────────────────────
 
+    # 把三维世界点映射到最匹配的 tomogram 切片：取该 xy 处各层高度中
+    # 不高于 z 且最接近的一层作为目标切片。
     def _z_to_slice(self, x, y, z):
         """Map a 3D world point to the best-matching tomogram slice index."""
         if self._tomo_data is None:
@@ -644,6 +685,8 @@ class PctGlobalPlannerNode(Node):
 
         return best_slice
 
+    # 在目标 xy 附近（半径 goal_z_search_radius_cells 格）搜索 tomogram 高程，
+    # 返回与参考高度最接近的有效高程，用于推断目标 z。
     def _infer_goal_z_from_tomogram(self, x, y, reference_z):
         """Infer a target height from nearby tomogram elevation cells."""
         if self.planner.elev_g is None:
@@ -676,6 +719,7 @@ class PctGlobalPlannerNode(Node):
         scores[~finite] = np.inf
         return float(local_elev[np.unravel_index(np.argmin(scores), scores.shape)])
 
+    # 判断 (x, y) 是否落在 tomogram 网格范围内（越界则无法规划）。
     def _point_in_bounds(self, x, y):
         """Check whether (x, y) falls within the tomogram grid."""
         if self._tomo_data is None:
@@ -692,6 +736,8 @@ class PctGlobalPlannerNode(Node):
 
     # ── visualization publishers ────────────────────────────────────────────
 
+    # 读取 tomogram pickle，做与 ROS1 一致的重叠层隐藏/代价合并后，
+    # 生成含高度与代价的 PointCloud2 可视化消息并缓存。
     def _build_tomo_msg(self):
         with open(self.tomo_path, 'rb') as f:
             self._tomo_data = pickle.load(f)
@@ -735,6 +781,7 @@ class PctGlobalPlannerNode(Node):
         self._tomo_points_count = len(pts4)
         self._tomo_msg = make_pc2(self, pts4, fields_xyz=False, frame=self.global_frame)
 
+    # 发布缓存的 tomogram 可视化点云（首次调用时先构建）。
     def _publish_tomo(self, log=True):
         with self._planner_lock:
             if self._tomo_msg is None:
@@ -744,9 +791,11 @@ class PctGlobalPlannerNode(Node):
             if log:
                 self.get_logger().info(f'Published {self._tomo_points_count} tomogram points')
 
+    # 定时重发 tomogram，供 RViz 持续显示。
     def _republish_tomo(self):
         self._publish_tomo(log=False)
 
+    # 递增分配标记 id，避免 RViz 中新旧标记冲突。
     def _next_marker_id(self):
         self._marker_counter += 1
         return self._marker_counter
@@ -754,6 +803,7 @@ class PctGlobalPlannerNode(Node):
 
 # ─── entry point ─────────────────────────────────────────────────────────────
 
+# 入口：初始化 rclpy、创建节点并 spin，处理 Ctrl-C 后干净关闭。
 def main():
     rclpy.init(args=sys.argv)
 

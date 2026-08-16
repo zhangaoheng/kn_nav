@@ -1,3 +1,20 @@
+// ============================================================================
+// global_localization.h
+// ----------------------------------------------------------------------------
+// 全局定位核心类 GloabalLocalization（沿用原代码拼写）的声明。
+// 该类是 open3d_loc 包的主节点：订阅 FAST-LIO 里程计与注册点云，用 Open3D ICP
+// 把当前扫描配准到离线 PCD 全局地图，输出 map 系下的定位结果与 tf。
+//
+// 结构：
+//   - 订阅 /Odometry_loc、/cloud_registered_body_1、/initialpose；
+//   - 发布 /map_3d、/scan_base_link、/scan_map、/localization_3d、
+//     /Odometry_open3d、/localization_status；
+//   - 服务 ~/load_map；定位线程 thread_loc_ 运行 Localization() 主循环。
+//
+// 数据流：里程计+点云 -> 定位线程(初始化ICP/跟踪ICP) -> map 系定位与 tf。
+// 坐标系约定：Alink2Blink 表示 A_link 在 B_link 下的位姿，即 T_B_A。
+// 依赖：open3d、pct_scan_navigation(消息/服务)、tf2。
+// ============================================================================
 #pragma once
 
 #include <rclcpp/rclcpp.hpp>

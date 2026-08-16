@@ -1,3 +1,15 @@
+# ============================================================================
+# unitree_go2_pct_scan_navigation.launch.py
+# ----------------------------------------------------------------------------
+# 宇树 Go2 机型入口 launch：把参数透传给统一的
+# local_pct_scan_navigation.launch.py 完成实际节点组装。
+#
+# 职责：
+#   * 固定 config_profile=unitree_go2，默认配置文件取自安装树
+#     config/unitree_go2/navigation.yaml。
+#   * 透传 navigation_mode / start_go2_bridge / use_sim_time 等全部开关参数。
+# ============================================================================
+
 """Unitree Go2 bringup using one unified navigation configuration."""
 
 from launch import LaunchDescription
@@ -7,6 +19,8 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 
 
+# 组装 LaunchDescription：声明可覆盖参数后，Include 底层统一 launch，
+# 并把自身的 LaunchConfiguration 原样转发（config_profile 固定为 unitree_go2）。
 def generate_launch_description():
     default_config = PathJoinSubstitution([
         FindPackageShare('pct_scan_navigation'),

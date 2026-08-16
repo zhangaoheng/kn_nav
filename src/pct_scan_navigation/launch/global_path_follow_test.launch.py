@@ -1,3 +1,22 @@
+# ============================================================================
+# global_path_follow_test.launch.py
+# ----------------------------------------------------------------------------
+# 纯全局路径跟踪测试 launch：只跑 PCT 全局规划 + 纯跟踪，不启用局部规划
+# （无 pct_art_coordinator、无 ROG 局部规划、无 /local_goal、/local_path）。
+#
+# 数据流：
+#   RViz goal -> pct_global_planner(/pct_path)
+#   -> pct_global_path_follow_coordinator(/global_path_follow/path)
+#   -> pure_pursuit_node(/cmd_vel) -> go2_cmd_vel_bridge -> 机器人。
+#   定位：fastlio_mapping + open3d 定位（/Odometry_loc、/Odometry_open3d）。
+#
+# 特点：
+#   * 配置文件仍按 config/local 目录下的 legacy 拆分 YAML 加载
+#     （fast_lio.yaml / pct_global_planner.yaml / pure_pursuit.yaml 等）。
+#   * CONFIG_NAME 常量决定用哪套配置（默认 local，可改 unitree）。
+#   * 每次运行建立独立日志目录，最多保留 MAX_LOG_SESSIONS 个会话。
+# ============================================================================
+
 """Launch PCT global path following without local ART/ROG planning."""
 
 import datetime
@@ -30,6 +49,8 @@ CONFIG_NAME = 'local'
 MAX_LOG_SESSIONS = 50
 
 
+# 定位源码包目录：优先按 launch 文件位置推断，其次从 install 树反推，
+# 兼容"从源码树直接运行"和"安装后运行"两种场景。
 def _source_package_dir():
     launch_file = Path(__file__).resolve()
     if launch_file.parents[1].name == 'pct_scan_navigation':
@@ -50,6 +71,8 @@ def _source_package_dir():
     return launch_file.parents[1]
 
 
+# 在源码包 log/ 下创建本次会话日志目录（时间戳-主机名-PID），
+# 并把 launch 与 ROS 日志都指向它；只保留最近 MAX_LOG_SESSIONS 个会话。
 def _prepare_log_dir():
     log_root = _source_package_dir() / 'log'
     log_root.mkdir(parents=True, exist_ok=True)
@@ -67,6 +90,7 @@ def _prepare_log_dir():
     return str(session_dir)
 
 
+# 为指定节点注册"启动完成"日志事件，便于确认链路上每个进程都已拉起。
 def log_process_start(node, label):
     return RegisterEventHandler(
         OnProcessStart(
@@ -76,6 +100,8 @@ def log_process_start(node, label):
     )
 
 
+# 组装测试链路：纯跟踪场景下 pure_pursuit 消费协调器输出的
+# /global_path_follow/path（remapping 见下），而非 SCAN 局部规划的 waypoints。
 def generate_launch_description():
     log_dir = _prepare_log_dir()
     use_sim_time = LaunchConfiguration('use_sim_time')
@@ -157,6 +183,8 @@ def generate_launch_description():
         name='pure_pursuit_node',
         output='both',
         parameters=[pursuit_params, {'use_sim_time': use_sim_time}],
+        # 关键 remapping：pure_pursuit 改吃协调器裁剪后的跟踪路径，
+        # 不走 SCAN 局部规划链路。
         remappings=[('/pct_path', '/global_path_follow/path')],
     )
 

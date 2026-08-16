@@ -1,3 +1,11 @@
+# ============================================================================
+# map_profiles.yaml —— 地图档案（旧式拆分配置，/switch_map 可运行时切换）。
+#   每个地图条目：
+#     pcd_path   全局定位用的离线点云（Open3D ICP 配准目标）
+#     tomo_path  PCT 全局规划用的 tomogram 代价地图（pickle）
+#     localization 定位配准阈值（fitness_eval_threshold 评估阈值、
+#                  threshold_fitness 跟踪阈值、threshold_fitness_init 初始化阈值）
+# ============================================================================
 maps:
   outdoor:
     pcd_path: "/home/nav_map/cross-floor-kn/global_map_downsize.pcd"

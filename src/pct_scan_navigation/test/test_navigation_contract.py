@@ -1,8 +1,27 @@
+# ============================================================================
+# test_navigation_contract.py
+# ----------------------------------------------------------------------------
+# 导航链路契约测试：不启动 ROS 节点，直接读取配置与源码文本，
+# 断言统一 navigation.yaml 与 legacy 拆分文件内容一致、启动链路与
+# 话题/服务契约符合预期（防止配置漂移与接口回归）。
+#
+# 覆盖范围：
+#   * 统一配置完整性（四机型）、coordinator 轻量 Mode2 契约、SCAN 动态
+#     waypoint 模式配置。
+#   * launch 文件参数/重映射/退出行为、机器人 wrapper 转发。
+#   * PCT 在线规划器不再依赖原始 PCD、open3d 服务接口最小化。
+#   * coordinator 只增不减的发布/去重逻辑、软重置幂等链路。
+#   * 纯全局路径跟踪（pure pursuit）链路保留。
+#
+# 运行：pytest test_navigation_contract.py
+# ============================================================================
+
 from pathlib import Path
 
 import yaml
 
 
+# 被测源码路径：本包根目录、SCAN-Planner、open3d 定位、PCT_planner。
 ROOT = Path(__file__).resolve().parents[1]
 SCAN_MANAGE = ROOT.parent / 'SCAN-Planner' / 'src' / 'planner' / 'plan_manage'
 OPEN3D_LOC = (
@@ -11,14 +30,18 @@ OPEN3D_LOC = (
 PCT_PLANNER = ROOT.parent / 'PCT_planner'
 
 
+# 读取某机型目录下的 YAML 配置。
 def load(profile, name):
     return yaml.safe_load((ROOT / 'config' / profile / name).read_text())
 
 
+# 读取某机型目录下的统一 navigation.yaml。
 def load_unified(profile):
     return load(profile, 'navigation.yaml')
 
 
+# 核心回归：四机型统一配置的每个节点参数必须与 legacy 拆分文件
+# 完全一致，且节点集合、maps 内容、version 符合约定。
 def test_unified_configs_preserve_every_legacy_parameter():
     required_nodes = {
         'fastlio_mapping',
@@ -66,6 +89,8 @@ def test_unified_configs_preserve_every_legacy_parameter():
                 'go2_cmd_vel_bridge']['ros__parameters'])
 
 
+# 约束 PCT 在线规划器：脚本与配置不得再引用原始 PCD 输入
+# （pcd_path / /global_points 等），只依赖 tomogram。
 def test_pct_online_planner_does_not_require_raw_pcd():
     source = (PCT_PLANNER / 'scripts/run_ros2_global_planner.py').read_text()
     for legacy in ('pcd_path', '/global_points', '_publish_pcd', 'import open3d'):
@@ -86,6 +111,7 @@ def test_pct_online_planner_does_not_require_raw_pcd():
         assert params['tomo_path']
 
 
+# 约束 coordinator 配置只保留轻量 Mode2 契约参数（模式/帧/话题/间距）。
 def test_coordinator_profiles_use_lightweight_mode2_contract():
     expected = {
         'mode': 2,
@@ -100,6 +126,8 @@ def test_coordinator_profiles_use_lightweight_mode2_contract():
         assert params == expected
 
 
+# 约束 SCAN 配置：navi_mode=2（动态 waypoint 模式），使用全局坐标系
+# map 云，移除旧式话题/超时/姿态相关参数。
 def test_scan_profiles_select_dynamic_waypoint_mode():
     unsupported = {
         'body_pose_topic',
@@ -133,6 +161,8 @@ def test_scan_profiles_select_dynamic_waypoint_mode():
         assert controller['finish_yaw'] == 0.10
 
 
+# 约束统一 launch：必须从单一 navigation.yaml 加载参数，禁止旧的
+# 分文件 launch 参数，Mode 与话题重映射要同步注入。
 def test_launch_synchronizes_modes_and_current_scan_topics():
     text = (ROOT / 'launch/local_pct_scan_navigation.launch.py').read_text()
     assert "DeclareLaunchArgument('config_file'" in text
@@ -152,6 +182,7 @@ def test_launch_synchronizes_modes_and_current_scan_topics():
     assert "on_exit=Shutdown" in text
 
 
+# 约束机器人 wrapper launch 的参数转发契约。
 def test_robot_launches_forward_navigation_mode():
     for robot in ('unitree_go2', 'unitree_go2w'):
         text = (ROOT / 'launch' / f'{robot}_pct_scan_navigation.launch.py').read_text()
@@ -164,6 +195,7 @@ def test_robot_launches_forward_navigation_mode():
         assert f"'config_profile': '{robot}'" in text
 
 
+# 约束 open3d 定位服务的 .srv 接口与 CMake 安装项。
 def test_navigation_service_interfaces_are_minimal_and_direct():
     expected = {
         'Relocalize.srv': [
@@ -192,6 +224,7 @@ def test_navigation_service_interfaces_are_minimal_and_direct():
         assert f'"srv/{name}"' in cmake
 
 
+# 约束定位服务节点：使用位姿话题、无 confidence 机制，且配置参数集固定。
 def test_navigation_service_node_uses_pose_topics_without_confidence():
     source = (OPEN3D_LOC / 'src/localization_service_node.cpp').read_text()
     for service_name in (
@@ -221,6 +254,8 @@ def test_navigation_service_node_uses_pose_topics_without_confidence():
         assert params['relocalize_timeout_sec'] > 0.0
 
 
+# 约束运行时管理接口：coordinator 源码不得再引用旧式规划/控制消息，
+# 新消息/服务接口已生成并存在。
 def test_runtime_management_interfaces_are_explicit_and_minimal():
     source = (ROOT / 'src/pct_scan_coordinator.cpp').read_text()
     cmake = (ROOT / 'CMakeLists.txt').read_text()
@@ -244,6 +279,8 @@ def test_runtime_management_interfaces_are_explicit_and_minimal():
         assert (ROOT / rel_path).exists()
 
 
+# 约束 SCAN Mode2：走 dynamicWaypointCallback / waypoints 订阅，
+# 禁止旧的 PRESET_TARGET / planNextWaypoint 顺序执行路径。
 def test_scan_mode2_is_dynamic_and_has_no_mandatory_sequence():
     header = (SCAN_MANAGE / 'include/plan_manage/scan_replan_fsm.h').read_text()
     source = (SCAN_MANAGE / 'src/scan_replan_fsm.cpp').read_text()
@@ -259,6 +296,8 @@ def test_scan_mode2_is_dynamic_and_has_no_mandatory_sequence():
     assert 'keypoint_recorder.py' not in cmake
 
 
+# 约束 coordinator：每次完整路径都整体发布，不订阅里程计、不做
+# "滚动剩余 waypoints"的旧行为。
 def test_coordinator_publishes_each_complete_path_without_odom_rolling():
     source = (ROOT / 'src/pct_scan_coordinator.cpp').read_text()
     assert 'publishWaypointPath(sampled)' in source
@@ -275,6 +314,7 @@ def test_coordinator_publishes_each_complete_path_without_odom_rolling():
         assert removed not in source
 
 
+# 约束 SCAN Mode2 实现细节：基于全局参考 + 弧长前视获取局部目标。
 def test_scan_mode2_preserves_global_reference_and_uses_arc_lookahead():
     source = (SCAN_MANAGE / 'src/scan_replan_fsm.cpp').read_text()
     replan = source.split(
@@ -297,6 +337,8 @@ def test_scan_mode2_preserves_global_reference_and_uses_arc_lookahead():
     assert 'candidate_time +=' not in target
 
 
+# 约束完成判定：coordinator 用 route_active_ 闩锁路线，SCAN/控制器
+# 各自完成目标且不加新状态话题。
 def test_goal_completion_is_latched_without_new_status_topics():
     coordinator = (ROOT / 'src/pct_scan_coordinator.cpp').read_text()
     fsm = (SCAN_MANAGE / 'src/scan_replan_fsm.cpp').read_text()
@@ -310,6 +352,8 @@ def test_goal_completion_is_latched_without_new_status_topics():
     assert 'final_yaw_ - odom_yaw_' in controller
 
 
+# 约束软重置链路：nav_manager -> coordinator ~/reset_route -> SCAN
+# 重置，各环节可重复执行（幂等）。
 def test_soft_reset_clears_coordinator_route_and_is_idempotent():
     coordinator = (ROOT / 'src/pct_scan_coordinator.cpp').read_text()
     manager = (ROOT / 'scripts/nav_manager_node.py').read_text()
@@ -322,6 +366,7 @@ def test_soft_reset_clears_coordinator_route_and_is_idempotent():
     assert 'if (was_active && have_odom_)' in fsm
 
 
+# 约束纯全局跟踪测试链路（coordinator 可执行 + pure_pursuit 启动）保留。
 def test_direct_global_path_follow_chain_is_preserved():
     launch_text = (ROOT / 'launch/global_path_follow_test.launch.py').read_text()
     cmake_text = (ROOT / 'CMakeLists.txt').read_text()

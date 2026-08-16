@@ -1,3 +1,5 @@
+# 切换地图服务（/switch_map）：请求 map_name 切换到的地图名。
+# 导航管理会先软重置，再依次加载定位 PCD 与 PCT tomogram。响应：success、message。
 string map_name
 ---
 bool success

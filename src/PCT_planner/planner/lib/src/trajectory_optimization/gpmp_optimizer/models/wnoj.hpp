@@ -1,3 +1,18 @@
+// ============================================================================
+// 文件名: wnoj.hpp
+// 用途:   GP 运动模型 (wnoj = White Noise On Jerk, 加加速度为白噪声):
+//         状态含位置、速度、加速度三维, 据此推导状态转移 Phi、过程噪声
+//         协方差 Q 与插值权重 Lambda/Psi, 供 GP 因子做轨迹优化。
+// 结构:   WhiteNoiseOnJerkModel1D（一维）与 WhiteNoiseOnJerkModel2D
+//         （二维, x/y 两维独立拼成 6x6 块对角矩阵, 实际使用）。
+// 关键公式（每维, tau 为时间间隔, qc 为白噪声强度）:
+//   Q      = 【【tau^5/20, tau^4/8,  tau^3/6】,
+//             【tau^4/8,  tau^3/3,  tau^2/2】,
+//             【tau^3/6,  tau^2/2,  tau    】】 * qc
+//   Phi    = 【【1, tau, tau^2/2】, 【0, 1, tau】, 【0, 0, 1】】
+//   psi    = Q 乘 Phi 转置再乘 Q 逆（见 QInverse 解析逆）
+//   lambda = Phi 减 psi 乘 Phi
+// ============================================================================
 #pragma once
 
 #include <Eigen/Core>
@@ -5,6 +20,7 @@
 
 using Matrix6d = Eigen::Matrix<double, 6, 6>;
 
+// 一维加加速度白噪声模型: 状态为位置、速度、加速度, 各矩阵为 3x3。
 class WhiteNoiseOnJerkModel1D {
  public:
   static inline Eigen::Matrix3d Q(const double qc, const double tau) {
@@ -64,6 +80,7 @@ class WhiteNoiseOnJerkModel1D {
   }
 };
 
+// 二维版: x/y 两维各一个 3x3 块拼成 6x6 块对角矩阵, 逻辑与 1D 相同。
 class WhiteNoiseOnJerkModel2D {
  public:
   static inline Matrix6d Q(const double qc, const double tau) {

@@ -1,9 +1,18 @@
+// ============================================================================
+// 文件：open3d_conversions.cpp
+// 说明：open3d_conversions 头文件声明的转换函数实现：
+//       Open3D 点云（geometry 与 t::geometry 两种）与 ROS PointCloud2
+//       之间的双向转换；另有 addPointField / sizeOfPointField 两个
+//       构建 PointField 字段描述的小工具。
+// ============================================================================
 #include "open3d_conversions/open3d_conversions.h"
 #include "open3d_conversions/RosConversions.h"
 #include "open3d_conversions/DpgtConversions.h"
 
 namespace open3d_conversions
 {
+// Open3D 几何点云 -> PointCloud2：按是否带颜色设置 xyz 或 xyz+rgb 字段，
+// 逐点拷贝坐标与颜色（颜色 0-1 归一化到 0-255）。
   void open3dToRos(const open3d::geometry::PointCloud &pointcloud, sensor_msgs::msg::PointCloud2 &ros_pc2,
                    std::string frame_id)
   {
@@ -51,6 +60,8 @@ namespace open3d_conversions
     }
   }
 
+// PointCloud2 -> Open3D 几何点云：逐点拷贝 xyz；字段数多于 3 且未跳过颜色时，
+// 按 rgb 或 intensity 字段填充颜色。
   void rosToOpen3d(const std::shared_ptr<const sensor_msgs::msg::PointCloud2> &ros_pc2, open3d::geometry::PointCloud &o3d_pc,
                    bool skip_colors)
   {
@@ -93,6 +104,8 @@ namespace open3d_conversions
       }
     }
   }
+// Tensor 版点云 -> PointCloud2：按可变参数指定的字段名与类型
+// （xyz/rgb/自定义 float|int）构建字段布局并逐点写入。
   void open3dToRos(const open3d::t::geometry::PointCloud &pointcloud, sensor_msgs::msg::PointCloud2 &ros_pc2,
                    std::string frame_id, int t_num_fields, ...)
   {
@@ -215,6 +228,8 @@ namespace open3d_conversions
     }
   }
 
+// PointCloud2 -> Tensor 版点云：识别 xyz/rgb/自定义字段并按类型转换，
+// 写入 t::geometry::PointCloud 的属性。
   void rosToOpen3d(const std::shared_ptr<const sensor_msgs::msg::PointCloud2> &ros_pc2, open3d::t::geometry::PointCloud &o3d_tpc,
                    bool skip_colors)
   {
@@ -308,6 +323,7 @@ namespace open3d_conversions
   }
 } // namespace open3d_conversions
 
+// 工具：向 PointCloud2 追加一个 PointField 描述并返回更新后的字节偏移。
 inline int addPointField(sensor_msgs::msg::PointCloud2 &cloud_msg, const std::string &name, int count, int datatype,
                          int offset)
 
@@ -323,6 +339,7 @@ inline int addPointField(sensor_msgs::msg::PointCloud2 &cloud_msg, const std::st
   return offset + point_field.count * sizeOfPointField(datatype);
 }
 
+// 工具：返回 PointField 数据类型对应的字节数（1/2/4/8）。
 inline int sizeOfPointField(int datatype)
 {
   if ((datatype == sensor_msgs::msg::PointField::INT8) || (datatype == sensor_msgs::msg::PointField::UINT8))

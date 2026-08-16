@@ -1,3 +1,16 @@
+// ============================================================
+// 文件：uniform_bspline.cpp
+// 模块：bspline_opt（B 样条轨迹表示）
+// 职责：实现均匀 B 样条曲线的构造、求值、求导、可行性检查
+//       与插值参数化。
+// 关键算法：
+//   - evaluateDeBoor：De Boor 递推求值；
+//   - getDerivativeControlPoints：B 样条求导（阶数降一）；
+//   - checkFeasibility / lengthenTime：速度/加速度可行性检查，
+//     并按比例拉长时间使轨迹满足动力学限制；
+//   - parameterizeToBspline：给定路径点与边界速度/加速度，
+//     构造线性方程组 Ax=b 解出插值控制点。
+// ============================================================
 #include "bspline_opt/uniform_bspline.h"
 
 namespace scan_planner
@@ -11,6 +24,9 @@ namespace scan_planner
 
   UniformBspline::~UniformBspline() {}
 
+  // setUniformBspline：构造均匀 B 样条。
+  // 生成均匀节点向量 u_：前 p_+1 个与后 p_+1 个节点为重复边界
+  // 节点，中间节点以 interval_ 均匀递增。
   void UniformBspline::setUniformBspline(const Eigen::MatrixXd &points, const int &order,
                                          const double &interval)
   {
@@ -57,6 +73,9 @@ namespace scan_planner
 
   Eigen::MatrixXd UniformBspline::getControlPoint() { return control_points_; }
 
+  // evaluateDeBoor：De Boor 算法求 B 样条在参数 u 处的值。
+  // 先确定 u 落在哪个节点区间，再取出涉及的 p_+1 个控制点
+  // 逐层线性插值（r=1..p_），最终 d[p_] 即曲线点。
   Eigen::VectorXd UniformBspline::evaluateDeBoor(const double &u) const
   {
 
@@ -96,6 +115,9 @@ namespace scan_planner
   //   return evaluateDeBoor(t + u_(p_));
   // }
 
+  // getDerivativeControlPoints：求导控制点。
+  // B 样条导数仍是 B 样条：阶数降一，控制点
+  // Qi = p_*(P_{i+1}-P_i)/(u_{i+p_+1}-u_{i+1})。
   Eigen::MatrixXd UniformBspline::getDerivativeControlPoints()
   {
     // The derivative of a b-spline is also a b-spline, its order become p_-1
@@ -131,6 +153,10 @@ namespace scan_planner
     feasibility_tolerance_ = tolerance;
   }
 
+  // checkFeasibility：检查轨迹速度/加速度是否超限。
+  // 用一阶/二阶导控制点与节点跨度计算速度/加速度峰值，与物理
+  // 上限（含容差）比较；ratio 给出需要的时间放大倍数（速度超限
+  // 取比值，加速度超限取平方根比值）。
   bool UniformBspline::checkFeasibility(double &ratio, bool show)
   {
     bool fea = true;
@@ -191,6 +217,9 @@ namespace scan_planner
     return fea;
   }
 
+  // lengthenTime：按 ratio 拉长轨迹时间。
+  // 中间节点区间整体加长 delta_t（按比例递增），两端节点不动，
+  // 从而使速度/加速度峰值按比例下降以满足动力学限制。
   void UniformBspline::lengthenTime(const double &ratio)
   {
     int num1 = 5;
@@ -206,6 +235,10 @@ namespace scan_planner
 
   // void UniformBspline::recomputeInit() {}
 
+  // parameterizeToBspline：路径点插值参数化。
+  // 输入 K 个路径点加 4 个边界导数（首末速度/加速度），构造
+  // (K+4)x(K+2) 的带状矩阵 A（B 样条求值关系 + 导数约束），
+  // 解 Ax=b 得到 (K+2) 个控制点，使样条插值给定路径点。
   void UniformBspline::parameterizeToBspline(const double &ts, const vector<Eigen::Vector3d> &point_set,
                                              const vector<Eigen::Vector3d> &start_end_derivative,
                                              Eigen::MatrixXd &ctrl_pts)
@@ -287,6 +320,7 @@ namespace scan_planner
       return -1.0;
   }
 
+  // getLength：按给定分辨率对轨迹离散采样，累加相邻点距离得弧长。
   double UniformBspline::getLength(const double &res)
   {
     double length = 0.0;
@@ -301,6 +335,8 @@ namespace scan_planner
     return length;
   }
 
+  // getJerk：计算整条轨迹的 jerk 代价（三阶导数控制点的
+  // 平方和乘对应节点跨度），用于性能评估。
   double UniformBspline::getJerk()
   {
     UniformBspline jerk_traj = getDerivative().getDerivative().getDerivative();

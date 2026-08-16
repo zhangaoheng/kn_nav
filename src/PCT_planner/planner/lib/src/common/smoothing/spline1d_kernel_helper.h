@@ -14,18 +14,27 @@
  * limitations under the License.
  *****************************************************************************/
 
+// ============================================================================
+// 文件名: spline1d_kernel_helper.h
+// 用途:   样条核矩阵计算助手(单例): 计算各阶导数惩罚对应的积分核矩阵,
+//         并用哈希表缓存, 避免重复计算
+// 结构:   Spline1dKernelHelper 单例类(Instance()), 内部 kernel_map_ 缓存
+// ============================================================================
+
 #pragma once
 
 #include <Eigen/Core>
 #include <string>
 #include <unordered_map>
 
+// 单例工具: 根据样条阶数与导数阶数计算核矩阵, 结果按参数缓存
 namespace common {
 
 class Spline1dKernelHelper {
  public:
   static Spline1dKernelHelper& Instance();
 
+// 获取指定样条阶数、n 阶导数与积分长度下的核矩阵(带缓存)
   Eigen::MatrixXd Kernel(const uint32_t spline_order,
                          const uint32_t nth_derivative,
                          const double integral_length);

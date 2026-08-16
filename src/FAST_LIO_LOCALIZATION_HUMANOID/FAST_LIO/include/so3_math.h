@@ -1,3 +1,11 @@
+// ============================================================================
+// 文件：so3_math.h
+// 用途：SO(3) 旋转数学工具：反对称矩阵、指数/对数映射、旋转矩阵转欧拉角，
+//       供 ESKF 状态更新与姿态解算使用。
+// 结构：skew_sym_mat、Exp 三个重载、Log、RotMtoEuler。
+// 依赖：Eigen。
+// 说明：上游开源算法（FAST-LIO），工作区内作为里程计前端使用。
+// ============================================================================
 #ifndef SO3_MATH_H
 #define SO3_MATH_H
 
@@ -7,6 +15,7 @@
 #define SKEW_SYM_MATRX(v) 0.0,-v[2],v[1],v[2],0.0,-v[0],-v[1],v[0],0.0
 
 template<typename T>
+// 由向量构造 3x3 反对称矩阵（叉乘矩阵），用于向量叉乘的矩阵表达
 Eigen::Matrix<T, 3, 3> skew_sym_mat(const Eigen::Matrix<T, 3, 1> &v)
 {
     Eigen::Matrix<T, 3, 3> skew_sym_mat;
@@ -15,6 +24,7 @@ Eigen::Matrix<T, 3, 3> skew_sym_mat(const Eigen::Matrix<T, 3, 1> &v)
 }
 
 template<typename T>
+// 指数映射：旋转向量 -> 旋转矩阵（罗德里格斯公式）
 Eigen::Matrix<T, 3, 3> Exp(const Eigen::Matrix<T, 3, 1> &&ang)
 {
     T ang_norm = ang.norm();
@@ -34,6 +44,7 @@ Eigen::Matrix<T, 3, 3> Exp(const Eigen::Matrix<T, 3, 1> &&ang)
 }
 
 template<typename T, typename Ts>
+// 指数映射：角速度*dt -> 旋转增量矩阵（IMU 姿态递推用）
 Eigen::Matrix<T, 3, 3> Exp(const Eigen::Matrix<T, 3, 1> &ang_vel, const Ts &dt)
 {
     T ang_vel_norm = ang_vel.norm();
@@ -58,6 +69,7 @@ Eigen::Matrix<T, 3, 3> Exp(const Eigen::Matrix<T, 3, 1> &ang_vel, const Ts &dt)
 }
 
 template<typename T>
+// 指数映射：角轴三分量版本
 Eigen::Matrix<T, 3, 3> Exp(const T &v1, const T &v2, const T &v3)
 {
     T &&norm = sqrt(v1 * v1 + v2 * v2 + v3 * v3);
@@ -77,6 +89,7 @@ Eigen::Matrix<T, 3, 3> Exp(const T &v1, const T &v2, const T &v3)
     }
 }
 
+// 对数映射：旋转矩阵 -> 旋转向量（小角度用近似式 0.5*K 避免奇异）
 /* Logrithm of a Rotation Matrix */
 template<typename T>
 Eigen::Matrix<T,3,1> Log(const Eigen::Matrix<T, 3, 3> &R)
@@ -87,6 +100,7 @@ Eigen::Matrix<T,3,1> Log(const Eigen::Matrix<T, 3, 3> &R)
 }
 
 template<typename T>
+// 旋转矩阵 -> 欧拉角（绕 Z-Y-X 内旋），含万向锁奇异处理
 Eigen::Matrix<T, 3, 1> RotMtoEuler(const Eigen::Matrix<T, 3, 3> &rot)
 {
     T sy = sqrt(rot(0,0)*rot(0,0) + rot(1,0)*rot(1,0));

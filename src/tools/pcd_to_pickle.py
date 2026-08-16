@@ -32,6 +32,18 @@ Example::
 Default output is written next to the PCD (``<pcd_stem>.pickle``).
 """
 
+# ============================================================
+# 文件：pcd_to_pickle.py —— PCD 地图转 PCT 规划器 tomogram pickle（CPU 版）。
+# 用途：把降采样后的点云地图转换成 PCT 全局规划器（planner_wrapper）所需
+#       的 5 层体素栅格 pickle：可通行代价 + x/y 梯度 + 地面高程 + 净空
+#       高度（详见文件顶部 docstring）；是 CUDA/CuPy 版 tomogram.py 的
+#       numpy 纯 CPU 移植，numba 可选加速膨胀。
+# 结构：read_points 读点云 -> build_layers 体素化（高程/净空两层） ->
+#       traversability_slice / inflate_slice / build_inflated 计算可通行
+#       代价与膨胀 -> simplify_layers(_floors) 层精简 -> build_tomogram
+#       组装 5 层 float16 数据 -> main 落盘并自校验。
+# 用法：python3 pcd_to_pickle.py --pcd /path/to/map.pcd [--resolution 0.05]
+# ============================================================
 import argparse
 import os
 import pickle
@@ -58,6 +70,7 @@ try:  # optional: much faster inflation on CPU
     from numba import njit
 
     @njit(cache=True)
+# numba 加速版单层膨胀内核：逐单元取邻域内 代价 x 权重 的最大值。
     def _inflate_slice(trav_cost, score_table, half_k):
         n_row, n_col = trav_cost.shape
         out = np.zeros_like(trav_cost)
@@ -86,10 +99,12 @@ except ImportError:
     HAS_NUMBA = False
 
 
+# 统一的 [INFO] 前缀日志输出。
 def log(message):
     print(f"[INFO] {message}", flush=True)
 
 
+# 用 open3d 读取 PCD 并返回 float32 点阵：只保留前三维，剔除 NaN 点。
 def read_points(pcd_path):
     try:
         import open3d as o3d
@@ -109,6 +124,9 @@ def read_points(pcd_path):
     return points
 
 
+# 体素化点睛（CUDA 内核的 numpy 复刻）：把点投到栅格单元，按点所在切片
+# 归属（k<=s 写入高程层 layers_g 取 max，k>s 写入净空层 layers_c 取 min）；
+# 先按单元号稳定排序，再用 reduceat 按单元聚合，避免逐单元重排序。
 def build_layers(points, center, resolution, dim_x, dim_y, n_slice,
                  slice_h0, slice_dh):
     """Replicate the CUDA tomography kernel with numpy.
@@ -176,6 +194,7 @@ def build_layers(points, center, resolution, dim_x, dim_y, n_slice,
     return layers_g, layers_c
 
 
+# 积分图快速求每个单元 (2*half_k+1) 方形窗口内的数值和（零填充边界）。
 def box_sum(values, half_k):
     """Sum of a (2*half_k+1)^2 window around every cell (zero padding)."""
     pad = half_k
@@ -192,6 +211,9 @@ def box_sum(values, half_k):
     )
 
 
+# 单层可通行代价（CUDA trav 内核复刻）：间隙过低即障碍；正常区间按与
+# 自由间隙的偏差线性加价；再按梯度分 可站立/可跨越/过陡 三档叠加
+# 梯度代价，稀疏可跨越区（窗口内可站立单元不足）直接判为障碍。
 def traversability_slice(layers_g_s, layers_c_s, trav):
     """Traversability cost for one slice (port of the CUDA trav kernel)."""
     g = layers_g_s
@@ -243,6 +265,8 @@ def traversability_slice(layers_g_s, layers_c_s, trav):
     return cost
 
 
+# 单层代价膨胀（numpy 回退实现）：按权重表把邻域代价向外扩散，
+# 有 numba 时直接走 _inflate_slice 内核。
 def inflate_slice(trav_cost, score_table, half_k):
     """Inflate one traversability slice (port of the CUDA inflation kernel)."""
     if HAS_NUMBA:
@@ -264,6 +288,8 @@ def inflate_slice(trav_cost, score_table, half_k):
     return out
 
 
+# 对每一层执行 可通行代价 + 膨胀：先按安全余量/膨胀半径生成距离权重表，
+# 再逐层计算并记录进度日志。
 def build_inflated(layers_g, layers_c, trav):
     """Traversability + inflation for every slice."""
     n_slice = layers_g.shape[0]
@@ -295,6 +321,7 @@ def build_inflated(layers_g, layers_c, trav):
     return inflated
 
 
+# 上游启发式层精简：只保留 高程抬升、代价下降且非障碍 的"独特"切片。
 def simplify_layers(layers_g, inflated, cost_barrier):
     """Keep only slices where the scene is unique (port of layer simplification)."""
     n_slice = layers_g.shape[0]
@@ -316,6 +343,8 @@ def simplify_layers(layers_g, inflated, cost_barrier):
     return np.asarray(idx_simp, dtype=np.int64)
 
 
+# 按楼层精简（推荐用于多层建筑）：每当可通行区域的中位高程变化达到
+# 0.75 倍层厚就保留一个新切片，即每层楼取一个代表切片。
 def simplify_layers_floors(layers_g, inflated, cost_barrier, slice_dh):
     """Select one representative slice per traversable floor level.
 
@@ -341,6 +370,9 @@ def simplify_layers_floors(layers_g, inflated, cost_barrier, slice_dh):
     return np.asarray(idx_simp, dtype=np.int64)
 
 
+# 组装最终 tomogram：由点云包围盒定栅格尺寸与中心，完成 体素化 ->
+# 可通行代价与膨胀 -> 层精简 -> 中心差分梯度 -> 组装 5 层 float16 数据
+# （代价/x 梯度/y 梯度/高程/净空），返回规划器期望的字典结构。
 def build_tomogram(points, resolution, ground_h, slice_dh, trav):
     points_min = points.min(axis=0).copy()
     points_max = points.max(axis=0)
@@ -426,6 +458,8 @@ def build_tomogram(points, resolution, ground_h, slice_dh, trav):
     }
 
 
+# 命令行参数：PCD 路径、输出路径、栅格分辨率、地面高度、层厚、精简模式、
+# 离群裁剪百分位，以及全部可通行性参数（默认取自 DEFAULT_TRAV）。
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Convert a PCD map into a PCT planner tomogram pickle.",
@@ -462,6 +496,8 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+# 入口：校验 PCD、按需百分位裁剪离群点、构建 tomogram 并落盘 pickle，
+# 最后重新加载打印 schema 自校验（对比 planner_wrapper 期望结构）。
 def main(argv=None):
     log(f"python={sys.version.split()[0]}")
     log(f"numpy={np.__version__}")

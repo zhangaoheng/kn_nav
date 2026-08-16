@@ -1,3 +1,15 @@
+// ============================================================
+// 文件：grid_map.cpp
+// 模块：plan_env（占据栅格地图）
+// 职责：实现 GridMap 的全部逻辑：参数加载与初始化、传感器
+//       回调、深度图投影、射线投射更新占据、膨胀层维护、
+//       滑动窗口地图与可视化发布。
+// 核心数据流：
+//   传感器位姿/深度图或点云 → (projectDepthImage|cloudCallback)
+//   → raycastProcess（DDA 射线投射 + 对数几率累加）
+//   → applyOccupancyUpdate（更新占据并同步膨胀层）
+//   → 规划器查询 getInflateOccupancy。
+// ============================================================
 #include "plan_env/grid_map.h"
 #include <cmath>
 #include <limits>
@@ -15,6 +27,9 @@ void load_parameter(rclcpp::Node *node, const std::string &name, T &value, const
 }
 }  // namespace
 
+// initMap：加载全部参数并初始化地图数据结构与回调。
+// 关键步骤：读参数 → 计算对数几率阈值与体素数 → 分配缓冲区
+// → 注册传感器/位姿订阅与定时器 → 创建发布器。
 void GridMap::initMap(rclcpp::Node *node)
 {
   node_ = node;
@@ -285,6 +300,9 @@ void GridMap::updateInflation(const Eigen::Vector3i& id, int delta, const std::v
                        md_.occupancy_buffer_inflate_, ignore_mask);
 }
 
+// applyOccupancyUpdate：写入单个体素的对数几率并维护膨胀层。
+// 仅当体素的占据状态（是否超过 min_occupancy_log_）发生变化时，
+// 才对该体素施加/解除膨胀（updateInflation ±1）。
 void GridMap::applyOccupancyUpdate(const Eigen::Vector3i& id, double new_log_odds)
 {
   if (!isInMap(id))
@@ -321,6 +339,10 @@ void GridMap::resetCellByAddressForSliding(int addr, const std::vector<char>& cl
     updateInflation(id_g, -1, &clear_mask);
 }
 
+// updateSlidingMap：滑动窗口地图更新。
+// 当机器人移动超过阈值（map_sliding_thresh_vox_）时，把地图
+// 原点平移到新位置；超出整图尺寸则整图重置，否则把滑出区域的
+// 体素清零（并清除其膨胀计数），再平移边界索引。
 void GridMap::updateSlidingMap(const Eigen::Vector3d& center)
 {
   if (!mp_.map_sliding_en_)
@@ -471,6 +493,10 @@ int GridMap::setCacheOccupancy(Eigen::Vector3d pos, int occ)
   return idx_ctns;
 }
 
+// projectDepthImage：把深度图按相机内参反投影成世界系点云。
+// 逐像素（按 skip_pixel_ 抽样、margin 裁边）读取深度，过滤
+// 无效/过近/过远值，用传感器位姿旋转平移得到世界坐标，
+// 存入 md_.proj_points_。
 void GridMap::projectDepthImage()
 {
   // md_.proj_points_.clear();
@@ -539,6 +565,12 @@ void GridMap::projectDepthImage()
   }
 }
 
+// raycastProcess：射线投射更新占据（核心更新函数）。
+// 对每个投影点：终点体素记一次 hit，起点到终点的射线经过的
+// 每个体素记一次 miss（用 RayCaster 迭代），全部缓存到
+// cache_voxel_；随后统一按“hit 数 vs miss 数”决定该体素的
+// 对数几率增量（prob_hit_log_/prob_miss_log_）并 clamp，
+// 最后写回占用缓冲区。
 void GridMap::raycastProcess()
 {
   // if (md_.proj_points_.size() == 0)
@@ -740,6 +772,9 @@ void GridMap::visCallback()
   publishDepthCloud();
 }
 
+// updateOccupancyCallback：定时触发的地图更新入口。
+// 需要更新时：depth 传感器先投影深度图（点云传感器直接用
+// 已缓存的投影点），再执行 raycastProcess 完成占据更新。
 void GridMap::updateOccupancyCallback()
 {
   if (!md_.occ_need_update_)
@@ -771,6 +806,10 @@ void GridMap::updateOccupancyCallback()
   md_.use_cloud_update_ = false;
 }
 
+// depthPoseCallback：深度传感器回调（深度图+位姿 时间同步）。
+// 把深度图转为 CV_16UC1 存为 md_.depth_image_，用位姿（可选叠加
+// depth_extrinsic_ 外参）得到传感器射线原点/姿态，置位
+// occ_need_update_ 触发下一次更新。
 void GridMap::depthPoseCallback(const sensor_msgs::msg::Image::ConstSharedPtr &img,
                                 const nav_msgs::msg::Odometry::ConstSharedPtr &pose)
 {
@@ -834,6 +873,9 @@ void GridMap::depthPoseCallback(const sensor_msgs::msg::Image::ConstSharedPtr &i
   }
 }
 
+// sensorPoseCallback：lidar 传感器位姿回调。
+// 记录射线原点/姿态（可选叠加 lidar_extrinsic_ 外参），供
+// cloudCallback 把点云转到世界系；并触发滑动地图跟随。
 void GridMap::sensorPoseCallback(const nav_msgs::msg::Odometry::ConstSharedPtr &pose_msg)
 {
   if (mp_.sensor_type_ != "lidar")
@@ -869,6 +911,10 @@ void GridMap::slidingMapFrameCallback(const nav_msgs::msg::Odometry::ConstShared
   md_.sliding_map_frame_pos_ = Eigen::Vector3d(pos.x, pos.y, pos.z);
 }
 
+// cloudCallback：lidar 点云回调。
+// 把点云（世界系或传感器系）投影为世界系点 proj_points_，
+// 只保留局部更新范围内的点，置位 use_cloud_update_ 与
+// occ_need_update_，交由 updateOccupancyCallback 处理。
 void GridMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &img)
 {
   if (mp_.sensor_type_ != "lidar")

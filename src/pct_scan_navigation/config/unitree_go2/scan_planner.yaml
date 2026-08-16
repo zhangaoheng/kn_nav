@@ -1,3 +1,11 @@
+# ============================================================================
+# scan_planner.yaml —— SCAN 局部规划节点参数（旧式拆分配置）。
+#   fsm.*        状态机参数（navi_mode 导航模式、thresh_replan 重规划阈值、
+#                planning_horizon 规划视距、finish_dist/yaw 终点容差、fail_safe 兜底）
+#   grid_map.*   占据栅格地图参数（分辨率、滑动窗口尺寸、膨胀、传感器内参等）
+#   manager.*    轨迹管理器参数（速度/加速度/加加速度限制、corridor_max_deviation 走廊最大偏离）
+#   optimization.* B 样条优化代价权重（smooth 平滑/collision 碰撞/feasibility 可行性/corridor 走廊）
+# ============================================================================
 scan_planner_node:
   ros__parameters:
     map_name: "outdoor"

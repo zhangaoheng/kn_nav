@@ -1,3 +1,23 @@
+// ============================================================
+// 文件：bspline_optimizer.cpp
+// 模块：bspline_opt（B 样条轨迹优化）
+// 职责：实现 B 样条轨迹优化器的全部逻辑。
+// 优化目标（代价函数各项）：
+//   1) 平滑代价 calcSmoothnessCost：惩罚三阶差分（jerk）的平方和，
+//      使轨迹平滑、加速度变化平缓；
+//   2) 碰撞/距离代价 calcDistanceCostRebound：把每个控制点沿
+//      回弹方向推离障碍物至安全距离 dist0（距离误差小用三次
+//      惩罚，误差大用二次函数平滑过渡）；
+//   3) 可行性代价 calcFeasibilityCost：惩罚速度/加速度超过
+//      max_vel_/max_acc_ 的控制点，保证动力学可执行；
+//   4) 拟合代价 calcFitnessCost（Refine 阶段）：向引导路径 ref_pts_
+//      拟合，纵向（沿路径）与横向（垂直路径）分开加权；
+//   5) 走廊代价 calcCorridorCost（最近新增）：约束控制点偏离
+//      PCT 走廊中心线的距离不超过 corridor_max_deviation_。
+// 求解器：L-BFGS（lbfgs.hpp），先 Rebound 绕障、后 Refine 精修。
+// 最近深度改动：加入 PCT 走廊约束（lambda_corridor_），并在
+// 优化后对整条轨迹逐点采样做碰撞检查，碰撞则触发重启。
+// ============================================================
 #include "bspline_opt/bspline_optimizer.h"
 #include "bspline_opt/gradient_descent_optimizer.h"
 #include <algorithm>
@@ -8,6 +28,10 @@
 namespace scan_planner
 {
 
+  // setParam：从 ROS 2 参数服务器读取优化权重与限制参数。
+  // 平滑 lambda_smooth、碰撞 lambda_collision、可行性 lambda_feasibility、
+  // 拟合 lambda_fitness、PCT 走廊 lambda_corridor（默认 5.0）、
+  // 安全距离 dist0、速度/加速度上限 max_vel_/max_acc_、B 样条阶数 order。
   void BsplineOptimizer::setParam(rclcpp::Node *node)
   {
     const auto get_double = [node](const std::string &name, double default_value) {
@@ -66,6 +90,13 @@ namespace scan_planner
   /* This function is very similar to check_collision_and_rebound(). 
    * It was written separately, just because I did it once and it has been running stably since March 2020.
    * But I will merge then someday.*/
+  // initControlPoints：初始化控制点并建立碰撞回弹数据。
+  // 流程：
+  //   1) 沿初始轨迹逐段采样，用膨胀地图找出所有碰撞区间（segment_ids）；
+  //   2) 对每个碰撞区间调用 A* 搜索绕障路径；
+  //   3) 计算每个区间可调整的控制点索引上下界；
+  //   4) 求 A* 路径与当前轨迹的交点，为每个控制点生成
+  //      base_point（碰撞点）与 direction（推开方向）。
   std::vector<std::vector<Eigen::Vector3d>> BsplineOptimizer::initControlPoints(Eigen::MatrixXd &init_points, bool flag_first_init /*= true*/)
   {
 
@@ -407,6 +438,13 @@ namespace scan_planner
     return cost;
   }
 
+  // calcDistanceCostRebound：碰撞（距离）代价。
+  // 对每个带回弹方向的内部控制点，计算其沿 direction 到 base_point
+  // 的投影距离 dist；dist 小于安全距离 dist0 时产生惩罚：
+  //   距离误差小：三次惩罚（梯度连续）；
+  //   距离误差大：二次函数惩罚（避免梯度爆炸）。
+  // 轨迹足够平滑时（迭代>3 且平滑代价较小），先执行
+  // check_collision_and_rebound() 检查新障碍并生成新的回弹方向。
   void BsplineOptimizer::calcDistanceCostRebound(const Eigen::MatrixXd &q, double &cost,
                                                  Eigen::MatrixXd &gradient, int iter_num, double smoothness_cost)
   {
@@ -448,6 +486,10 @@ namespace scan_planner
     }
   }
 
+  // calcFitnessCost：曲线拟合代价（Refine 阶段）。
+  // 用三点平均近似当前曲线上的点，与引导路径点 ref_pts_ 比较，
+  // 沿路径方向（纵向）与垂直方向（横向）分别按 a2/b2 加权，
+  // 使优化结果贴合引导路径而不偏离。
   void BsplineOptimizer::calcFitnessCost(const Eigen::MatrixXd &q, double &cost, Eigen::MatrixXd &gradient)
   {
 
@@ -478,6 +520,8 @@ namespace scan_planner
     }
   }
 
+  // nearestCorridorPoint：求给定点在 PCT 走廊折线（corridor_path_）
+  // 上的最近点（含对每个线段的投影与 clamp），用于走廊代价计算。
   Eigen::Vector3d BsplineOptimizer::nearestCorridorPoint(
       const Eigen::Vector3d &point) const
   {
@@ -507,6 +551,9 @@ namespace scan_planner
     return nearest;
   }
 
+  // calcCorridorCost：PCT 走廊偏离代价（本包最近新增）。
+  // 当控制点偏离走廊中心线的距离超过 corridor_max_deviation_ 时，
+  // 按超出量的平方计惩罚并回传梯度，把整条轨迹约束在走廊内。
   void BsplineOptimizer::calcCorridorCost(const Eigen::MatrixXd &q, double &cost,
                                           Eigen::MatrixXd &gradient)
   {
@@ -528,6 +575,9 @@ namespace scan_planner
     }
   }
 
+  // calcSmoothnessCost：平滑代价。
+  // 默认（falg_use_jerk=true）用四阶差分近似 jerk 并惩罚其平方和；
+  // 否则退化为用三阶差分近似加速度的平方和惩罚。
   void BsplineOptimizer::calcSmoothnessCost(const Eigen::MatrixXd &q, double &cost,
                                             Eigen::MatrixXd &gradient, bool falg_use_jerk /* = true*/)
   {
@@ -569,6 +619,10 @@ namespace scan_planner
     }
   }
 
+  // calcFeasibilityCost：可行性（动力学）代价。
+  // 由控制点差分除以节点跨度得到速度/加速度，超出上限时按
+  // 超出量平方（默认分支）或分段三次（SECOND_DERIVATIVE_CONTINOUS
+  // 分支）计罚，并把梯度回传到相邻控制点。
   void BsplineOptimizer::calcFeasibilityCost(const Eigen::MatrixXd &q, double &cost,
                                              Eigen::MatrixXd &gradient)
   {
@@ -773,6 +827,12 @@ namespace scan_planner
 #endif
   }
 
+  // check_collision_and_rebound：整条轨迹碰撞检查 + 回弹数据重建。
+  // 依次检查每个内部控制点是否落入膨胀障碍：
+  //   是：向两侧扫描找到无障碍的 in/out 控制点作为区间端点，
+  //       对该区间做 A* 搜索并生成回弹方向；若终点仍在障碍中
+  //       则置 STOP_FOR_ERROR 停止本次规划。
+  // 有新的有效障碍时返回 true 并置 STOP_FOR_REBOUND，触发外层重启。
   bool BsplineOptimizer::check_collision_and_rebound(void)
   {
 
@@ -1019,6 +1079,14 @@ namespace scan_planner
     return flag_success;
   }
 
+  // rebound_optimize：回弹优化主循环（L-BFGS）。
+  // do-while 循环内：
+  //   1) 把内部控制点拷入一维变量数组，调用 lbfgs 求解；
+  //   2) 求解完成后对整条轨迹按时间步长逐点采样做碰撞检查
+  //      （getInflateOccupancy 带航向），这是“整条轨迹碰撞检查”；
+  //   3) 无碰撞则成功返回；有碰撞则加大碰撞权重 new_lambda2_、
+  //      重建回弹数据并重启（最多 MAX_RESART_NUMS_SET 次）；
+  //      被 earlyExit 取消（STOP_FOR_REBOUND）时也重启（至多 20 次）。
   bool BsplineOptimizer::rebound_optimize()
   {
     iter_num_ = 0;
@@ -1134,6 +1202,10 @@ namespace scan_planner
     return success;
   }
 
+  // refine_optimize：精修优化（Refine 阶段）。
+  // 仅用平滑/拟合/可行性三项代价做 L-BFGS 求解（无回弹距离项），
+  // 求解后同样逐点采样检查碰撞：若碰撞则加大拟合权重 lambda4_
+  // 重新迭代，保证精修结果仍无碰撞。
   bool BsplineOptimizer::refine_optimize()
   {
     iter_num_ = 0;
@@ -1211,6 +1283,10 @@ namespace scan_planner
     return flag_safe;
   }
 
+  // combineCostRebound：Rebound 阶段总代价。
+  // 把各项代价按权重线性组合：lambda1_*平滑 + new_lambda2_*距离 +
+  // lambda3_*可行性 + lambda_corridor_*走廊；梯度同理叠加，
+  // 并强制 z 方向（第 3 行）梯度为零（二维平面运动）。
   void BsplineOptimizer::combineCostRebound(const double *x, double *grad, double &f_combine, const int n)
   {
 
@@ -1239,6 +1315,9 @@ namespace scan_planner
     memcpy(grad, grad_3D.data() + 3 * order_, n * sizeof(grad[0]));
   }
 
+  // combineCostRefine：Refine 阶段总代价。
+  // 组合平滑/拟合/可行性三项：lambda1_*平滑 + lambda4_*拟合 +
+  // lambda3_*可行性，梯度叠加后同样置零 z 方向。
   void BsplineOptimizer::combineCostRefine(const double *x, double *grad, double &f_combine, const int n)
   {
 

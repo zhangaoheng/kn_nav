@@ -1,3 +1,14 @@
+// ============================================================
+// 文件：raycast.cpp
+// 模块：plan_env（射线投射）
+// 职责：实现 DDA 体素遍历射线投射。
+// 核心思想（Amanatides & Woo, 1987）：用参数 t 表示射线
+// origin + t*direction，维护沿三个轴向跨越下一个体素边界
+// 所需的 t 值（tMaxX/Y/Z）与跨一步的增量（tDeltaX/Y/Z），
+// 每步选择最小的 tMax 对应轴前进一格。
+// 应用：GridMap 用它在“传感器原点 → 命中点”之间标记被射线
+// 穿过的体素为 miss（free），命中点标记为 hit。
+// ============================================================
 #include <Eigen/Eigen>
 #include <cmath>
 #include <iostream>
@@ -11,6 +22,8 @@ double mod(double value, double modulus) {
   return fmod(fmod(value, modulus) + modulus, modulus);
 }
 
+// intbound：求最小的正 t，使 s + t*ds 恰为整数（跨过体素边界）。
+// ds<0 时先对称到正方向；最终归结为求 (1 - mod(s,1))/ds。
 double intbound(double s, double ds) {
   // Find the smallest positive t such that s+t*ds is an integer.
   if (ds < 0) {
@@ -22,6 +35,9 @@ double intbound(double s, double ds) {
   }
 }
 
+// Raycast（数组输出版）：一次性射线投射。
+// 从起点体素沿射线逐格前进，把 [min, max) 内的体素索引写入
+// output；超过射线长度或到达终点体素即停止。
 void Raycast(const Eigen::Vector3d& start, const Eigen::Vector3d& end, const Eigen::Vector3d& min,
              const Eigen::Vector3d& max, int& output_points_cnt, Eigen::Vector3d* output) {
   //    std::cout << start << ' ' << end << std::endl;
@@ -125,6 +141,8 @@ void Raycast(const Eigen::Vector3d& start, const Eigen::Vector3d& end, const Eig
   }
 }
 
+// Raycast（vector 输出版）：逻辑同数组版，输出改为 push_back，
+// 并带 1500 个体素的上限保护（超出抛 out_of_range）。
 void Raycast(const Eigen::Vector3d& start, const Eigen::Vector3d& end, const Eigen::Vector3d& min,
              const Eigen::Vector3d& max, std::vector<Eigen::Vector3d>* output) {
   //    std::cout << start << ' ' << end << std::endl;
@@ -225,6 +243,8 @@ void Raycast(const Eigen::Vector3d& start, const Eigen::Vector3d& end, const Eig
   }
 }
 
+// setInput：初始化射线参数（起点/终点体素、步进方向、tMax/tDelta
+// 初值），三个方向都没有位移时返回 false（无遍历意义）。
 bool RayCaster::setInput(const Eigen::Vector3d& start,
                          const Eigen::Vector3d& end /* , const Eigen::Vector3d& min,
                          const Eigen::Vector3d& max */) {
@@ -274,6 +294,8 @@ bool RayCaster::setInput(const Eigen::Vector3d& start,
     return true;
 }
 
+// step：返回当前体素坐标到 ray_pt，并按最小 tMax 规则推进到
+// 下一个体素；到达终点体素时返回 false 结束遍历。
 bool RayCaster::step(Eigen::Vector3d& ray_pt) {
   // if (x_ >= min_.x() && x_ < max_.x() && y_ >= min_.y() && y_ < max_.y() &&
   // z_ >= min_.z() && z_ <

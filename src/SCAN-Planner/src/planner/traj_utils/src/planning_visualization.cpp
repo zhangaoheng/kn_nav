@@ -1,3 +1,16 @@
+// ============================================================================
+// 文件名：planning_visualization.cpp
+// 用途：SCAN 局部规划可视化工具类（PlanningVisualization）的实现文件。
+//       在构造函数中按话题创建各 Marker 发布器（goal_point/global_list/
+//       init_list/optimal_list/a_star_list），并实现把路径/控制点/轨迹转换为
+//       Marker/MarkerArray 发布的各种显示接口。
+// 结构：
+//   - 构造函数：读取 frame_id 并创建 5 个可视化发布器（transient_local QoS）
+//   - displayMarkerList / displayOptimalTraj：核心显示实现（球 + 折线）
+//   - generate*Array：把几何数据填充进 MarkerArray（供一次发布多类内容）
+// 注意：各 display* 接口在无订阅者时直接返回（避免无效计算）。
+// 依赖：planning_visualization.h（声明）、uniform_bspline、visualization_msgs
+// ============================================================================
 #include <traj_utils/planning_visualization.h>
 #include <cmath>
 #include <limits>
@@ -7,6 +20,8 @@ using std::cout;
 using std::endl;
 namespace scan_planner
 {
+    // 构造函数：读取 grid_map.frame_id 作为可视化坐标系，创建目标点、全局
+    // 列表、初始列表、最优列表与 A* 列表五个 Marker 发布器。
   PlanningVisualization::PlanningVisualization(rclcpp::Node *node)
   {
     node_ = node;
@@ -22,6 +37,8 @@ namespace scan_planner
   }
 
   // // real ids used: {id, id+1000}
+    // 核心显示实现：把点集同时发布为球体列表（id）与折线（id+1000），
+    // 颜色/透明度统一应用，无订阅者时由调用方提前跳过。
   void PlanningVisualization::displayMarkerList(const MarkerPublisher::SharedPtr &pub, const vector<Eigen::Vector3d> &list, double scale,
                                                 Eigen::Vector4d color, int id)
   {
@@ -57,6 +74,7 @@ namespace scan_planner
   }
 
   // real ids used: {id, id+1}
+    // 生成折线路径 MarkerArray（球 + 连线，id 与 id+1）。
   void PlanningVisualization::generatePathDisplayArray(visualization_msgs::msg::MarkerArray &array,
                                                        const vector<Eigen::Vector3d> &list, double scale, Eigen::Vector4d color, int id)
   {
@@ -92,6 +110,7 @@ namespace scan_planner
   }
 
   // real ids used: {1000*id ~ (arrow nums)+1000*id}
+    // 生成箭头 MarkerArray：每两个点构成一个箭头（起点-终点），id 从 1000*id 起。
   void PlanningVisualization::generateArrowDisplayArray(visualization_msgs::msg::MarkerArray &array,
                                                         const vector<Eigen::Vector3d> &list, double scale, Eigen::Vector4d color, int id)
   {
@@ -134,6 +153,7 @@ namespace scan_planner
     }
   }
 
+    // 显示目标点（白色球体，透明度取 color(3)）。
   void PlanningVisualization::displayGoalPoint(Eigen::Vector3d goal_point, Eigen::Vector4d color, const double scale, int id)
   {
     visualization_msgs::msg::Marker sphere;
@@ -158,6 +178,7 @@ namespace scan_planner
     goal_point_pub->publish(sphere);
   }
 
+    // 显示全局参考路径（青色折线），无订阅者直接返回。
   void PlanningVisualization::displayGlobalPathList(vector<Eigen::Vector3d> init_pts, const double scale, int id)
   {
 
@@ -170,6 +191,7 @@ namespace scan_planner
     displayMarkerList(global_list_pub, init_pts, scale, color, id);
   }
 
+    // 显示局部重规划初始路径（蓝色折线）。
   void PlanningVisualization::displayInitPathList(vector<Eigen::Vector3d> init_pts, const double scale, int id)
   {
 
@@ -182,6 +204,7 @@ namespace scan_planner
     displayMarkerList(init_list_pub, init_pts, scale, color, id);
   }
 
+    // 显示优化后的控制点序列（红色点列，按列展开为点集）。
   void PlanningVisualization::displayOptimalList(Eigen::MatrixXd optimal_pts, int id)
   {
 
@@ -200,6 +223,8 @@ namespace scan_planner
     displayMarkerList(optimal_list_pub, list, 0.15, color, id);
   }
 
+    // 显示最优 B 样条轨迹（点睛）：等时间采样轨迹点，按速度大小给球体
+    // 渐变色（慢红 -> 快绿），直观展示轨迹速度分布。
   void PlanningVisualization::displayOptimalTraj(UniformBspline position_traj, int id)
   {
     if (optimal_list_pub->get_subscription_count() == 0)
@@ -271,6 +296,7 @@ namespace scan_planner
     optimal_list_pub->publish(line_strip);
   }
 
+    // 显示 A* 搜索路径：每条路径用随机颜色/尺寸绘制，便于区分多条候选。
   void PlanningVisualization::displayAStarList(std::vector<std::vector<Eigen::Vector3d>> a_star_paths, int id /* = Eigen::Vector4d(0.5,0.5,0,1)*/)
   {
 
@@ -304,6 +330,7 @@ namespace scan_planner
     }
   }
 
+    // 先把旧箭头清空，再把点列生成的新箭头一次性发布。
   void PlanningVisualization::displayArrowList(const MarkerArrayPublisher::SharedPtr &pub,
                                                 const vector<Eigen::Vector3d> &list,
                                                 double scale, Eigen::Vector4d color, int id)

@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 """Measure stationary pose fluctuation from a ROS 2 Odometry topic."""
 
+# ============================================================
+# 文件：check_open3d_odom_stability.py —— Open3D 定位稳定性测量工具。
+# 用途：订阅里程计话题（默认 /Odometry_open3d），在机器人静止时采集
+#       位姿样本，统计位置与姿态波动（均值、标准差、峰峰值、漂移），
+#       输出终端报告，可另存 CSV，用于评估静态场景下的定位抖动水平。
+# 结构：Sample 样本数据类 -> 四元数/角度统计工具（quaternion_to_rpy、
+#       unwrap、stats）-> OdomStabilityMonitor 订阅节点（预热后采样）->
+#       print_report / write_csv 报告输出 -> main 入口。
+# 用法：python3 check_open3d_odom_stability.py [--topic ... --duration ...]
+# ============================================================
 import argparse
 import csv
 import math
@@ -18,6 +28,7 @@ from rclpy.utilities import remove_ros_args
 
 
 @dataclass
+# 单个里程计采样样本：相对采样开始的时间、消息时间戳、位置与欧拉角。
 class Sample:
     elapsed: float
     stamp: float
@@ -29,6 +40,7 @@ class Sample:
     yaw: float
 
 
+# 四元数转欧拉角（roll/pitch/yaw）：先归一化，非法或零模长四元数直接报错。
 def quaternion_to_rpy(x: float, y: float, z: float, w: float):
     norm = math.sqrt(x * x + y * y + z * z + w * w)
     if not math.isfinite(norm) or norm < 1e-9:
@@ -48,6 +60,7 @@ def quaternion_to_rpy(x: float, y: float, z: float, w: float):
     return roll, pitch, yaw
 
 
+# 角度序列解卷绕：把相邻角度差限制在 ±π 内，消除周期跳变，便于统计。
 def unwrap(values):
     if not values:
         return []
@@ -61,6 +74,7 @@ def unwrap(values):
     return result
 
 
+# 一组数值的统计摘要：均值、标准差、最值、极差与首尾漂移。
 def stats(values):
     return {
         "mean": statistics.fmean(values),
@@ -72,6 +86,8 @@ def stats(values):
     }
 
 
+# 稳定性监控节点：订阅里程计，按 warmup 预热、duration 采样两阶段采集样本，
+# 时长到后置 finished 标志结束；非有限值消息计入 invalid_messages。
 class OdomStabilityMonitor(Node):
     def __init__(self, topic: str, warmup: float, duration: float):
         super().__init__("open3d_odom_stability_monitor")
@@ -92,6 +108,8 @@ class OdomStabilityMonitor(Node):
             f"(warmup={warmup:.1f}s, sample={duration:.1f}s)"
         )
 
+# 回调点睛：预热期内丢弃本帧；采样时长到即停止；位置与四元数任一非有限
+# 或四元数非法时跳过（计 invalid），其余转换为欧拉角存入样本。
     def odom_callback(self, msg: Odometry):
         now = time.monotonic()
         if self.first_message_time is None:
@@ -145,6 +163,7 @@ class OdomStabilityMonitor(Node):
         )
 
 
+# 打印单个轴（位置或姿态）的统计行，scale 用于毫米/度等量纲换算。
 def print_axis_stats(name, values, unit, scale=1.0):
     result = stats(values)
     print(
@@ -155,6 +174,8 @@ def print_axis_stats(name, values, unit, scale=1.0):
     )
 
 
+# 汇总报告：以首帧为基准计算水平/三维偏移，绕质心计算波动 RMS 与最大偏移，
+# 再输出三轴姿态统计，并给出样本数、时间跨度与平均接收频率。
 def print_report(samples, invalid_messages):
     xs = [sample.x for sample in samples]
     ys = [sample.y for sample in samples]
@@ -223,6 +244,7 @@ def print_report(samples, invalid_messages):
     print("==============================================================")
 
 
+# 原始样本落盘为 CSV：相对时间、消息时间戳、位置与欧拉角（角度用度）。
 def write_csv(path, samples):
     output = Path(path).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -253,6 +275,7 @@ def write_csv(path, samples):
     print(f"\nRaw samples saved to: {output}")
 
 
+# 命令行参数：话题、采样时长、预热时长、首帧等待超时与 CSV 输出路径。
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Measure stationary localization fluctuation from Odometry."
@@ -291,6 +314,8 @@ def parse_args():
     return args
 
 
+# 入口：初始化 rclpy 并循环 spin；首帧超过等待超时以退出码 2 结束，
+# 有有效样本则输出报告（可选写 CSV），否则以退出码 3 结束。
 def main():
     args = parse_args()
     rclpy.init(args=sys.argv)

@@ -1,3 +1,16 @@
+# ============================================================================
+# unitree_A2_pct_scan_navigation.launch.py
+# ----------------------------------------------------------------------------
+# 宇树 A2 机型入口 launch：把参数透传给统一的
+# local_pct_scan_navigation.launch.py 完成实际节点组装。
+#
+# 职责：
+#   * 固定 config_profile=A2。
+#   * 默认 config_file 指向 /home/nav_map/config/A2/navigation.yaml，
+#     运行时配置以 /home/nav_map 为唯一数据源（见下方内联注释）。
+#   * 透传 navigation_mode / start_go2_bridge / use_sim_time 等全部开关参数。
+# ============================================================================
+
 """Unitree A2 bringup using one unified navigation configuration."""
 
 from launch import LaunchDescription
@@ -7,6 +20,8 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 
 
+# 组装 LaunchDescription：声明可覆盖参数后，Include 底层统一 launch，
+# 并把自身的 LaunchConfiguration 原样转发（config_profile 固定为 A2）。
 def generate_launch_description():
     # Runtime map/navigation configuration lives outside the ROS install tree.
     # This keeps /home/nav_map as the single source of truth and avoids stale

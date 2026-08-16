@@ -1,4 +1,23 @@
 #!/usr/bin/env python3
+# ============================================================================
+# nav_manager_node.py
+# ----------------------------------------------------------------------------
+# 导航运行时管理节点（轻量"看门狗"），三大职责：
+#
+#   1. 地图切换：/switch_map 服务按 map_profiles 加载定位 PCD 与规划 tomogram，
+#      切换前先软重置，成功后更新 /current_map 状态（latched 话题）。
+#   2. 软重置 / 重启：/restart_navigation 服务支持 SOFT_RESET（停机器 + 清
+#      空规划链路）与 FULL_RESTART（拉起外部重启命令，常用于整系统重启）。
+#   3. 定位丢失保护：订阅 /localization_status，一旦进入 TRACKING_LOST 立即
+#      软重置停止导航，避免在错误位姿下继续运动。
+#
+# 数据流：
+#   /switch_map -> LoadLocalizationMap(global_localization_node)
+#                -> LoadTomogram(pct_global_planner)
+#   /restart_navigation / 定位丢失 -> 零速 /cmd_vel + 清 coordinator 路线
+#   + 空 /scan_planner/waypoints + Trigger(scan_planner_node 重置)。
+# ============================================================================
+
 """Lightweight navigation runtime manager for PCT + SCAN navigation."""
 
 import os
@@ -26,7 +45,13 @@ from pct_scan_navigation.srv import (
 )
 
 
+# 运行时管理器节点：统一封装地图切换、软重置/全重启、定位丢失保护。
+# 所有服务/话题回调共享 ReentrantCallbackGroup，配合 MultiThreadedExecutor
+# 并行处理，避免一个慢服务阻塞其他回调。
 class NavManagerNode(Node):
+    # 初始化：声明参数 -> 建发布器（/current_map 为 latched、/cmd_vel、
+    # /scan_planner/waypoints 为 latched）-> 建四个服务客户端 -> 订阅
+    # /localization_status -> 提供 /switch_map 与 /restart_navigation 服务。
     def __init__(self):
         super().__init__('nav_manager_node')
 
@@ -99,6 +124,8 @@ class NavManagerNode(Node):
             'Nav manager ready: profiles='
             f'{self.navigation_config_path or self.map_profiles_path or "<unset>"}')
 
+    # 从统一配置 navigation.yaml 的 maps 段读取全部地图 profile
+    # （每项含 pcd_path / tomo_path / localization 阈值），供 /switch_map 使用。
     def _load_profiles(self) -> Dict[str, Any]:
         profile_path = self.navigation_config_path or self.map_profiles_path
         if not profile_path:
@@ -119,6 +146,8 @@ class NavManagerNode(Node):
             return {}
         return maps
 
+    # 带超时的同步式服务调用封装：等待服务上线 -> call_async ->
+    # 等待结果或超时；返回 (响应, 错误字符串)，避免阻塞 executor 线程。
     def _call_service(self, client, request):
         if not client.wait_for_service(timeout_sec=self.service_timeout_s):
             return None, f'service unavailable: {client.srv_name}'
@@ -141,6 +170,9 @@ class NavManagerNode(Node):
             return None, result_box['error']
         return result_box['result'], ''
 
+    # 地图切换流程：校验 map_name 与路径 -> 发布 LOADING 状态 -> 软重置
+    # 停车清路 -> 依次加载定位地图与 tomogram；任一步失败都回滚为 FAILED
+    # 状态并返回错误，全部成功才更新 current_map_name 并发布 LOADED。
     def _switch_map_cb(self, request, response):
         profile = self._profiles.get(request.map_name)
         if profile is None:
@@ -195,6 +227,8 @@ class NavManagerNode(Node):
         response.message = f'switched to map: {request.map_name}'
         return response
 
+    # 重启服务：SOFT_RESET 走软重置；FULL_RESTART 则用 shlex 解析
+    # full_restart_command 并后台拉起（节点本身不等待其结束）。
     def _restart_cb(self, request, response):
         if request.mode == RestartNavigation.Request.SOFT_RESET:
             self._soft_reset(reason='restart_navigation')
@@ -221,6 +255,9 @@ class NavManagerNode(Node):
         response.message = f'unknown restart mode: {request.mode}'
         return response
 
+    # 软重置核心（幂等）：1) 发布零速 Twist 立即停车；2) 触发 coordinator
+    # 清空路线；3) 发布空 waypoints 让 SCAN 丢弃当前跟踪；4) 触发 SCAN 重置。
+    # 任一服务失败只告警不中断，保证后续步骤继续执行。
     def _soft_reset(self, reason: str):
         self.cmd_vel_pub.publish(Twist())
 
@@ -243,6 +280,7 @@ class NavManagerNode(Node):
         elif resp is not None and not resp.success:
             self.get_logger().warn(f'scan reset failed: {resp.message}')
 
+    # 发布 /current_map（latched）状态消息，供 RViz/监控端显示地图状态。
     def _publish_map_status(self, state: int, map_name: str, reason: str):
         msg = MapStatus()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -252,6 +290,11 @@ class NavManagerNode(Node):
         msg.reason = reason
         self.map_status_pub.publish(msg)
 
+    # 定位状态回调（定位丢失保护核心）：
+    #   * 同步地图名：以 global_localization_node 上报的名称为准（定位 YAML
+    #     是启动地图名的唯一数据源），避免维护两处默认值。
+    #   * 上升沿检测 TRACKING_LOST：仅在状态从非丢失变为丢失时触发一次
+    #     软重置（用 _last_localization_state 去抖），防止持续告警刷屏。
     def _localization_status_cb(self, msg: LocalizationStatus):
         # The localization YAML is the single source of truth for the startup
         # map name. Mirror the name reported by global_localization_node instead
@@ -274,6 +317,7 @@ class NavManagerNode(Node):
         self._last_localization_state = msg.state
 
 
+# 入口：多线程执行器（4 线程）跑 NavManagerNode，服务与回调可并行。
 def main(args=None):
     rclpy.init(args=args)
     node = NavManagerNode()

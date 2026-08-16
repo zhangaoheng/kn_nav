@@ -1,9 +1,26 @@
+// ============================================================
+// 文件：gradient_descent_optimizer.cpp
+// 模块：bspline_opt（B 样条轨迹优化）
+// 职责：实现简单梯度下降优化器。
+// 算法：每次迭代沿负梯度方向取步长 alpha（由相邻两步的
+//       s=y 信息估计，类似 Barzilai-Borwein 步长），再用
+//       Armijo 条件做线搜索收缩步长，保证目标函数充分下降；
+//       以梯度模长或迭代次数作为停止条件。
+// ============================================================
 #include <bspline_opt/gradient_descent_optimizer.h>
 
 #define RESET "\033[0m"
 #define RED "\033[31m"
 
 GradientDescentOptimizer::RESULT
+// optimize：梯度下降主循环。
+// 1) 校验 min_grad_/iter_limit_ 参数是否合理；
+// 2) 首次迭代的步长 alpha0 按“首步位移不超过 0.1m”缩放；
+// 3) 交替更新 x_k / x_kp1，alpha 由 s·y / y·y 估计（类
+//    Barzilai-Borwein 步长），并以 Armijo 条件（充分下降）
+//    做线搜索收缩步长；
+// 4) 梯度模长小于 min_grad_ 时视为收敛（FIND_MIN）；
+//    代价函数置 force_return 时按外部指令返回（RETURN_BY_ORDER）。
 GradientDescentOptimizer::optimize(Eigen::VectorXd &x_init_optimal, double &opt_f)
 {
     if (min_grad_ < 1e-10)

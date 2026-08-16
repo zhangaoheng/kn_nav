@@ -1,4 +1,11 @@
 // #include <ros/ros.h>
+// ============================================================
+// preprocess.h —— FAST-LIO 点云预处理模块头文件（上游开源算法）
+// 定义多型雷达（AVIA / VELO16 / OUST64 / MID360）原始点云到内部
+// PointType 的转换、按线分桶与特征提取所需的数据结构（枚举、
+// orgtype 单点类型）以及 Preprocess 类的接口。
+// 工作区内作为里程计前端的数据预处理环节使用。
+// ============================================================
 #include <rclcpp/rclcpp.hpp>
 #include <pcl_conversions/pcl_conversions.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -7,11 +14,13 @@
 
 using namespace std;
 
+// 判断点坐标是否异常（坐标绝对值过大视为无效点）
 #define IS_VALID(a) ((abs(a) > 1e8) ? true : false)
 
 typedef pcl::PointXYZINormal PointType;
 typedef pcl::PointCloud<PointType> PointCloudXYZI;
 
+// 支持的雷达类型枚举（AVIA=1，VELO16，OUST64，MID360）
 enum LID_TYPE
 {
   AVIA = 1,
@@ -50,6 +59,8 @@ enum E_jump
   Nr_blind
 };
 
+// 单点特征类型结构：记录点到雷达的距离 range、相邻点间距 dista、
+// 跳变/盲区判定结果 edj 与特征类别 ftype，供特征提取算法使用。
 struct orgtype
 {
   double range;
@@ -151,6 +162,8 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(livox_ros::LivoxPointXyzitl,
     (uint8_t, line, line)
 )
 
+// 点云预处理类：负责各型雷达原始消息到 PointCloudXYZI 的转换、
+// 按线分桶、时间戳归一化，以及平面/边缘/跳变等特征点提取。
 class Preprocess
 {
   public:
@@ -165,6 +178,7 @@ class Preprocess
   void set(bool feat_en, int lid_type, double bld, int pfilt_num);
 
   // sensor_msgs::PointCloud2::ConstPtr pointcloud;
+  // 预处理结果缓存：完整点云、角点(边缘)云、面点(平面)云
   PointCloudXYZI pl_full, pl_corn, pl_surf;
   PointCloudXYZI pl_buff[128]; //maximum 128 line lidar
   vector<orgtype> typess[128]; //maximum 128 line lidar
@@ -181,6 +195,7 @@ private:
   void velodyne_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg);
   void mid360_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg);
   void default_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg);
+  // 特征提取主逻辑：对单线点云逐段判定平面/边缘/跳变并输出特征点
   void give_feature(PointCloudXYZI &pl, vector<orgtype> &types);
   void pub_func(PointCloudXYZI &pl, const rclcpp::Time &ct);
   int  plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, uint i, uint &i_nex, Eigen::Vector3d &curr_direct);

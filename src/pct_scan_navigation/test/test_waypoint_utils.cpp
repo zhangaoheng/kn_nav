@@ -1,3 +1,14 @@
+// ============================================================================
+// test_waypoint_utils.cpp
+// ----------------------------------------------------------------------------
+// waypoint_utils::sampleWaypoints() 的单元测试（gtest）。
+//
+// 覆盖：短路径只保留终点、整米等间距采样、整米终点不重复、三维弧长 +
+// 高度偏移、零长度段跳过、终点朝向保留、内容签名"变则变、不变则同"。
+//
+// 运行：通过 colcon/ament 的 test 目标执行（无需 ROS 节点运行）。
+// ============================================================================
+
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -12,6 +23,7 @@
 namespace
 {
 
+// 构造测试用 PoseStamped：map 帧、给定位置、单位朝向。
 geometry_msgs::msg::PoseStamped pose(double x, double y, double z)
 {
   geometry_msgs::msg::PoseStamped result;
@@ -23,6 +35,7 @@ geometry_msgs::msg::PoseStamped pose(double x, double y, double z)
   return result;
 }
 
+// 构造测试用 Path（map 帧），方便用花括号列表写输入路径。
 nav_msgs::msg::Path path(std::initializer_list<geometry_msgs::msg::PoseStamped> poses)
 {
   nav_msgs::msg::Path result;
@@ -31,6 +44,8 @@ nav_msgs::msg::Path path(std::initializer_list<geometry_msgs::msg::PoseStamped> 
   return result;
 }
 
+// 便捷封装：以间距 1.0m 调用 sampleWaypoints，断言成功且签名非零，
+// 返回重采样结果供各用例断言。
 nav_msgs::msg::Path sample(const nav_msgs::msg::Path &input, double z_offset = 0.0)
 {
   nav_msgs::msg::Path output;
@@ -42,6 +57,7 @@ nav_msgs::msg::Path sample(const nav_msgs::msg::Path &input, double z_offset = 0
   return output;
 }
 
+// 路径短于一个采样间距时，只保留原始终点。
 TEST(WaypointSampling, ShortPathUsesOnlyFinalPoint)
 {
   const auto output = sample(path({pose(0.0, 0.0, 0.0), pose(0.6, 0.0, 0.0)}));
@@ -49,6 +65,7 @@ TEST(WaypointSampling, ShortPathUsesOnlyFinalPoint)
   EXPECT_NEAR(output.poses[0].pose.position.x, 0.6, 1e-9);
 }
 
+// 每米一个采样点，且末尾精确追加原始终点。
 TEST(WaypointSampling, SamplesEveryMeterAndAppendsExactFinalPoint)
 {
   const auto output = sample(path({pose(0.0, 0.0, 0.0), pose(2.4, 0.0, 0.0)}));
@@ -58,6 +75,7 @@ TEST(WaypointSampling, SamplesEveryMeterAndAppendsExactFinalPoint)
   EXPECT_NEAR(output.poses[2].pose.position.x, 2.4, 1e-9);
 }
 
+// 路径总长恰好整米时，终点不被重复采样。
 TEST(WaypointSampling, ExactMeterFinalIsNotDuplicated)
 {
   const auto output = sample(path({pose(0.0, 0.0, 0.0), pose(2.0, 0.0, 0.0)}));
@@ -66,6 +84,7 @@ TEST(WaypointSampling, ExactMeterFinalIsNotDuplicated)
   EXPECT_NEAR(output.poses[1].pose.position.x, 2.0, 1e-9);
 }
 
+// 弧长按三维计算（纯 Z 方向路径也正确采样），并叠加 z_offset。
 TEST(WaypointSampling, UsesThreeDimensionalArcLengthAndOffset)
 {
   const auto output = sample(path({pose(0.0, 0.0, 0.0), pose(0.0, 0.0, 2.4)}), 0.2);
@@ -75,6 +94,7 @@ TEST(WaypointSampling, UsesThreeDimensionalArcLengthAndOffset)
   EXPECT_NEAR(output.poses[2].pose.position.z, 2.6, 1e-9);
 }
 
+// 相邻重复点（零长度段）被跳过，不影响后续采样。
 TEST(WaypointSampling, SkipsZeroLengthSegments)
 {
   const auto output = sample(path({
@@ -84,6 +104,7 @@ TEST(WaypointSampling, SkipsZeroLengthSegments)
   EXPECT_NEAR(output.poses[1].pose.position.y, 1.5, 1e-9);
 }
 
+// 输出终点保留输入路径终点的朝向（重采样点朝向为单位四元数）。
 TEST(WaypointSampling, PreservesFinalOrientation)
 {
   auto input = path({pose(0.0, 0.0, 0.0), pose(1.5, 0.0, 0.0)});
@@ -95,6 +116,7 @@ TEST(WaypointSampling, PreservesFinalOrientation)
   EXPECT_DOUBLE_EQ(output.poses.back().pose.orientation.w, 0.8);
 }
 
+// 签名只随路径内容变化：时间戳不同不影响，坐标不同则签名必变。
 TEST(WaypointSampling, SignatureChangesOnlyWithRouteContent)
 {
   auto first = path({pose(0.0, 0.0, 0.0), pose(2.0, 0.0, 0.0)});

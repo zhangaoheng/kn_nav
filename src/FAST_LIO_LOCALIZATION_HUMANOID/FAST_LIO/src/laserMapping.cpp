@@ -32,6 +32,16 @@
 // CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
+// ============================================================
+// laserMapping.cpp —— FAST-LIO 主节点实现（上游开源算法）
+// 本文件是 FAST-LIO 的核心：以误差状态卡尔曼滤波(ESKF, esekfom)
+// 为状态估计器，融合 IMU 前向传播与 ikd-Tree 增量地图上的点到面
+// 配准（ICP），输出连续雷达惯性里程计与局部地图。每帧主流程：
+//   订阅 IMU/点云 -> 时间同步打包 -> IMU 传播与点云去畸变 ->
+//   地图 FOV 分割 -> 特征降采样 -> ikd-Tree 最近面搜索 ->
+//   迭代 ESKF 更新（点到面残差）-> 地图增量更新 -> 发布里程计/点云。
+// 工作区内作为机器人前端连续里程计使用（对应 /Odometry_fast_lio）。
+// ============================================================
 #include <omp.h>
 #include <mutex>
 #include <math.h>
@@ -69,6 +79,7 @@
 #define MAXN (720000)
 #define PUBFRAME_PERIOD (20)
 
+// ---- 全局统计变量：记录 ikd-Tree 增删/搜索耗时、配准与求解耗时等 ----
 /*** Time Log Variables ***/
 double kdtree_incremental_time = 0.0, kdtree_search_time = 0.0, kdtree_delete_time = 0.0;
 double T1[MAXN], s_plot[MAXN], s_plot2[MAXN], s_plot3[MAXN], s_plot4[MAXN], s_plot5[MAXN], s_plot6[MAXN], s_plot7[MAXN], s_plot8[MAXN], s_plot9[MAXN], s_plot10[MAXN], s_plot11[MAXN];
@@ -130,6 +141,7 @@ V3D position_last(Zero3d);
 V3D Lidar_T_wrt_IMU(Zero3d);
 M3D Lidar_R_wrt_IMU(Eye3d);
 
+// ---- ESKF 输入输出：Measurements 测量组、卡尔曼滤波器 kf、当前状态 state_point ----
 /*** EKF inputs and output ***/
 MeasureGroup Measures;
 esekfom::esekf<state_ikfom, 12, input_ikfom> kf;
@@ -144,6 +156,7 @@ geometry_msgs::msg::PoseStamped msg_body_pose;
 shared_ptr<Preprocess> p_pre(new Preprocess());
 shared_ptr<ImuProcess> p_imu(new ImuProcess());
 
+// 信号处理：收到 SIGINT 时置退出标志、唤醒等待线程并关闭 ROS 事件循环。
 void SigHandle(int sig)
 {
     flg_exit = true;
@@ -152,6 +165,7 @@ void SigHandle(int sig)
     rclcpp::shutdown();
 }
 
+// 将当前 ESKF 状态（姿态角、位置、速度、零偏、重力）写入日志文件。
 inline void dump_lio_state_to_log(FILE *fp)
 {
     V3D rot_ang(Log(state_point.rot.toRotationMatrix()));
@@ -168,6 +182,7 @@ inline void dump_lio_state_to_log(FILE *fp)
     fflush(fp);
 }
 
+// 将机体系点云坐标经外参 + 位姿变换到世界系（使用指定状态 s，供迭代更新中使用）。
 void pointBodyToWorld_ikfom(PointType const *const pi, PointType *const po, state_ikfom &s)
 {
     V3D p_body(pi->x, pi->y, pi->z);
@@ -179,6 +194,7 @@ void pointBodyToWorld_ikfom(PointType const *const pi, PointType *const po, stat
     po->intensity = pi->intensity;
 }
 
+// 将机体系点变换到世界系（使用当前全局状态 state_point 的位姿与外参）。
 void pointBodyToWorld(PointType const *const pi, PointType *const po)
 {
     V3D p_body(pi->x, pi->y, pi->z);
@@ -223,6 +239,7 @@ void RGBpointBodyLidarToIMU(PointType const *const pi, PointType *const po)
     po->intensity = pi->intensity;
 }
 
+// 收集 ikd-Tree 因局部地图滑动而被删除的历史点（缓存回收，供调试/复用）。
 void points_cache_collect()
 {
     PointVector points_history;
@@ -232,6 +249,9 @@ void points_cache_collect()
 
 BoxPointType LocalMap_Points;
 bool Localmap_Initialized = false;
+// 局部地图 FOV 分割：以当前位置为中心维护固定尺寸的局部立方体地图，
+// 当机器人靠近立方体边缘时平移地图窗口，并从 ikd-Tree 中删除移出
+// 区域的历史点，保证地图规模与搜索开销可控。
 void lasermap_fov_segment()
 {
     cub_needrm.clear();
@@ -290,6 +310,8 @@ void lasermap_fov_segment()
     kdtree_delete_time = omp_get_wtime() - delete_begin;
 }
 
+// 标准 PointCloud2 点云回调：加锁缓存点云与时间戳，调用预处理
+// （特征提取/抽稀）后存入待同步队列，并唤醒主处理线程。
 void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
 {
     mtx_buffer.lock();
@@ -318,6 +340,8 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
 
 double timediff_lidar_wrt_imu = 0.0;
 bool timediff_set_flg = false;
+// Livox 自定义消息回调：与 standard_pcl_cbk 相同的数据流，另含
+// IMU/雷达时间戳同步逻辑（time_sync_en 使能时估计时间偏差）。
 void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg)
 // void livox_pcl_cbk(const livox_interfaces::msg::CustomMsg::UniquePtr msg)
 {
@@ -358,6 +382,7 @@ void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg)
     sig_buffer.notify_all();
 }
 
+// IMU 回调：按时间同步偏差修正时间戳后压入 IMU 缓存队列，供帧同步与预测使用。
 void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
 {
     publish_count++;
@@ -390,6 +415,8 @@ void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
 
 double lidar_mean_scantime = 0.0;
 int scan_num = 0;
+// 时间同步打包：将队首雷达帧与覆盖该帧时间范围的 IMU 序列组合为一个
+// MeasureGroup；当 IMU 时间戳尚未覆盖到帧尾时返回 false 等待更多数据。
 bool sync_packages(MeasureGroup &meas)
 {
     if (lidar_buffer.empty() || imu_buffer.empty())
@@ -447,6 +474,8 @@ bool sync_packages(MeasureGroup &meas)
 }
 
 int process_increments = 0;
+// 地图增量更新：将本帧配准后的特征点变换到世界系，经体素网格最近点
+// 去重判定后，把新增点插入 ikd-Tree（含无需降采样的点）。
 void map_incremental()
 {
     PointVector PointToAdd;
@@ -501,6 +530,8 @@ void map_incremental()
 
 PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI());
 PointCloudXYZI::Ptr pcl_wait_save(new PointCloudXYZI());
+// 发布世界系点云帧（可选，dense_pub_en 决定稠密/稀疏），并支持按
+// pcd_save_interval 间隔把累积点云保存为 PCD 文件。
 void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull)
 {
     if (scan_pub_en)
@@ -558,6 +589,7 @@ void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Share
     
 }
 
+// 发布机体(IMU)坐标系下的去畸变点云帧，便于在机器人本体视角查看。
 void publish_frame_body(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_body)
 {
     int size = feats_undistort->points.size();
@@ -577,6 +609,7 @@ void publish_frame_body(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Shared
     publish_count -= PUBFRAME_PERIOD;
 }
 
+// 发布本帧实际参与配准（有效）的特征点，便于可视化调试配准质量。
 void publish_effect_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudEffect)
 {
     PointCloudXYZI::Ptr laserCloudWorld(
@@ -593,6 +626,7 @@ void publish_effect_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Shar
     pubLaserCloudEffect->publish(laserCloudFullRes3);
 }
 
+// 将本帧点云累积进 pcl_wait_pub 并发布增量地图点云（map_pub_en 使能时）。
 void publish_map(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudMap)
 {
     PointCloudXYZI::Ptr laserCloudFullRes(dense_pub_en ? feats_undistort : feats_down_body);
@@ -621,6 +655,7 @@ void publish_map(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub
     // pubLaserCloudMap->publish(laserCloudMap);
 }
 
+// 将累积的地图点云写为 PCD 文件（由 map_save 服务回调触发）。
 void save_to_pcd()
 {
     pcl::PCDWriter pcd_writer;
@@ -639,6 +674,7 @@ void set_posestamp(T &out)
     out.pose.orientation.w = geoQuat.w;
 }
 
+// 发布里程计消息（位姿 + 协方差），并可选广播 odom -> imu_link 的 TF 变换。
 void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped, std::unique_ptr<tf2_ros::TransformBroadcaster> &tf_br)
 {
     odomAftMapped.header.frame_id = "odom";
@@ -675,6 +711,7 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
     }
 }
 
+// 发布运动轨迹路径，每 10 帧添加一个位姿点，避免路径过长导致 RViz 卡顿。
 void publish_path(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath)
 {
     set_posestamp(msg_body_pose);
@@ -691,6 +728,9 @@ void publish_path(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath)
     }
 }
 
+// ESKF 迭代更新的量测模型：为每个降采样特征点在 ikd-Tree 中搜索最近
+// 邻域并拟合平面，计算点到面距离残差与雅可比矩阵 H，供迭代卡尔曼更新使用；
+// 本函数在每次迭代中由 esekf 回调执行。
 void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_data)
 {
     double match_start = omp_get_wtime();
@@ -813,6 +853,8 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     solve_time += omp_get_wtime() - solve_start_;
 }
 
+// ROS 2 节点封装：声明并读取全部 yaml 参数，创建话题订阅/发布、
+// 周期定时器与地图保存服务；每帧主处理在 timer_callback 中执行。
 class LaserMappingNode : public rclcpp::Node
 {
 public:
@@ -978,6 +1020,10 @@ public:
     }
 
 private:
+    // 主循环（定时触发，FAST-LIO 每帧主流程）：
+    // 同步数据 -> IMU 传播/点云去畸变 -> 地图 FOV 分割 -> 特征降采样
+    // -> ikd-Tree 初始化或最近面搜索 -> 迭代 ESKF 更新 -> 地图增量更新
+    // -> 发布里程计/点云/路径；并在使能时记录各阶段耗时日志。
     void timer_callback()
     {
         if (sync_packages(Measures))
@@ -1133,12 +1179,14 @@ private:
         }
     }
 
+    // 周期回调：定时发布增量地图点云（map_pub_en 使能时）。
     void map_publish_callback()
     {
         if (map_pub_en)
             publish_map(pubLaserCloudMap_);
     }
 
+    // map_save 服务回调：pcd_save_en 使能时将累积地图保存为 PCD 文件。
     void map_save_callback(std_srvs::srv::Trigger::Request::ConstSharedPtr req, std_srvs::srv::Trigger::Response::SharedPtr res)
     {
         RCLCPP_INFO(this->get_logger(), "Saving map to %s...", map_file_path.c_str());
@@ -1182,6 +1230,8 @@ private:
     ofstream fout_pre, fout_out, fout_dbg;
 };
 
+// 程序入口：初始化 ROS 2、注册信号处理并 spin 主节点；退出时按需
+// 保存最终地图点云与各阶段耗时的统计日志（fast_lio_time_log.csv）。
 int main(int argc, char **argv)
 {
     rclcpp::init(argc, argv);

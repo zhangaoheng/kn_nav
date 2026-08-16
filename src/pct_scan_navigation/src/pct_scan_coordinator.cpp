@@ -1,3 +1,26 @@
+// ============================================================================
+// pct_scan_coordinator.cpp
+// ----------------------------------------------------------------------------
+// PCT 全局路径 -> SCAN 局部规划 waypoint 的协调节点。
+//
+// 两种模式（参数 mode，由 launch 的 navigation_mode 注入）：
+//   * Mode 1：协调器闲置，SCAN-Planner 直接消费 RViz 的 /goal_pose，
+//     本节点只提供 ~/reset_route 服务（返回"coordinator idle"）。
+//   * Mode 2：订阅 PCT 全局路径 /pct_path，用 waypoint_utils 重采样为
+//     waypoint 路线发布到 /scan_planner/waypoints（latched QoS），
+//     供 SCAN-Planner 的 WAYPOINT_PATH 模式跟踪。
+//
+// 关键机制：
+//   * 路径签名去重：pathCallback 对路径内容算签名，与当前路线相同时
+//     丢弃，避免 PCT 周期重发导致 SCAN 反复重启规划。
+//   * 空路径清路：收到空路径或 ~/reset_route 时发布空 waypoints，
+//     让 SCAN 取消当前跟踪。
+//
+// 数据流：pct_global_planner(/pct_path) -> pathCallback
+//   -> sampleWaypoints() -> waypoints_pub_(/scan_planner/waypoints)
+//   -> scan_planner_node。
+// ============================================================================
+
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -14,9 +37,14 @@
 namespace
 {
 
+// 协调器节点：Mode 2 下维护"当前路线签名 + 激活标志"，实现路径去重、
+// 清路与 waypoint 发布；Mode 1 下仅提供服务桩。
 class PctScanCoordinator : public rclcpp::Node
 {
 public:
+  // 构造函数：声明参数 -> 校验 mode（仅允许 1/2）与采样参数合法性 ->
+  // 注册 ~/reset_route 服务；Mode 1 直接返回（不建发布器/订阅），
+  // Mode 2 才建立 latched waypoints 发布器与路径订阅并发布初始空路径。
   PctScanCoordinator() : Node("pct_scan_coordinator")
   {
     mode_ = declare_parameter<int>("mode", 2);
@@ -41,6 +69,8 @@ public:
         std::bind(&PctScanCoordinator::handleResetRoute, this,
                   std::placeholders::_1, std::placeholders::_2));
 
+    // Mode 1：SCAN 直接消费 /goal_pose，本节点保持闲置，
+    // 不订阅 /pct_path、不发布 waypoints。
     if (mode_ == 1)
     {
       RCLCPP_INFO(get_logger(),
@@ -62,6 +92,9 @@ public:
   }
 
 private:
+  // PCT 路径回调（Mode 2）：空路径清路；调用 sampleWaypoints 校验并
+  // 重采样（坐标系/有限性/间距校验都在其中）；签名与当前路线相同时
+  // 去重丢弃；否则更新签名、置激活标志并发布重采样 waypoints。
   void pathCallback(const nav_msgs::msg::Path::ConstSharedPtr message)
   {
     if (!message || message->poses.empty())
@@ -80,6 +113,8 @@ private:
       RCLCPP_WARN(get_logger(), "Reject PCT path: %s", reason.c_str());
       return;
     }
+    // 签名去重：PCT 会周期性重发同一路径，签名不变则直接忽略，
+    // 避免 SCAN 端因 waypoints 刷新而反复重新规划。
     if (route_active_ && signature == path_signature_)
     {
       RCLCPP_DEBUG(get_logger(), "Ignore unchanged PCT path");
@@ -94,6 +129,7 @@ private:
                 message->poses.size(), sampled.poses.size());
   }
 
+  // 发布重采样结果：统一刷新时间戳与 frame，逐点同步 header 后 publish。
   void publishWaypointPath(nav_msgs::msg::Path &output)
   {
     output.header.stamp = now();
@@ -103,6 +139,7 @@ private:
     waypoints_pub_->publish(output);
   }
 
+  // 发布空 waypoints（latched）：下游 SCAN 收到空路径即取消当前跟踪。
   void publishEmptyPath()
   {
     nav_msgs::msg::Path output;
@@ -111,6 +148,8 @@ private:
     waypoints_pub_->publish(output);
   }
 
+  // 清路：置 route_active_=false、签名清零并发布空路径，
+  // 使下一条 PCT 路径即使内容相同也会被重新接受。
   void clearRoute(const std::string &reason)
   {
     route_active_ = false;
@@ -119,6 +158,8 @@ private:
     RCLCPP_WARN(get_logger(), "%s; clear SCAN waypoint route", reason.c_str());
   }
 
+  // ~/reset_route 服务：Mode 2 下清路；Mode 1 下空闲确认。供
+  // nav_manager_node 软重置时调用。
   void handleResetRoute(
       const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
       std::shared_ptr<std_srvs::srv::Trigger::Response> response)
@@ -141,6 +182,7 @@ private:
 
 }  // namespace
 
+// 入口：spin 协调器节点；构造/运行异常（如 mode 非法）以 FATAL 退出。
 int main(int argc, char **argv)
 {
   rclcpp::init(argc, argv);

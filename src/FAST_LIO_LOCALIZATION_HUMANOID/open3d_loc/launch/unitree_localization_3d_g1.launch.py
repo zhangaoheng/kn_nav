@@ -1,3 +1,9 @@
+# ============================================================================
+# 文件：unitree_localization_3d_g1.launch.py
+# 说明：宇树 G1（unitree 平台）"建图+局部定位"一键启动入口：
+#       启动 FAST-LIO 建图与 open3d_loc 局部定位
+#       （unitree_open3d_loc_g1.launch.py）。
+# ============================================================================
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -8,6 +14,7 @@ from launch.substitutions import LaunchConfiguration
 import os
 
 
+# 组合 use_sim_time 参数、FAST-LIO 建图 launch、unitree 版 open3d_loc 定位 launch。
 def generate_launch_description():
     # 获取包路径
     fast_lio_share = FindPackageShare('fast_lio')

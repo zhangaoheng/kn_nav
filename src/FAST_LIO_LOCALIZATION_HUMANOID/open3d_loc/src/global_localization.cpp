@@ -1,3 +1,12 @@
+// ============================================================================
+// 文件：global_localization.cpp
+// 说明：GloabalLocalization（全局定位核心类）实现，open3d_loc 包的心脏：
+//       订阅 FAST-LIO 里程计 /Odometry_loc 与雷达点云 /cloud_registered_body_1，
+//       以初始位姿/地图裁剪出的子图为 target，用多尺度 ICP 把当前扫描
+//       配准到离线 PCD 全局地图，输出 map 系里程计 /Odometry_open3d 及
+//       map->odom、odom->base_link 等 tf，并发布定位状态。
+// 坐标约定：base_link -> odom -> map；/Odometry_open3d 为 base_link 在 map 系位姿。
+// ============================================================================
 #include "open3d_registration/open3d_registration.h"
 #include "open3d_conversions/open3d_conversions.h"
 #include "global_localization.h"
@@ -11,6 +20,8 @@
 
 namespace
 {
+// 工具：对 PointCloud2 的 x/y/z（或 normal_x/y/z）字段原地施加旋转（+可选平移），
+// 用于把 imu_link 系点云转到 base_link/map 系，避免重建整片点云。
 bool TransformFloat3Fields(sensor_msgs::msg::PointCloud2 &cloud,
                            const Eigen::Matrix3d &rotation,
                            const Eigen::Vector3d &translation,
@@ -55,6 +66,7 @@ bool TransformFloat3Fields(sensor_msgs::msg::PointCloud2 &cloud,
     return true;
 }
 
+// 工具：剔除距原点小于 filter_radius 的点（如机体附近的噪声/自遮挡点）。
 void FilterNearOrigin(sensor_msgs::msg::PointCloud2 &cloud, double filter_radius)
 {
     if (filter_radius <= 0.0)
@@ -92,6 +104,8 @@ void FilterNearOrigin(sensor_msgs::msg::PointCloud2 &cloud, double filter_radius
 }
 } // namespace
 
+// 加载离线 PCD 全局地图：同时生成粗地图（发布 /map_3d 用）与精地图
+// （ICP 配准 target 用），同步更新参数与定位状态，并清空扫描缓存。
 bool GloabalLocalization::LoadMapFromPath(const std::string &path_map,
                                           const std::string &map_name,
                                           std::string *message)
@@ -172,6 +186,7 @@ bool GloabalLocalization::LoadMapFromPath(const std::string &path_map,
     return true;
 }
 
+// 周期性（默认 250ms）发布 /localization_status：当前状态机、fitness 与地图名。
 void GloabalLocalization::PublishLocalizationStatus()
 {
     LocalizationStatus msg;
@@ -187,6 +202,8 @@ void GloabalLocalization::PublishLocalizationStatus()
     pub_localization_status_->publish(msg);
 }
 
+// 设置定位状态机（UNINITIALIZED/INITIALIZING/TRACKING/...）与原因，
+// 状态或原因变化时立即发布一次状态消息。
 void GloabalLocalization::SetLocalizationStatus(uint8_t state, const std::string &reason)
 {
     bool changed = localization_state_.load() != state;
@@ -200,6 +217,8 @@ void GloabalLocalization::SetLocalizationStatus(uint8_t state, const std::string
         PublishLocalizationStatus();
 }
 
+// 服务处理：~load_map 动态换图。按请求更新配准阈值，
+// 换图成功后复位 odom2map 与初始化标志，失败则回滚阈值。
 void GloabalLocalization::HandleLoadMap(
     const std::shared_ptr<LoadLocalizationMap::Request> request,
     std::shared_ptr<LoadLocalizationMap::Response> response)
@@ -242,6 +261,8 @@ void GloabalLocalization::HandleLoadMap(
     SetLocalizationStatus(LocalizationStatus::UNINITIALIZED, "map_loaded");
 }
 
+// 构造函数：声明并读取全部配准参数，创建话题/服务/定时器，
+// 加载地图、发布静态 tf（imu_link/base_link/motion_link 外参），最后启动定位线程。
 GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
 {
 
@@ -620,6 +641,9 @@ Eigen::Matrix3d GloabalLocalization::Euler2Matrix3d(const Eigen::Vector3d euler)
     mat3d = rollAngle * pitchAngle * yawAngle;
     return mat3d;
 }
+// 里程计回调（/Odometry_loc）：更新 base_link->odom、odom->map 关系并发布
+// map->odom、odom->base_link 动态 tf；初始化完成后发布 /Odometry_open3d
+// （map 系里程计，含差分速度）与 /localization_3d 运动中心位姿。
 void GloabalLocalization::CallbackImulink2Odom(const nav_msgs::msg::Odometry::SharedPtr imulink2odom)
 {
     const rclcpp::Time output_stamp(imulink2odom->header.stamp);
@@ -739,6 +763,9 @@ void GloabalLocalization::CallbackImulink2Odom(const nav_msgs::msg::Odometry::Sh
         pub_localization_3d_->publish(localization_3d_);
     }
 }
+// 点云回调（/cloud_registered_body_1，imu_link 系）：转 base_link 系后
+// 维护滑动窗口队列，合并成当前感知子图 pcd_scan_cur_ 供定位线程取用；
+// 有订阅者时同时发布 /scan_base_link 与 /scan_map 供调试。
 void GloabalLocalization::CallbackScanBody(
     const sensor_msgs::msg::PointCloud2::SharedPtr scan_in_imu_link)
 {
@@ -846,6 +873,8 @@ void GloabalLocalization::CallbackScanBody(
     }
 }
 
+// 初始化定位：以当前位置为中心裁剪地图子图与扫描子图，多尺度 ICP 配准
+// 当前扫描与地图；满足 fitness/位移/航向约束且连续成功两次后初始化完成。
 bool GloabalLocalization::LocalizationInitialize()
 {
     SetLocalizationStatus(LocalizationStatus::INITIALIZING, "initializing");
@@ -1028,6 +1057,9 @@ bool GloabalLocalization::LocalizationInitialize()
     SetLocalizationStatus(LocalizationStatus::INIT_SUCCESS, "ok");
     return true;
 }
+// 定位主循环（独立线程）：等待里程计与点云后，按 loc_frequence 节流执行
+// 跟踪 ICP；接受标准：fitness 高于阈值且增量位移/航向在限内，连续失败
+// 累计到阈值判定 TRACKING_LOST；支持 /initialpose 触发的重定位。
 void GloabalLocalization::Localization()
 {
     RCLCPP_INFO(this->get_logger(), "wait for Odometry_loc");
@@ -1318,11 +1350,14 @@ void GloabalLocalization::Localization()
     }
 }
 
+// 启动定位线程（Localization 主循环）。
 void GloabalLocalization::StartLoc()
 {
     thread_loc_ = std::thread(&GloabalLocalization::Localization, this);
 }
 
+// /initialpose 回调（RViz 2D Pose Estimate）：按给定位姿反算 odom->map 初值，
+// 置位重定位请求，让定位循环重新执行初始化 ICP。
 void GloabalLocalization::CallbackInitialPose(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr initialpose)
 {
     const double current_fitness = loc_fitness_.load();
@@ -1400,6 +1435,7 @@ double GloabalLocalization::ComputeMotionDis(const Eigen::Vector3d &a, const Eig
     return std::sqrt(std::pow(a.x() - b.x(), 2) + std::pow(a.y() - b.y(), 2) + std::pow(a.z() - b.z(), 2));
 }
 
+// 节点入口：创建 GloabalLocalization 节点，用 4 线程多线程执行器运行。
 int main(int argc, char *argv[])
 {
     rclcpp::init(argc, argv);

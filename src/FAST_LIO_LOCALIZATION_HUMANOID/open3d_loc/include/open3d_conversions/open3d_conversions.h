@@ -12,6 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// ============================================================================
+// 文件：open3d_conversions.h
+// 说明：open3d_loc 包的核心数据桥接头文件：在
+//       sensor_msgs::msg::PointCloud2 与 Open3D 点云（几何版 geometry 与
+//       Tensor 版 t::geometry）之间做双向转换，是雷达话题与 ICP 配准的接口层。
+// ============================================================================
 #ifndef OPEN3D_CONVERSIONS_HPP_
 #define OPEN3D_CONVERSIONS_HPP_
 
@@ -30,6 +36,7 @@
 #include <memory>
 #include <string>
 
+// open3d_conversions 命名空间：PointCloud2 与 Open3D 点云的互转入口。
 namespace open3d_conversions
 {
     using PointCloud2 = sensor_msgs::msg::PointCloud2;
@@ -42,6 +49,7 @@ namespace open3d_conversions
      * @param ros_pc2 Reference to the sensor_msgs PointCloud2
      * @param frame_id The string to be placed in the frame_id of the PointCloud2
      */
+// Open3D 几何点云 -> ROS PointCloud2：带/不带颜色两种字段布局。
     void open3dToRos(const open3d::geometry::PointCloud &pointcloud, PointCloud2 &ros_pc2,
                      std::string frame_id = "open3d_pointcloud");
 
@@ -52,6 +60,7 @@ namespace open3d_conversions
      * @param o3d_pc Reference to the open3d PointCloud
      * @param skip_colors If true, only xyz fields will be copied
      */
+// ROS PointCloud2 -> Open3D 几何点云；skip_colors=true 时只拷贝 xyz。
     void rosToOpen3d(const PointCloud2ConstPtr &ros_pc2, open3d::geometry::PointCloud &o3d_pc,
                      bool skip_colors = false);
 

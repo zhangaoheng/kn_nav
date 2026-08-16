@@ -1,3 +1,14 @@
+// ============================================================
+// 文件：bspline_optimizer.h
+// 模块：bspline_opt（B 样条轨迹优化）
+// 职责：声明 B 样条轨迹优化器 BsplineOptimizer，以及碰撞回弹
+//       （Rebound）优化所需的控制点附带数据 ControlPoints。
+// 数据流：规划器把粗轨迹控制点、引导路径与 PCT 走廊路径传入，
+//       优化器在离散控制点序列上构造代价函数并用 L-BFGS 求解，
+//       返回优化后的控制点矩阵。
+// 关键点：代价函数含平滑（jerk）、碰撞距离、动态可行性、
+//       曲线拟合与 PCT 走廊偏离五项，权重由参数加载。
+// ============================================================
 #ifndef _BSPLINE_OPTIMIZER_H_
 #define _BSPLINE_OPTIMIZER_H_
 
@@ -16,6 +27,11 @@
 namespace scan_planner
 {
 
+  // ControlPoints：碰撞回弹（Rebound）优化使用的控制点附带数据。
+  // base_point/direction 一一对应：base_point 为碰撞点（方向向量
+  // 的起点），direction 为归一化的推开方向，距离代价据此把控制点
+  // 推离障碍物；flag_temp 为临时标记（如是否已生成回弹方向），
+  // 使用前需初始化。
   class ControlPoints
   {
   public:
@@ -44,6 +60,13 @@ namespace scan_planner
     }
   };
 
+  // BsplineOptimizer：B 样条轨迹优化器（核心类）。
+  // 对外主接口为 BsplineOptimizeTraj()，内部按两个阶段工作：
+  //   1) Rebound（回弹）阶段：先碰撞分段 + A* 绕障，再最小化
+  //      平滑/碰撞/可行性/走廊代价；
+  //   2) Refine（精修）阶段：在保证无碰撞的前提下向引导路径
+  //      拟合（fitness 代价）。
+  // 控制点按 3 行 N 列矩阵存储，每列是一个三维控制点。
   class BsplineOptimizer
   {
 
@@ -52,8 +75,12 @@ namespace scan_planner
     ~BsplineOptimizer() {}
 
     /* main API */
+    // 设置占据栅格地图（碰撞查询与射线检测的环境）。
     void setEnvironment(const GridMap::Ptr &env);
+    // 从 ROS 2 参数服务器加载优化权重与速度/加速度上限等参数。
     void setParam(rclcpp::Node *node);
+    // 主入口：给定初始控制点与时间间隔，按 cost_function 选择
+    // Rebound/Refine 流程执行优化，返回优化后的控制点矩阵。
     Eigen::MatrixXd BsplineOptimizeTraj(const Eigen::MatrixXd &points, const double &ts,
                                         const int &cost_function, int max_num_id, int max_time_id);
 

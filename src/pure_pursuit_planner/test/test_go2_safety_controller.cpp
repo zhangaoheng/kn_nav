@@ -1,3 +1,11 @@
+// ============================================================================
+// 文件名：test_go2_safety_controller.cpp
+// 用途：Go2SafetyController 安全状态机的 gtest 单元测试。
+// 结构：FakeSportClient 模拟底盘客户端（记录调用、可注入失败），
+//       用例覆盖：使能前置条件、指令限幅与加速度平滑、零指令立即停车、
+//       非有限指令/各类超时/SDK 失败导致停车并锁存、显式停用与关闭的幂等性。
+// ============================================================================
+
 #include <gtest/gtest.h>
 
 #include <chrono>
@@ -13,6 +21,8 @@ namespace
 {
 
 using namespace std::chrono_literals;
+
+// 底盘客户端替身：记录 Move/StopMove 调用，可注入 Move 失败或非零返回码
 
 class FakeSportClient : public SportCommandInterface
 {
@@ -39,16 +49,22 @@ public:
   bool fail_nonzero_move{false};
 };
 
+// 时间辅助：从纪元零偏移构造时间点，便于模拟心跳/超时时序
+
 Go2SafetyController::TimePoint at(std::chrono::milliseconds offset)
 {
   return Go2SafetyController::TimePoint{} + offset;
 }
+
+// 一次性刷新里程计与 sport 状态两类心跳
 
 void provideHeartbeats(Go2SafetyController & controller, Go2SafetyController::TimePoint now)
 {
   controller.updateOdometryHeartbeat(now);
   controller.updateSportStateHeartbeat(now);
 }
+
+// 初始未使能；缺少任一心跳时 enable 被拒绝
 
 TEST(Go2SafetyController, StartsDisabledAndRequiresFreshHeartbeats)
 {
@@ -88,6 +104,8 @@ TEST(Go2SafetyController, IgnoresPreArmCommandAndRequiresNewCommand)
   EXPECT_TRUE(controller.waitingForCommand());
   EXPECT_EQ(client.moves.size(), 1U);
 }
+
+// 验证限幅（vy 归零）与加速度平滑（逐步逼近目标）
 
 TEST(Go2SafetyController, ClampsAndSlewLimitsCommands)
 {
@@ -130,6 +148,8 @@ TEST(Go2SafetyController, ZeroCommandStopsImmediatelyButStaysArmed)
   EXPECT_DOUBLE_EQ(controller.lastOutput().vx, 0.0);
 }
 
+// 非有限指令 → 故障停车并锁存禁用，即使心跳恢复也不自动恢复
+
 TEST(Go2SafetyController, InvalidCommandStopsAndLatchesDisabled)
 {
   FakeSportClient client;
@@ -149,6 +169,8 @@ TEST(Go2SafetyController, InvalidCommandStopsAndLatchesDisabled)
   EXPECT_FALSE(controller.armed());
 }
 
+// 命令超时 → 停车；后续指令被忽略直到重新 enable
+
 TEST(Go2SafetyController, CommandTimeoutStopsAndRequiresReenable)
 {
   FakeSportClient client;
@@ -167,6 +189,8 @@ TEST(Go2SafetyController, CommandTimeoutStopsAndRequiresReenable)
   ASSERT_FALSE(controller.acceptCommand({0.2, 0.0, 0.0}, at(320ms), reason));
   EXPECT_FALSE(controller.armed());
 }
+
+// 里程计/sport 状态心跳超时分别触发停车并解除使能
 
 TEST(Go2SafetyController, HeartbeatTimeoutsStopAndDisarm)
 {
@@ -194,6 +218,8 @@ TEST(Go2SafetyController, HeartbeatTimeoutsStopAndDisarm)
   EXPECT_NE(controller.lastFault().find("sport state"), std::string::npos);
 }
 
+// SDK Move 返回非零 → 停车并锁存故障（错误码 3104）
+
 TEST(Go2SafetyController, SdkMoveFailureStopsAndDisarms)
 {
   FakeSportClient client;
@@ -209,6 +235,8 @@ TEST(Go2SafetyController, SdkMoveFailureStopsAndDisarms)
   EXPECT_NE(controller.lastFault().find("3104"), std::string::npos);
   EXPECT_GE(client.stop_count, 2);
 }
+
+// 显式停用与关闭均发停车；shutdown 幂等
 
 TEST(Go2SafetyController, ExplicitDisableAndShutdownAlwaysStop)
 {

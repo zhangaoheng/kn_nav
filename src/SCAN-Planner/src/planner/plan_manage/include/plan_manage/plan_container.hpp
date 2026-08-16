@@ -1,3 +1,15 @@
+// ============================================================
+// 文件：plan_container.hpp
+// 模块：plan_manage（规划数据容器）
+// 职责：定义规划器共享的数据容器：
+//   - GlobalTrajData：全局轨迹 + 局部轨迹的统一时间轴数据；
+//   - PlanParameters：规划算法参数与耗时统计；
+//   - LocalTrajData：一次局部规划产生的轨迹及其元信息。
+// 数据流：全局规划给出 PolynomialTraj 全局轨迹；局部规划按
+//   半径/时长截取全局轨迹段，参数化为 B 样条（UniformBspline）
+//   后存为局部轨迹；执行模块按时间 t 通过 getPosition/
+//   getVelocity/getAcceleration 统一取位姿。
+// ============================================================
 #ifndef _PLAN_CONTAINER_H_
 #define _PLAN_CONTAINER_H_
 
@@ -13,6 +25,10 @@ using std::vector;
 namespace scan_planner
 {
 
+  // GlobalTrajData：全局/局部轨迹统一管理。
+  // global_traj_ 为全局多项式轨迹；local_traj_[0..2] 为局部
+  // B 样条（位置/速度/加速度）；局部轨迹覆盖的时段之外回退到
+  // 全局轨迹取值（用 time_increase_ 修正全局时间轴）。
   class GlobalTrajData
   {
   private:
@@ -62,6 +78,9 @@ namespace scan_planner
       last_time_inc_ = time_inc;
     }
 
+    // getPosition：按统一时间 t 取位置。
+    // 局部轨迹开始前/结束后取全局轨迹（时间轴按 time_increase_
+    // 平移），局部轨迹时段内取 B 样条位置。
     Eigen::Vector3d getPosition(double t)
     {
       if (t >= -1e-3 && t <= local_start_time_)
@@ -119,6 +138,10 @@ namespace scan_planner
     // get Bspline parameterization data of a local trajectory within a sphere
     // start_t: start time of the trajectory
     // dist_pt: distance between the discretized points
+    // getTrajByRadius：按半径截取局部轨迹参数化数据。
+    // 从 start_t 出发沿轨迹前进，直到距离起点超过 des_radius 或
+    // 到达全局终点；按 dist_pt 密度离散成点集，并给出首末端
+    // 速度/加速度作为 B 样条参数化的边界导数。
     void getTrajByRadius(const double &start_t, const double &des_radius, const double &dist_pt,
                          vector<Eigen::Vector3d> &point_set, vector<Eigen::Vector3d> &start_end_derivative,
                          double &dt, double &seg_duration)
@@ -169,6 +192,9 @@ namespace scan_planner
     // start_t: start time of the trajectory
     // duration: time length of the segment
     // seg_num: discretized the segment into *seg_num* parts
+    // getTrajByDuration：按固定时长截取局部轨迹参数化数据。
+    // 把 [start_t, start_t+duration] 均匀分成 seg_num 段取样，
+    // 附带首末端速度/加速度边界导数。
     void getTrajByDuration(double start_t, double duration, int seg_num,
                            vector<Eigen::Vector3d> &point_set,
                            vector<Eigen::Vector3d> &start_end_derivative, double &dt)
@@ -188,6 +214,9 @@ namespace scan_planner
     }
   };
 
+  // PlanParameters：规划算法参数与阶段耗时统计。
+  // 含物理限制（max_vel_/max_acc_/max_jerk_）、控制点间距、
+  // 规划视界，以及搜索/优化/调整三个阶段的耗时。
   struct PlanParameters
   {
     /* planning algorithm parameters */
@@ -203,6 +232,9 @@ namespace scan_planner
     double time_adjust_ = 0.0;
   };
 
+  // LocalTrajData：一次局部规划的输出轨迹。
+  // 记录轨迹 id、时长、起始时间/位置，以及位置/速度/加速度
+  // 三条 B 样条，供执行与避障模块使用。
   struct LocalTrajData
   {
     /* info of generated traj */

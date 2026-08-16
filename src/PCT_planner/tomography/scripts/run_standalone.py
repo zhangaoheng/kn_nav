@@ -1,5 +1,10 @@
 #!/usr/bin/python3
 """Standalone tomography runner (no ROS required)."""
+# =============================================================================
+# run_standalone.py — 无 ROS 依赖的离线建图入口
+# 与 run_ros2.py 流程一致，但只做建图与性能基准测试（多次重复计时），
+# 不发布任何话题。
+# =============================================================================
 import os
 import sys
 import time
@@ -23,10 +28,13 @@ SCENES = {
 }
 
 
+# 简易日志输出：统一加 [INFO] 前缀。
 def log(msg):
     print(f"[INFO] {msg}")
 
 
+# 建图主流程：加载 PCD -> 初始化建图环境 -> 重复执行 point2map 统计平均耗时
+# （首轮 warm-up 不计）-> 导出 tomogram pickle。
 def run(scene_name):
     cfg = Config()
     scene_cfg = SCENES[scene_name]

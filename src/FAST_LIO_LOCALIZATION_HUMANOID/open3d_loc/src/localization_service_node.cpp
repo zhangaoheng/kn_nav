@@ -1,3 +1,12 @@
+// ============================================================================
+// 文件：localization_service_node.cpp
+// 说明：定位服务节点（LocalizationServiceNode），面向导航上层提供服务接口：
+//   - /open3d_loc/relocalize     发布 /initialpose 触发重定位并等待结果
+//   - /open3d_loc/get_pose       读取当前 map 系位姿（来自 /Odometry_open3d）
+//   - /open3d_loc/publish_goal   发布导航目标点到 /goal_pose
+//   - /open3d_loc/pose_deviation 计算当前位姿相对参考位姿的偏差
+// 坐标约定：位姿均为 base_link 在 map 系下的表示。
+// ============================================================================
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -22,9 +31,13 @@
 #include "open3d_loc/srv/publish_goal.hpp"
 #include "open3d_loc/srv/relocalize.hpp"
 
+// 定位服务节点类：维护最新位姿快照（带互斥锁与条件变量），
+// 提供四个服务并转发 /initialpose 与 /goal_pose 话题。
 class LocalizationServiceNode : public rclcpp::Node
 {
 public:
+// 构造函数：读取话题名与超时参数，创建可重入回调组，
+// 订阅 /Odometry_open3d 并注册四个导航服务。
     LocalizationServiceNode() : Node("localization_service_node")
     {
         this->declare_parameter<std::string>("initialpose_topic", "/initialpose");
@@ -126,6 +139,7 @@ private:
         return angle;
     }
 
+// 四元数转偏航角：先校验有限性与模长并归一化，再取 ZYX 欧拉角中的 yaw。
     static bool quaternionToYaw(double qx, double qy, double qz, double qw,
                                 double &yaw, geometry_msgs::msg::Quaternion *normalized_quat,
                                 std::string &message)
@@ -163,6 +177,7 @@ private:
         return true;
     }
 
+// 由 xyz+四元数构造参考位姿（含归一化四元数与偏航角），供偏差计算使用。
     static bool buildReference(double x, double y, double z,
                                double qx, double qy, double qz, double qw,
                                ReferencePose &reference, std::string &message)
@@ -179,6 +194,8 @@ private:
         return quaternionToYaw(qx, qy, qz, qw, reference.yaw, &reference.pose.orientation, message);
     }
 
+// 计算当前位姿相对参考位姿的偏差：把 xy 误差投影到参考航向系，
+// 输出 error_x/error_y、平面距离与偏航误差（弧度/角度）。
     static bool computeDeviation(const ReferencePose &reference,
                                  const geometry_msgs::msg::Pose &current_pose,
                                  Deviation &deviation,
@@ -217,6 +234,7 @@ private:
         return snapshot;
     }
 
+// /Odometry_open3d 回调：校验合法后更新最新位姿快照并唤醒等待中的服务线程。
     void currentPoseCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
     {
         ReferencePose normalized;
@@ -272,6 +290,8 @@ private:
         response.message = "ok";
     }
 
+// 重定位服务：互斥防重入 -> 发布 /initialpose -> 阻塞等待 /Odometry_open3d
+// 出现新位姿（带超时），用于确认重定位已生效。
     void handleRelocalize(const std::shared_ptr<open3d_loc::srv::Relocalize::Request> request,
                           std::shared_ptr<open3d_loc::srv::Relocalize::Response> response)
     {
@@ -326,6 +346,7 @@ private:
         response->message = "relocalization succeeded";
     }
 
+// 偏差查询服务：返回当前位姿相对请求参考位姿的 xy/距离/偏航偏差。
     void handlePoseDeviation(const std::shared_ptr<open3d_loc::srv::PoseDeviation::Request> request,
                              std::shared_ptr<open3d_loc::srv::PoseDeviation::Response> response)
     {
@@ -351,6 +372,7 @@ private:
         fillDeviationResponse(snapshot, reference, *response);
     }
 
+// 取位姿服务：返回最新 /Odometry_open3d 位姿（重定位期间拒绝读取）。
     void handleGetPose(const std::shared_ptr<open3d_loc::srv::GetPose::Request>,
                        std::shared_ptr<open3d_loc::srv::GetPose::Response> response)
     {
@@ -393,6 +415,7 @@ private:
         response->message = "ok";
     }
 
+// 发布目标服务：把请求的 map 系目标位姿发布到 /goal_pose，供导航使用。
     void handlePublishGoal(const std::shared_ptr<open3d_loc::srv::PublishGoal::Request> request,
                            std::shared_ptr<open3d_loc::srv::PublishGoal::Response> response)
     {
@@ -440,6 +463,7 @@ private:
     std::atomic_bool relocalize_running_{false};
 };
 
+// 节点入口：多线程执行器运行定位服务节点。
 int main(int argc, char **argv)
 {
     rclcpp::init(argc, argv);

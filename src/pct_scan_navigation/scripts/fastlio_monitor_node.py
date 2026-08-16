@@ -1,4 +1,20 @@
 #!/usr/bin/env python3
+# ============================================================================
+# fastlio_monitor_node.py
+# ----------------------------------------------------------------------------
+# FAST-LIO 在线健康监控节点：订阅 IMU / LiDAR / 里程计输入，检查进程存活与
+# CPU/内存占用，周期性（默认 1s）向 /diagnostics 发布 DiagnosticArray。
+#
+# 职责：
+#   * 输入健康：IMU/LiDAR 消息老化（timeout）、时间戳间隙/回退、加速度饱和、
+#     IMU 与 LiDAR 时间戳偏移。
+#   * 输出健康：里程计超时、位姿跳变（位移/偏航/速度阈值）、处理延迟。
+#   * 进程健康：/proc 定位 fastlio_mapping 进程，估算 CPU 百分比与 RSS。
+#   * 每个报告周期把各窗口计数器清零，另写一份纯文本 fastlio_data.txt 摘要。
+#
+# 上游：/livox/imu、/livox/lidar、/Odometry_loc；下游：/diagnostics。
+# ============================================================================
+
 """Online health monitor for FAST-LIO inputs, output and process load."""
 
 from collections import deque
@@ -16,14 +32,17 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Imu
 
 
+# 把 ROS 时间戳（sec/nanosec）换算为浮点秒，便于差值计算。
 def stamp_seconds(stamp):
     return float(stamp.sec) + float(stamp.nanosec) * 1.0e-9
 
 
+# 归一化到 [-pi, pi] 的角度差，用于偏航跳变检测。
 def angle_difference(a, b):
     return math.atan2(math.sin(a - b), math.cos(a - b))
 
 
+# 从四元数提取偏航角 yaw（绕 Z 轴），用于里程计增量比较。
 def yaw_from_quaternion(q):
     return math.atan2(
         2.0 * (q.w * q.z + q.x * q.y),
@@ -31,11 +50,16 @@ def yaw_from_quaternion(q):
     )
 
 
+# 构造诊断键值对（DiagnosticArray 的 KeyValue 元素）。
 def value(name, data):
     return KeyValue(key=name, value=str(data))
 
 
+# 监控节点：三个传感器回调只做采样统计（维护滑窗 deque 与窗口计数），
+# report() 定时汇总为 DiagnosticStatus 并发布，兼顾实时性与低开销。
 class FastlioMonitor(Node):
+    # 初始化：声明全部告警阈值参数 -> 打开文本日志 -> 订阅 IMU/LiDAR/里程计
+    # -> 创建 /diagnostics 发布器与周期定时器。
     def __init__(self):
         super().__init__('fastlio_monitor')
 
@@ -132,14 +156,18 @@ class FastlioMonitor(Node):
             'FAST-LIO monitor started: imu=%s, lidar=%s, odom=%s, process=%s'
             % (imu_topic, lidar_topic, odom_topic, self.process_name))
 
+    # 节点关闭时收尾文本日志文件（注册到 context.on_shutdown）。
     def close_text_log(self):
         if self.fastlio_text_log is not None:
             self.fastlio_text_log.close()
             self.fastlio_text_log = None
 
+    # 当前 ROS 时间（秒），与消息头时间戳同基准，便于计算老化/延迟。
     def now_seconds(self):
         return self.get_clock().now().nanoseconds * 1.0e-9
 
+    # IMU 采样：记录时间戳间隔（异常 dt 计数）、最新六轴读数，
+    # 任一轴加速度超阈值时计为"饱和"（可能意味着数据截断/冲击）。
     def imu_callback(self, msg):
         receive_time = self.now_seconds()
         stamp = stamp_seconds(msg.header.stamp)
@@ -156,6 +184,8 @@ class FastlioMonitor(Node):
         if max(abs(a.x), abs(a.y), abs(a.z)) >= self.accel_warn:
             self.imu_clip_count += 1
 
+    # LiDAR 采样：记录帧间隔；同时计算"LiDAR 戳 - 最新 IMU 戳"，
+    # 正值表示 LiDAR 时间戳更新，用于检测 IMU/LiDAR 时间同步偏移。
     def lidar_callback(self, msg):
         receive_time = self.now_seconds()
         stamp = stamp_seconds(msg.header.stamp)
@@ -171,6 +201,8 @@ class FastlioMonitor(Node):
             self.last_lidar_imu_offset = stamp - self.last_imu_stamp
             self.imu_lidar_offsets.append(self.last_lidar_imu_offset)
 
+    # 里程计采样：与上一帧比较位移/偏航/速度，超过阈值计为位姿跳变
+    # （常见于定位漂移或时间戳错乱）；处理延迟 = 接收时刻 - 消息戳。
     def odom_callback(self, msg):
         receive_time = self.now_seconds()
         stamp = stamp_seconds(msg.header.stamp)
@@ -201,6 +233,8 @@ class FastlioMonitor(Node):
         self.last_processing_delay = receive_time - stamp
         self.processing_delays.append(self.last_processing_delay)
 
+    # 扫描 /proc 定位 fastlio_mapping 进程（comm 或 cmdline 匹配），
+    # 存在多个匹配时取最大 PID（最可能是主进程）。
     def find_process(self):
         matches = []
         for entry in Path('/proc').iterdir():
@@ -217,6 +251,8 @@ class FastlioMonitor(Node):
         self.fastlio_pid = max(matches) if matches else None
         self.cpu_previous = None
 
+    # 采样进程 CPU%（两次采样间 ticks 差 / CLK_TCK / 墙钟时间）与 RSS，
+    # 进程消失时全部置空，下次 report 自动重新 find_process。
     def sample_process(self):
         if self.fastlio_pid is None:
             self.find_process()
@@ -260,6 +296,9 @@ class FastlioMonitor(Node):
         result.values = values
         return result
 
+    # 周期报告：分别评估 IMU / LiDAR / 里程计 / 进程四组健康状态，
+    # 汇总为 DiagnosticArray 发布；按最差级别打印日志并写入文本文件，
+    # 最后清零窗口计数开始下一个周期。
     def report(self):
         now = self.now_seconds()
         self.sample_process()
@@ -454,6 +493,7 @@ class FastlioMonitor(Node):
         self.processing_delays.clear()
 
 
+# 入口：单线程 spin 即可（监控逻辑都在定时器回调里）。
 def main(args=None):
     rclpy.init(args=args)
     node = FastlioMonitor()

@@ -1,3 +1,8 @@
+# =============================================================================
+# test_planner_wrapper_short_path.py — planner_wrapper 短路径单元测试
+# 用伪造的本地库（stub lib 模块）与假规划器验证 TomogramPlanner.plan 在
+# A* 路径只有一个/两个节点时的行为：短路径不应访问 GPMP 优化器。
+# =============================================================================
 import sys
 import types
 from pathlib import Path
@@ -24,6 +29,7 @@ finally:
         sys.modules['lib'] = previous_native_lib
 
 
+# 假 A* 路径查找器：固定返回预设的路径矩阵。
 class FakePathFinder:
     def __init__(self, path):
         self.path = path
@@ -32,6 +38,7 @@ class FakePathFinder:
         return self.path
 
 
+# 假 GPMP 优化器：返回固定的初始化值、层号与优化结果，供测试比对。
 class FakeOptimizer:
     def get_opt_init_value(self):
         return np.zeros((4, 2))
@@ -50,6 +57,7 @@ class FakeOptimizer:
         return np.array([0.5, 0.75])
 
 
+# 假底层规划器：记录是否访问过优化器，用于断言短路径不会触发 GPMP。
 class FakePlanner:
     def __init__(self, plan_success, path, optimizer=None):
         self.plan_success = plan_success
@@ -70,6 +78,8 @@ class FakePlanner:
         return self.optimizer
 
 
+# 不调用 __init__ 直接构造 TomogramPlanner 测试对象，注入假规划器与
+# 位置/索引转换桩函数，隔离出待测的 plan 逻辑。
 def make_planner(plan_success, path, optimizer=None):
     subject = planner_wrapper.TomogramPlanner.__new__(
         planner_wrapper.TomogramPlanner
@@ -91,6 +101,7 @@ def make_planner(plan_success, path, optimizer=None):
     return subject
 
 
+# A* 仅一个节点时：plan 应直接返回 [起点, 终点] 两点路径，且不访问优化器。
 def test_single_astar_node_returns_exact_two_point_path():
     subject = make_planner(True, np.zeros((1, 6)))
     start = np.array([1.125, 2.25, 0.375])
@@ -103,6 +114,7 @@ def test_single_astar_node_returns_exact_two_point_path():
     assert not subject.planner.optimizer_requested
 
 
+# 起终点相同（单节点）时：应返回仅含该点的一行路径。
 def test_single_astar_node_at_same_position_returns_one_point_path():
     subject = make_planner(True, np.zeros((1, 6)))
     goal = np.array([1.125, 2.25, 0.375])
@@ -114,6 +126,7 @@ def test_single_astar_node_at_same_position_returns_one_point_path():
     assert not subject.planner.optimizer_requested
 
 
+# A* 路径多于一个节点时：仍应走优化器分支，返回优化结果。
 def test_multi_node_astar_path_still_returns_optimizer_result(monkeypatch):
     optimizer = FakeOptimizer()
     subject = make_planner(True, np.zeros((2, 6)), optimizer)
@@ -132,6 +145,7 @@ def test_multi_node_astar_path_still_returns_optimizer_result(monkeypatch):
     assert subject.planner.optimizer_requested
 
 
+# A* 规划失败时：plan 返回 None 且不访问优化器。
 def test_failed_astar_returns_none():
     subject = make_planner(False, np.empty((0, 6)))
 

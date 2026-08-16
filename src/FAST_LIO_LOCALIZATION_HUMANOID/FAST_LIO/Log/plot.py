@@ -1,10 +1,21 @@
 # import matplotlib
 # matplotlib.use('Agg')
+# ============================================================
+# FAST-LIO 日志分析脚本（上游开源算法配套的离线工具）
+# 作用：读取 FAST-LIO 运行期间 dump 出的 mat_pre.txt / mat_out.txt
+#       等日志文件，绘制姿态、平移、外参、速度、零偏、重力等状态曲线，
+#       用于离线查看 ESKF 预测(前验)与更新(后验)状态的差异。
+# 工作区内仅作为里程计前端的日志后处理脚本使用，不参与实时导航。
+# ============================================================
 import numpy as np
 import matplotlib.pyplot as plt
 
 
 #######for ikfom
+# ---- 第一部分：绘制 ikfom 状态对比曲线 ----
+# mat_pre.txt / mat_out.txt 分别记录 ESKF 预测(前验)与更新后(后验)的状态，
+# 按 4 行 x 2 列的子图布局展示：姿态角、平移、外参旋转/平移、速度、
+# 陀螺零偏 bg、加计零偏 ba 与重力估计等分量随时间的变化。
 fig, axs = plt.subplots(4,2)
 lab_pre = ['', 'pre-x', 'pre-y', 'pre-z']
 lab_out = ['', 'out-x', 'out-y', 'out-z']
@@ -33,6 +44,9 @@ plt.grid()
 
 
 #### Draw IMU data
+# ---- 第二部分（注释模板）：绘制 IMU 原始数据曲线 ----
+# 读取 imu.txt，绘制陀螺仪与加速度计的三轴原始测量曲线，默认关闭，
+# 需要时取消对应代码块的注释即可启用。
 # fig, axs = plt.subplots(2)
 # imu=np.loadtxt('imu.txt')
 # time=imu[:,0]
@@ -51,6 +65,8 @@ plt.grid()
 # plt.grid()
 
 # #### Draw time calculation
+# ---- 第三部分（注释模板）：绘制有效特征点数量与计算耗时箱线图 ----
+# 对比室外/室内不同场景下每帧有效特征点数量与单帧计算时间，默认关闭。
 # plt.figure(3)
 # fig = plt.figure()
 # font1 = {'family' : 'Times New Roman',

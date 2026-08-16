@@ -1,3 +1,14 @@
+// ============================================================================
+// 文件名: offline_ele_planner.h
+// 用途:   离线高程规划器: 先用三维 A* 在稠密高程地图上搜索原始路径,
+//         再交给 GPMP 轨迹优化器生成平滑轨迹(按 use_quintic_ 二选一)
+// 结构:   OfflineElePlanner 类, 组合 DenseElevationMap / Astar /
+//         GPMPOptimizerWnoa / GPMPOptimizer
+// 数据流: InitMap() 初始化地图与优化器 -> Plan() A* 搜索 + 轨迹优化 ->
+//         GetDebugPath()/get_*() 提取结果
+// 注意:   依赖 trajectory_optimization 模块(由他人维护, 请勿修改)
+// ============================================================================
+
 #pragma once
 
 #include <memory>
@@ -8,12 +19,14 @@
 #include "trajectory_optimization/gpmp_optimizer/gpmp_optimizer.h"
 #include "trajectory_optimization/gpmp_optimizer/gpmp_optimizer_wnoa.h"
 
+// 离线高程规划器: Plan() 为入口, optimize=false 时仅做 A* 搜索不做轨迹优化
 class OfflineElePlanner {
  public:
   OfflineElePlanner(const double max_heading_rate, bool use_quintic)
       : use_quintic_(use_quintic), max_heading_rate_(max_heading_rate) {}
   ~OfflineElePlanner() = default;
 
+  // 初始化: 配置 A* 搜索器与稠密高程地图, 并以安全代价余量构建两个 GPMP 优化器
   void InitMap(const double a_start_cost_threshold,
                const double safe_cost_margin, const double resolution,
                const int num_layers, const double step_cost_weight,
@@ -23,6 +36,7 @@ class OfflineElePlanner {
                const Eigen::MatrixXd& ceiling, const Eigen::MatrixXd& ele_map,
                const Eigen::MatrixXd& grad_x, const Eigen::MatrixXd& grad_y);
 
+  // 规划入口: A* 搜到原始路径后按 use_quintic_ 选择不同的 GPMP 优化器平滑
   bool Plan(const Eigen::Vector3i& start, const Eigen::Vector3i& goal,
             const bool optimize = true);
 

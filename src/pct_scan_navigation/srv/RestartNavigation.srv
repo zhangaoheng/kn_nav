@@ -1,3 +1,6 @@
+# 重启导航服务（/restart_navigation）：
+# 请求：mode 0=SOFT_RESET（停速+清路线+重置协调器与 SCAN），1=FULL_RESTART（执行整链重启命令）。
+# 响应：accepted 是否接受、message 说明。
 uint8 SOFT_RESET=0
 uint8 FULL_RESTART=1
 uint8 mode

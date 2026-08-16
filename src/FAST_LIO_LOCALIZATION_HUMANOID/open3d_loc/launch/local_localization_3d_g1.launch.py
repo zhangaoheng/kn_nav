@@ -1,3 +1,9 @@
+# ============================================================================
+# 文件：local_localization_3d_g1.launch.py
+# 说明：宇树 G1 机器人"建图+局部定位"一键启动入口：
+#       先启动 FAST-LIO（mapping.launch.py）提供里程计与点云，
+#       再启动 open3d_loc 局部定位（local_open3d_loc_g1.launch.py）。
+# ============================================================================
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -8,6 +14,8 @@ from launch.substitutions import LaunchConfiguration
 import os
 
 
+# 组合三部分：use_sim_time 参数、FAST-LIO 建图 launch、open3d_loc 定位 launch；
+# RViz 节点已注释，需要可视化时可取消注释。
 def generate_launch_description():
     # 获取包路径
     fast_lio_share = FindPackageShare('fast_lio')

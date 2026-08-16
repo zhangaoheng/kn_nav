@@ -13,6 +13,26 @@ header.  Authentication is strongly recommended when binding to a non-loopback
 address.
 """
 
+# ============================================================
+# 文件：ros2_service_api.py —— KN 导航 ROS 2 服务 HTTP API（FastAPI）。
+# 用途：把宇树四足机器人的 ROS 2 导航能力封装成 HTTP 接口，默认监听
+#       0.0.0.0:8000，全部业务路由挂 /api 前缀；核心能力包括：重定位
+#       （open3d_loc/relocalize）、保存/发布/查询命名导航点、速度桥使能、
+#       顺序导航队列、状态查询（当前地图/定位/导航/里程计）、地图切换、
+#       导航重启与一键急停。
+# 结构（自顶向下）：
+#   1. Settings 配置（环境变量）与 Pydantic 请求体模型；
+#   2. 位姿/名称/地图名校验与四元数工具函数；
+#   3. NavigationPointStore：线程安全的导航点 JSON 存储（含唯一 6 位码）；
+#   4. RosServiceGateway：后台线程持有 ROS 节点，封装全部 ROS 2 服务调用
+#      与状态话题缓存（current_map / localization_status / navigation_status
+#      及里程计订阅）；
+#   5. NavigationQueueManager：asyncio 顺序执行导航目标队列；
+#   6. create_app()：FastAPI 应用工厂（lifespan 启动/清理、依赖注入、
+#      X-API-Key 鉴权、/api 路由分组注册）；
+#   7. _parse_args / main：命令行启动（uvicorn）。
+# 鉴权：设置环境变量 KN_NAV_API_KEY 后，所有 /api 请求须携带 X-API-Key 头。
+# ============================================================
 import argparse
 import asyncio
 import copy
@@ -46,6 +66,9 @@ except ImportError as error:  # pragma: no cover - depends on the deployment hos
 
 
 @dataclass(frozen=True)
+# 服务配置集合：HTTP 监听地址/端口、ROS 服务超时与等待超时、导航队列
+# 轮询与容差、里程计话题、导航点文件/目录、地图节点与参数名、统一导航
+# 配置文件路径、API Key 等；from_environment() 从 KN_NAV_* 环境变量读取。
 class Settings:
     host: str = "0.0.0.0"
     port: int = 8000
@@ -64,6 +87,7 @@ class Settings:
     api_key: str = ""
 
     @classmethod
+# 从环境变量构建配置（未设置时用 dataclass 默认值），支持容器化部署覆盖。
     def from_environment(cls) -> "Settings":
         return cls(
             host=os.environ.get("KN_NAV_API_HOST", "127.0.0.1"),
@@ -108,6 +132,7 @@ class Settings:
         )
 
 
+# 请求体模型：map 系下的位置 + 四元数姿态（角度一律用弧度）。
 class QuaternionPose(BaseModel):
     """A map-frame pose represented by position and quaternion."""
 
@@ -120,6 +145,8 @@ class QuaternionPose(BaseModel):
     qw: float = Field(..., description="Quaternion W")
 
 
+# 以下为各接口的请求体模型：保存/重命名导航点、导航目标（名称/码/坐标
+# 三选一）、速度桥使能、地图切换、导航重启（软复位或完整重启）、按码重定位。
 class SavePointRequest(BaseModel):
     name: str = Field(..., description="Unique navigation point name")
     overwrite: bool = Field(False, description="Replace an existing point")
@@ -164,6 +191,7 @@ class NavigationCodeRequest(BaseModel):
     code: str = Field(..., description="Six-digit unique navigation point code")
 
 
+# 校验数值字段全部有限，含 NaN/Inf 时以 422 拒绝（避免脏数据进入 ROS）。
 def _ensure_finite(values: Dict[str, float]) -> None:
     invalid = [name for name, value in values.items() if not math.isfinite(value)]
     if invalid:
@@ -173,6 +201,7 @@ def _ensure_finite(values: Dict[str, float]) -> None:
         )
 
 
+# 把 QuaternionPose 的数值写入 ROS 服务请求对象的对应字段（先做有限性校验）。
 def _fill_pose_request(request: Any, pose: QuaternionPose) -> None:
     values = {
         "x": pose.x,
@@ -188,6 +217,7 @@ def _fill_pose_request(request: Any, pose: QuaternionPose) -> None:
         setattr(request, name, float(value))
 
 
+# 归一化四元数：返回 (归一化后的位姿, 原模长)；模长过小视为非法（422）。
 def _normalise_quaternion_pose(
     pose: QuaternionPose,
 ) -> Tuple[QuaternionPose, float]:
@@ -223,6 +253,7 @@ def _normalise_quaternion_pose(
     )
 
 
+# 位姿对象转字典，用于接口返回与日志。
 def _quaternion_pose_to_dict(pose: QuaternionPose) -> Dict[str, float]:
     return {
         "x": pose.x,
@@ -235,6 +266,7 @@ def _quaternion_pose_to_dict(pose: QuaternionPose) -> Dict[str, float]:
     }
 
 
+# 四元数转欧拉角字典（roll/pitch/yaw），pitch 接近 ±90 度时钳位。
 def _quaternion_to_rpy(
     qx: float, qy: float, qz: float, qw: float
 ) -> Dict[str, float]:
@@ -257,6 +289,7 @@ def _quaternion_to_rpy(
     }
 
 
+# 校验并规范化导航点名：非空、不超过 128 字符、不含控制字符，否则 422。
 def _normalise_point_name(name: str) -> str:
     normalised = name.strip()
     if not normalised:
@@ -272,6 +305,7 @@ def _normalise_point_name(name: str) -> str:
     return normalised
 
 
+# 校验 6 位数字导航码，否则 422。
 def _normalise_navigation_code(code: str) -> str:
     normalised = code.strip()
     if len(normalised) != 6 or not normalised.isdigit():
@@ -282,6 +316,7 @@ def _normalise_navigation_code(code: str) -> str:
     return normalised
 
 
+# 校验并规范化地图名（规则同导航点名），非法则 422。
 def _normalise_map_name(name: str) -> str:
     normalised = name.strip()
     if not normalised:
@@ -297,6 +332,7 @@ def _normalise_map_name(name: str) -> str:
     return normalised
 
 
+# 地图名转安全文件名：非字母数字与 -_. 的字符替换为下划线，并去掉首尾点。
 def _safe_map_name(map_name: str) -> str:
     """Return a map name that is safe to use as a per-map JSON filename."""
     normalised = map_name.strip()
@@ -311,6 +347,8 @@ def _safe_map_name(map_name: str) -> str:
     return safe_name
 
 
+# 从统一 navigation.yaml 读取可切换地图 profile 名，按文件中的插入顺序返回，
+# 使 API/界面与运维配置保持一致；文件缺失或格式非法直接抛 RuntimeError。
 def _load_map_names(config_path: str) -> list[str]:
     """Read switchable map profile names from one unified navigation YAML."""
     path = Path(config_path).expanduser().resolve()

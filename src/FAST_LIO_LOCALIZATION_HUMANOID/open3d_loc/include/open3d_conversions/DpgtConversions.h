@@ -1,3 +1,10 @@
+// ============================================================================
+// 文件：DpgtConversions.h
+// 说明：Dpgt 全局定位（PCT 方案）用到的位姿/坐标转换工具集（ROS 2 版）。
+//       提供 tf2 树中的位姿变换、Eigen 4x4 齐次矩阵与 tf2 位姿/四元数、
+//       欧拉角之间的互转，供 open3d_loc 全局定位节点换算坐标系使用。
+// 约定：输入输出均以 ROS 2 消息 / tf2 类型表达，矩阵均为 4x4 齐次变换。
+// ============================================================================
 #ifndef PROJECT_DPGTCONVERSIONS_HPP
 #define PROJECT_DPGTCONVERSIONS_HPP
 
@@ -29,6 +36,8 @@
  * @param output_pose The transformed pose in parent_frame_id.
  * @return true on successful transform, false otherwise.
  */
+// 通过 tf2 把位姿从 child_frame_id 变换到 parent_frame_id（取最新变换），
+// 变换超时或异常时返回 false，调用方可据此降级处理。
 bool transform_pose(std::shared_ptr<tf2_ros::Buffer> tf_buffer,
                     const std::string &parent_frame_id,
                     const std::string &child_frame_id,
@@ -83,6 +92,8 @@ bool transform_pose(std::shared_ptr<tf2_ros::Buffer> tf_buffer,
  * @param parent_frame_id Parent frame ID.
  * @param child_frame_id Child frame ID.
  */
+// 将 Eigen 4x4 齐次变换矩阵转成 tf2 的 TransformStamped（重载一），
+// 并填充 parent/child frame 与时间戳，供发布 tf 使用。
 void MatrixToTransform(const Eigen::Matrix4d &Tm,
                        geometry_msgs::msg::TransformStamped &transform, // ROS 2 使用 TransformStamped 消息
                        const std::string &parent_frame_id = "parent_link",
@@ -107,6 +118,7 @@ void MatrixToTransform(const Eigen::Matrix4d &Tm,
  * * @param Tm 4x4 Eigen Transformation Matrix.
  * @param transform Output tf2::Transform.
  */
+// 重载二：将 Eigen 4x4 齐次变换矩阵转为 tf2::Transform（不含 frame 信息版本）。
 void MatrixToTransform(const Eigen::Matrix4d &Tm,
                        tf2::Transform &transform) // ROS 2 使用 tf2::Transform
 {
@@ -122,6 +134,7 @@ void MatrixToTransform(const Eigen::Matrix4d &Tm,
 }
 
 // 保持不变，因为是纯 Eigen/C++ 打印
+// 调试工具：以 3x3 旋转矩阵加平移向量的形式打印 4x4 齐次矩阵。
 void print4x4Matrix(const Eigen::Matrix4d &matrix)
 {
   printf("Rotation matrix :\n");
@@ -137,6 +150,8 @@ void print4x4Matrix(const Eigen::Matrix4d &matrix)
  * * @param transform Input tf2::Transform.
  * @param transform_matrix Output 4x4 Eigen Transformation Matrix.
  */
+// 将 tf2::Transform 拆成平移与四元数，重建为 Eigen 4x4 齐次矩阵。
+// 注意旋转顺序约定为 ZYX 欧拉角（roll-pitch-yaw），与 getEulerYPR 一致。
 void TransformToMatrix(const tf2::Transform &transform, // ROS 2 使用 tf2::Transform
                        Eigen::Matrix4d &transform_matrix)
 {
@@ -171,6 +186,7 @@ void TransformToMatrix(const tf2::Transform &transform, // ROS 2 使用 tf2::Tra
  * @param yaw Yaw angle (rad).
  * @return tf2::Quaternion
  */
+// 由 roll/pitch/yaw（弧度）构造 tf2 四元数，并打印结果便于调试。
 tf2::Quaternion euler2Quaternion(const double roll, const double pitch, const double yaw)
 {
   tf2::Quaternion q; // ROS 2 使用 tf2::Quaternion
@@ -192,6 +208,7 @@ tf2::Quaternion euler2Quaternion(const double roll, const double pitch, const do
  * @param w Quaternion W component.
  * @return Eigen::Vector3d containing [Roll, Pitch, Yaw] in radians.
  */
+// 四元数 (x,y,z,w) 转欧拉角（弧度），结果按 [roll, pitch, yaw] 返回。
 Eigen::Vector3d Quaterniond2Euler(const double x, const double y, const double z, const double w)
 {
   tf2::Quaternion quat;

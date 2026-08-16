@@ -1,6 +1,17 @@
+// ============================================================================
+// 文件名：polynomial_traj.cpp
+// 用途：分段多项式轨迹生成算法的实现文件。实现最小 snap 轨迹（minSnapTraj，
+//       闭合形式解：映射矩阵 A + 选择矩阵 C + 最小 snap 二次型 Q + 自由/固定
+//       变量分离求解）与单段轨迹（one_segment_traj_gen，6 阶约束线性求解）。
+// 结构：
+//   - minSnapTraj：多段 minimum-snap 轨迹（给定途经点/起终点速度加速度/段时长）
+//   - one_segment_traj_gen：单段 5 阶多项式轨迹（起终点位置/速度/加速度约束）
+// 依赖：polynomial_traj.h（声明）、Eigen
+// ============================================================================
 #include <iostream>
 #include <traj_utils/polynomial_traj.h>
 
+  // 最小 snap 轨迹生成（点睛）：每段取 5 阶多项式（6 个系数），把系数-端点
 PolynomialTraj PolynomialTraj::minSnapTraj(const Eigen::MatrixXd &Pos, const Eigen::Vector3d &start_vel,
                                            const Eigen::Vector3d &end_vel, const Eigen::Vector3d &start_acc,
                                            const Eigen::Vector3d &end_acc, const Eigen::VectorXd &Time)

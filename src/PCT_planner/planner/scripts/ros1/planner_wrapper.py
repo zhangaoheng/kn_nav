@@ -1,3 +1,8 @@
+# 文件：ros1/planner_wrapper.py（ROS 1 版规划器封装）
+# 用途：与 planner/scripts/planner_wrapper.py 同源的历史版本，供 ROS 1 脚本使用；
+#       加载离线 tomogram 并封装底层 C++ 规划器（ele_planner/a_star/traj_opt）。
+# 结构：TomogramPlanner —— 核心封装类（loadTomogram/initPlanner/plan）。
+# 数据流：config.Config → TomogramPlanner → lib 底层 C++ → (N,3) map 系轨迹。
 import os
 import sys
 import pickle
@@ -12,7 +17,10 @@ from lib import a_star, ele_planner, traj_opt
 rsg_root = os.path.dirname(os.path.abspath(__file__)) + '/../..'
 
 
+# TomogramPlanner：PCT 规划器封装类。职责：管理 tomogram 元数据与坐标换算，
+# 预处理代价地图（clearance/gateway），并把世界坐标起终点转为网格索引交给底层规划。
 class TomogramPlanner(object):
+    # 读取配置并初始化状态；tomo_dir 指向 tomogram 存放目录，地图元数据初始为空。
     def __init__(self, cfg):
         self.cfg = cfg
 
@@ -53,6 +61,8 @@ class TomogramPlanner(object):
         self.start_idx = np.zeros(3, dtype=np.int32)
         self.end_idx = np.zeros(3, dtype=np.int32)
 
+    # 从 pickle 加载 tomogram（data 为 5 通道：通行代价、梯度 x/y、高程、顶面高程），
+    # 填充元数据（分辨率/中心/切片数等）后调用 initPlanner 构建底层规划器。
     def loadTomogram(self, tomo_file):
         with open(self.tomo_dir + tomo_file + '.pickle', 'rb') as handle:
             data_dict = pickle.load(handle)
@@ -79,6 +89,8 @@ class TomogramPlanner(object):
 
         self.initPlanner(trav, trav_gx, trav_gy, elev_g, elev_c)
         
+    # 计算 gateway（层间可穿越门：上下层代价骤变且高程接近时标记），叠加 clearance
+    # 代价，将各层展平后传给 C++ 的 OfflineElePlanner.init_map。
     def initPlanner(self, trav, trav_gx, trav_gy, elev_g, elev_c):
         diff_t = trav[1:] - trav[:-1]
         diff_g = np.abs(elev_g[1:] - elev_g[:-1])
@@ -120,6 +132,8 @@ class TomogramPlanner(object):
             -planning_gx.reshape(-1, planning_gx.shape[-1]).astype(np.double)
         )
 
+    # 对可通行区域叠加“离障碍距离”的平滑代价：absolute 模式用指数衰减，relative
+    # 模式用局部窗口内相对间距；代价梯度同步叠加到 trav_gx/trav_gy 上。
     def add_clearance_cost(self, trav, trav_gx, trav_gy):
         """Add a smooth distance-to-obstacle preference to traversable cells."""
         planning_trav = trav.copy()
@@ -188,6 +202,8 @@ class TomogramPlanner(object):
 
         return planning_trav, planning_gx, planning_gy
 
+    # 主规划接口：世界坐标 → 网格索引 → A* 搜索 → GPMP 优化，输出 (N,3) map 系轨迹；
+    # A* 失败或路径为空返回 None。
     def plan(self, start_pos, end_pos):
         self.last_astar_traj = None
         self.start_idx[0] = self.pos2layer(start_pos)
@@ -228,9 +244,11 @@ class TomogramPlanner(object):
 
         return traj_3d
 
+    # 返回最近一次规划的 A* 原始路径（调试用）。
     def getLastAstarPath(self):
         return self.last_astar_traj
 
+    # 沿优化后的 XY 轨迹逐点采样 tomogram 高程，避免输出 z 方向平坦。
     def sample_traj_heights(self, layers, cols, rows, fallback_heights):
         """Sample tomogram elevation along optimized XY to avoid flat z output."""
         sampled = np.asarray(fallback_heights, dtype=np.float64).copy()
@@ -246,6 +264,7 @@ class TomogramPlanner(object):
                 sampled[i] = h
         return sampled
 
+    # 在指定层 (row,col) 邻域内搜索最近的有限高程值，找不到返回 None。
     def nearest_elevation(self, layer, row, col, search_radius=2):
         layer = int(np.clip(layer, 0, self.n_slice - 1))
         row = int(np.clip(row, 0, self.map_dim[0] - 1))
@@ -272,6 +291,7 @@ class TomogramPlanner(object):
         nearest = int(np.argmin(dist_sq))
         return float(local_elev[local_rows[nearest], local_cols[nearest]])
 
+    # 将 A* 网格路径 [layer, row, col] 转为 map 系 XYZ 坐标（含高程）。
     def astar_path_to_map(self, path):
         """Convert the raw [layer, row, col] A* path to map-frame XYZ."""
         path_idx = np.rint(path).astype(np.int32)
@@ -287,16 +307,19 @@ class TomogramPlanner(object):
             self.map_dim, self.center, self.resolution, traj_grid
         )
     
+    # 世界 XY 坐标 → 网格 [row, col]（与 pos2array_idx 的索引顺序互换）。
     def pos2idx(self, pos):
         idx = self.pos2array_idx(pos)
         idx = np.array([idx[1], idx[0]], dtype=np.int32)
         return idx
 
+    # 世界 XY 坐标 → 网格 [x_idx, y_idx]（先减 center，除以分辨率，再加 offset）。
     def pos2array_idx(self, pos):
         pos = np.asarray(pos, dtype=np.float64) - self.center
         idx = np.round(pos / self.resolution).astype(np.int32) + self.offset
         return idx
 
+    # 世界点 → 切片层号：优先在 XY 邻域内按高程匹配；越界或无法匹配时回退到 z 换算。
     def pos2layer(self, pos):
         pos = np.asarray(pos, dtype=np.float64)
         if pos.shape[0] < 3 or not np.isfinite(pos[2]) or self.elev_g is None:
@@ -318,6 +341,7 @@ class TomogramPlanner(object):
         )
         return layer
 
+    # 在指定网格位置的所有切片中，按高程差最小选出最匹配的层。
     def nearest_layer_at_idx(self, idx, z):
         search_radius = 2
         x0 = max(0, idx[0] - search_radius)
@@ -335,6 +359,7 @@ class TomogramPlanner(object):
         layer = int(np.unravel_index(np.argmin(scores), scores.shape)[0])
         return layer
 
+    # 由高度 z 直接换算切片层号（z - slice_h0）/ slice_dh，并裁剪到合法范围。
     def z2slice_layer(self, z):
         layer = int(np.round((z - self.slice_h0) / self.slice_dh))
         return int(np.clip(layer, 0, self.n_slice - 1))

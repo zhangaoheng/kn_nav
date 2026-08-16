@@ -1,4 +1,10 @@
 #!/usr/bin/python3
+# =============================================================================
+# tomography.py — ROS1 离线建图入口与可视化（老版）
+# Tomography 类封装 读点云 -> GPU 建图 -> 导出 pickle -> ROS1 发布
+# （原始点云 / 逐层 G、C 层 / 合并 tomogram），供 RViz 查看建图结果。
+# 新版 ROS2 流程见 run_ros2.py。
+# =============================================================================
 import os
 import sys
 import time
@@ -20,7 +26,9 @@ from config import Config
 rsg_root = os.path.dirname(os.path.abspath(__file__)) + '/../..'
 
 
+# ROS1 建图包装类：构造时即完成加载点云并执行建图，随后可初始化 ROS 发布。
 class Tomography(object):
+    # 保存场景参数，创建底层 Tomogram 建图器，加载 PCD 并执行建图。
     def __init__(self, cfg, scene_cfg):
         self.export_dir = rsg_root + cfg.map.export_dir
         self.pcd_file = scene_cfg.pcd.file_name
@@ -35,6 +43,7 @@ class Tomography(object):
         # Process
         self.process(points)
 
+    # 创建 ROS1 发布器：原始点云、每层 G/C 层（按切片编号）、合并 tomogram。
     def initROS(self):
         self.map_frame = cfg.ros.map_frame
 
@@ -54,6 +63,8 @@ class Tomography(object):
         tomogram_topic = cfg.ros.tomogram_topic
         self.tomogram_pub = rospy.Publisher(tomogram_topic, PointCloud2, latch=True, queue_size=1)
 
+    # 读取场景 PCD，推导地图尺寸/切片数/中心并初始化建图环境，
+    # 同时生成可视化用的网格原型。
     def loadPCD(self, pcd_file):
         pcd = o3d.io.read_point_cloud(rsg_root + "/rsc/pcd/" + pcd_file)
         points = np.asarray(pcd.points).astype(np.float32)
@@ -81,6 +92,8 @@ class Tomography(object):
 
         return points
         
+    # 建图主流程：重复运行 point2map 统计平均 GPU 耗时（首轮 warm-up 不计），
+    # 导出 pickle 并发布各层与合并后的 tomogram。
     def process(self, points):        
         t_map = 0.0
         t_trav = 0.0
@@ -122,6 +135,7 @@ class Tomography(object):
         self.publishLayers(self.layer_C_pub_list, layers_c, None)
         self.publishTomogram(layers_g, layers_t)
 
+    # 把五通道建图结果写为 float16 的 pickle（含分辨率/中心/切片参数）。
     def exportTomogram(self, tomogram, map_file):        
         data_dict = {
             'data': tomogram.astype(np.float16),
@@ -136,6 +150,7 @@ class Tomography(object):
 
         rospy.loginfo("Tomogram exported: %s", file_name)
 
+    # 发布原始输入点云（xyz32）。
     def publishPoints(self, points):
         header = Header()
         header.stamp = rospy.Time.now()
@@ -144,6 +159,7 @@ class Tomography(object):
         point_msg = pc2.create_cloud_xyz32(header, points)
         self.pointcloud_pub.publish(point_msg)
 
+    # 按层把高度（可附代价颜色）写成 XYZI 点云发布到对应切片话题。
     def publishLayers(self, pub_list, layers, color=None):
         header = Header()
         header.seq = 0
@@ -164,6 +180,8 @@ class Tomography(object):
             points_msg = pc2.create_cloud(header, POINT_FIELDS_XYZI, valid_points)
             pub_list[i].publish(points_msg) 
 
+    # 合并各层为一张 tomogram 点云：下层被上层遮挡（高差小于 slice_dh）时隐藏，
+    # 并把其代价并入可见层，最终发布到 /tomogram。
     def publishTomogram(self, layers_g, layers_t):
         header = Header()
         header.seq = 0

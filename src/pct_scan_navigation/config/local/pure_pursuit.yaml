@@ -1,3 +1,11 @@
+# ============================================================================
+# pure_pursuit.yaml —— Pure Pursuit 跟踪节点参数（测试链路，不走 SCAN 局部规划）。
+#   k / Lfc / Kp   纯追踪前视距离系数、固定前视、比例增益
+#   dt             控制周期
+#   goal_threshold 终点距离阈值
+#   min/maxVelocity 速度限幅；maxAngularVelocity 角速度限幅
+#   odom_topic     里程计话题（/Odometry_open3d）
+# ============================================================================
 pure_pursuit_node:
   ros__parameters:
     k: 0.5

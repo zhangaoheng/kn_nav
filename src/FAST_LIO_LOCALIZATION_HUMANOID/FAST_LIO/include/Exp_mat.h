@@ -1,3 +1,12 @@
+// ============================================================================
+// 文件：Exp_mat.h
+// 用途：SO(3) 旋转群与李代数之间的映射：指数映射 Exp（罗德里格斯公式）与
+//       对数映射 Log，是 ESKF 中旋转状态增量更新的核心数学工具。
+// 结构：Exp 三个重载（旋转向量 / 角速度*dt / 三分量）+ Log 一个重载。
+// 依赖：Eigen、opencv2/core（仅头文件引用）。
+// 说明：上游开源算法（FAST-LIO），工作区内作为里程计前端使用；
+//       与 so3_math.h 功能重叠，二者保留其一即可满足编译。
+// ============================================================================
 #ifndef EXP_MAT_H
 #define EXP_MAT_H
 
@@ -9,6 +18,7 @@
 #define SKEW_SYM_MATRX(v) 0.0,-v[2],v[1],v[2],0.0,-v[0],-v[1],v[0],0.0
 
 template<typename T>
+// 指数映射：由旋转向量（角轴）求旋转矩阵，零向量返回单位阵
 Eigen::Matrix<T, 3, 3> Exp(const Eigen::Matrix<T, 3, 1> &&ang)
 {
     T ang_norm = ang.norm();
@@ -28,6 +38,7 @@ Eigen::Matrix<T, 3, 3> Exp(const Eigen::Matrix<T, 3, 1> &&ang)
 }
 
 template<typename T, typename Ts>
+// 指数映射：由角速度与时间间隔 dt 求旋转增量矩阵（IMU 姿态递推用）
 Eigen::Matrix<T, 3, 3> Exp(const Eigen::Matrix<T, 3, 1> &ang_vel, const Ts &dt)
 {
     T ang_vel_norm = ang_vel.norm();
@@ -52,6 +63,7 @@ Eigen::Matrix<T, 3, 3> Exp(const Eigen::Matrix<T, 3, 1> &ang_vel, const Ts &dt)
 }
 
 template<typename T>
+// 指数映射：角轴三分量版本（v1, v2, v3 即旋转向量分量）
 Eigen::Matrix<T, 3, 3> Exp(const T &v1, const T &v2, const T &v3)
 {
     T &&norm = sqrt(v1 * v1 + v2 * v2 + v3 * v3);
@@ -71,6 +83,7 @@ Eigen::Matrix<T, 3, 3> Exp(const T &v1, const T &v2, const T &v3)
     }
 }
 
+// 对数映射：由旋转矩阵求旋转向量（小角度时用近似式 0.5*K 避免数值奇异）
 /* Logrithm of a Rotation Matrix */
 template<typename T>
 Eigen::Matrix<T,3,1> Log(const Eigen::Matrix<T, 3, 3> &R)

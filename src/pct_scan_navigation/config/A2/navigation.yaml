@@ -1,6 +1,24 @@
-# Unified PCT + SCAN navigation configuration.
-# Edit this file instead of the legacy split YAML files.
+# ============================================================================
+# navigation.yaml —— A2 机器人的统一导航配置（唯一配置入口）
+# ----------------------------------------------------------------------------
+# 一个机器人 profile 只维护这一个文件，launch 文件（unitree_A2_*）读取它，
+# 启动整条链路：FAST-LIO 里程计 -> Open3D 全局定位 -> PCT 全局规划
+# -> SCAN 局部规划/控制 -> Go2 底盘桥。
+#
+# 四个分区：
+#   launch : 启动开关与模式（sim 时间、导航模式 1/2、各节点开关、网卡、初始地图）
+#   topics : 节点间关键话题名（可重映射）
+#   maps   : 地图档案（定位 PCD + PCT tomogram + 配准阈值）
+#   nodes  : 各节点的 ROS 参数（按节点名分组）
+#
+# 旧的分拆 YAML（coordinator.yaml / scan_planner.yaml 等）仅作迁移对照，
+# 统一启动文件不再逐个读取它们。
+# ============================================================================
 version: 1
+version: 1
+# --- launch：启动开关与导航模式 ---
+#   use_sim_time 是否用仿真时间；navigation_mode 1=RViz 目标直通 SCAN，2=PCT 完整路径；
+#   start_* 控制各节点是否启动；network_interface 底盘桥网卡；initial_map_name 初始地图名。
 launch:
   use_sim_time: false
   navigation_mode: 2
@@ -12,6 +30,9 @@ launch:
   full_restart_command: ''
   start_global_relocalization: true
 
+# --- topics：节点间关键话题（供 launch 重映射）---
+#   body_pose/sensor_pose 机器人位姿、cloud 雷达点云、goal 导航目标、
+#   waypoints SCAN 路径输入、initial_path 初始路径。
 topics:
   body_pose: /Odometry_open3d
   sensor_pose: /Odometry_open3d
@@ -19,6 +40,9 @@ topics:
   goal: /goal_pose
   waypoints: /scan_planner/waypoints
   initial_path: /initial_path
+# --- maps：地图档案（/switch_map 可运行时切换）---
+#   pcd_path 全局定位用的离线点云；tomo_path PCT 全局规划的代价地图(pickle)；
+#   localization 为 Open3D 定位的配准阈值。
 maps:
   outdoor:
     pcd_path: /home/nav_map/outdoor/outdoor_global_voxel02.pcd
@@ -41,6 +65,11 @@ maps:
       fitness_eval_threshold: 0.2
       threshold_fitness: 0.8
       threshold_fitness_init: 0.9
+# --- nodes：各节点 ROS 参数（按节点名分组）---
+#   fastlio_mapping FAST-LIO 里程计；global_localization_node Open3D 全局定位；
+#   global_relocalization_node 全局重定位；localization_service_node 定位服务；
+#   pct_global_planner PCT 全局规划；scan_planner_node/closed_loop_controller SCAN 局部规划与控制；
+#   pct_scan_coordinator 路径采样协调；nav_manager_node 导航管理；go2_cmd_vel_bridge Go2 底盘桥。
 nodes:
   fastlio_mapping:
     feature_extract_enable: false

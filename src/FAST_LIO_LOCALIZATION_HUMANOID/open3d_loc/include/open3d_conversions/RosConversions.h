@@ -1,3 +1,9 @@
+// ============================================================================
+// 文件：RosConversions.h
+// 说明：Conversion 命名空间下的通用坐标/位姿类型转换模板库（ROS 2 版）。
+//       以 Convert<From, To>() 模板特化方式，统一实现 tf2、Eigen、
+//       geometry_msgs、std::vector 之间的互转；未实现的组合在编译期报错。
+// ============================================================================
 #ifndef PROJECT_ROSCONVERSION_H
 #define PROJECT_ROSCONVERSION_H
 
@@ -44,6 +50,7 @@ using JointState = sensor_msgs::msg::JointState;
 #define Meter2MM(d) ((double)(d * 1000.00))
 #endif
 
+// Conversion 命名空间：集中定义 tf2 / Eigen / geometry_msgs 的类型别名与转换模板。
 namespace Conversion
 {
     using tfPose = tf2::Transform;
@@ -67,6 +74,7 @@ namespace Conversion
      *
      * Note: Fixed to work only for double due to va_arg limitations.
      */
+// 变参工具：把 n 个 double 参数打包成 std::vector<double>（仅支持 double）。
     inline std::vector<double> ToVector(int n, ...)
     {
         std::vector<double> ds;
@@ -88,6 +96,7 @@ namespace Conversion
      *  you#ifdef CRCL can't use float literals as template parameters
      */
     template <typename T>
+// 模板工具：把向量中的角度值从度缩放为弧度（默认乘 M_PI/180）。
     inline std::vector<T> ScaleVector(std::vector<T> goaljts, double multiplier = M_PI / 180.0)
     {
         // transform angles from degree to radians
@@ -102,6 +111,8 @@ namespace Conversion
      * \param f is defined in the template corresponding to the "From" typename.
      * \return to is defined in the template corresponding "To"  typename
      */
+// 默认转换模板：未特化的 From/To 组合在此触发 static_assert 编译错误，
+// 提示开发者补写对应的 Convert 特化，避免静默的错误转换。
     template <typename From, typename To>
     inline To Convert(From f)
     {
@@ -357,6 +368,7 @@ namespace Conversion
      * \param ds is a  std array of 6 doubles to create pose (rpy + xyz).
      * \return tf2::Transform
      */
+// 由 6 元数组 [x,y,z,roll,pitch,yaw] 构造 tf2 位姿（rpy 为弧度）。
     inline tfPose CreateRPYPose(std::vector<double> ds)
     {
         assert(ds.size() > 5);

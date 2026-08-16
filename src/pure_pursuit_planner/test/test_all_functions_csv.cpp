@@ -1,3 +1,13 @@
+// ============================================================================
+// 文件名：test_all_functions_csv.cpp
+// 用途：纯追踪各核心函数的 CSV 数据驱动测试。
+// 数据：读取 test_data/<函数名>.csv（列名→值），期望输出与实现对比（容差 1e-3），
+//       结果写入 test_results_*.csv，并逐行给出 gtest 断言。
+// 覆盖：computeVelocity / calcLf / 最近点搜索 / 前视点搜索 / 曲率限速 /
+//       alpha 归一化 / 角速度计算 / isGoalReached。
+// 依赖：test_utils.hpp（readCsv + runCsvTests 运行器）。
+// ============================================================================
+
 #include <gtest/gtest.h>
 #include "test_utils.hpp"
 #include "pure_pursuit_planner/pure_pursuit_planner_component.hpp"
@@ -9,6 +19,8 @@ using test_utils::runCsvTests;
 const double tol = 1e-3;
 
 //pp-00 現在地と目標経路を入力に対して、目標経路を追従するような速度、加速度を出力
+// 主函数数据驱动测试：给定位姿/速度/路径/参数，校验输出的 (v, w)
+
 TEST(computeVelocity, CsvBasedTest) {
     std::vector<FuncTest> tests = {
         FuncTest{

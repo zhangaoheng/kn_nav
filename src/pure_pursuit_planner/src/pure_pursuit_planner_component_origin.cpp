@@ -1,8 +1,22 @@
+// ============================================================================
+// 文件名：pure_pursuit_planner_component_origin.cpp
+// 用途：纯追踪规划器的“原始参考实现”（重构前版本，仅存档对比用，
+//       未包含在 CMakeLists 中，不参与编译）。
+// 结构：旧版 PurePursuitNode 单类实现——话题回调 + updateControl 周期控制 +
+//       purePursuitControl/searchTargetIndex 算法 + 可视化 Marker 发布。
+// 与新版差异：旧版直接订阅 odom/tgt_path、含障碍物避让与 Rviz 可视化，
+//             算法内聚在节点内；新版拆分为无 ROS 依赖的 Component。
+// 注意：本文件引用了头文件中已不存在的旧接口，仅为历史参考，勿用于编译。
+// ============================================================================
+
 #include "pure_pursuit_planner/pure_pursuit_planner_component.hpp"
 #include "nav_msgs/msg/path.hpp"
 
 using std::placeholders::_1;
 using namespace std::chrono_literals;
+
+// 旧版构造函数：建立话题（odom/tgt_path/障碍物）订阅、多个可视化 Marker 发布，
+// 并按 dt 创建周期控制定时器
 
 PurePursuitNode::PurePursuitNode()
 : Node("pure_pursuit_planner") {
@@ -48,6 +62,8 @@ PurePursuitNode::PurePursuitNode()
                                     std::bind(&PurePursuitNode::updateControl, this));
 }
 
+// 周期控制：路径与里程计就绪后执行纯追踪并发布，同时绘制激光范围圆 Marker
+
 void PurePursuitNode::updateControl() {
     current_time = this->get_clock()->now();
     if (path_subscribe_flag && odom_subscribe_flag) {
@@ -85,6 +101,9 @@ void PurePursuitNode::updateControl() {
         lidar_range_pub->publish(line_strip_marker);
     }
 }
+
+// 旧版纯追踪单步：取前视点 → 曲率限速 → 计算 alpha 与角速度（tan 转向律），
+// 并可视化前视点与前视圆；障碍物标志存在时维持原指令
 
 std::pair<double, double> PurePursuitNode::purePursuitControl(int& pind) {
     auto [ind, Lf] = searchTargetIndex();
@@ -124,6 +143,9 @@ std::pair<double, double> PurePursuitNode::purePursuitControl(int& pind) {
     pind = ind;
     return { v, w };
 }
+
+// 旧版前视点搜索：先找最近点（首帧全搜索，之后沿路径推进比较相邻距离），
+// 再从最近点前进直到距离 ≥ Lf
 
 std::pair<int, double> PurePursuitNode::searchTargetIndex() {
     if (oldNearestPointIndex == -1) {
@@ -242,6 +264,8 @@ double PurePursuitNode::calcDistance(double point_x, double point_y) const {
     return std::hypot(dx, dy);
 }
 
+// 里程计回调：更新 x/y/yaw 并置位订阅标志
+
 void PurePursuitNode::odometry_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
 {
     // オドメトリからx, y, thetaを取得
@@ -319,6 +343,9 @@ void PurePursuitNode::local_obstacle_callback(const visualization_msgs::msg::Mar
 }
 
 
+// 路径回调：仅首帧装载路径（旧版行为），从消息提取 x/y/曲率(z 轴)/朝向，
+// 并预搜索一次目标索引
+
 void PurePursuitNode::path_callback(const nav_msgs::msg::Path::SharedPtr msg) {
     if (!path_subscribe_flag) {
         // 以前のパス情報をクリア
@@ -348,6 +375,8 @@ void PurePursuitNode::path_callback(const nav_msgs::msg::Path::SharedPtr msg) {
 
     path_subscribe_flag = true;
 }
+
+// 发布速度：距终点 < goal_threshold 判定到达并停车，否则发布 (v, w)
 
 void PurePursuitNode::publishCmd(double v, double w)
 {

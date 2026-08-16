@@ -1,5 +1,22 @@
+// ============================================================================
+// 文件名：fast_lio_localization_sc_qn.cpp
+// 用途：FastLioLocalizationScQn 主类的实现：参数读取、离线地图加载、
+//       里程计/点云同步回调（键帧维护）与定时全局匹配（校正 TF 更新与发布）。
+// 结构：
+//   - 构造函数：读参数、初始化 MapMatcher、加载地图、建立 ROS 发布/订阅/定时器
+//   - odomPcdCallback：实时位姿修正与键帧保存
+//   - matchingTimerFunc：定时执行全局匹配并更新累积校正 TF
+//   - 辅助：updateOdomsAndPaths / getMatchMarker / checkIfKeyframe / loadMap
+// 数据流：FAST-LIO 的 /Odometry 与 /cloud_registered --> 键帧 --> MapMatcher
+//       全局匹配 --> last_corrected_TF_ 累积校正 --> 发布校正轨迹与可视化。
+//       注意：本包仍处于测试阶段，未参与实际编译（COLCON_IGNORE）。
+// ============================================================================
+
 #include "fast_lio_localization_sc_qn.h"
 
+// 构造函数：从私有参数服务器读取全部参数（地图路径、键帧阈值、匹配频率、
+// GICP/Quatro 参数等），初始化 MapMatcher，加载离线地图，并建立发布者、
+// 同步订阅与匹配定时器。注意：包尚未编译，参数默认值可能未与 config.yaml 对齐。
 FastLioLocalizationScQn::FastLioLocalizationScQn(const ros::NodeHandle &n_private):
     nh_(n_private)
 {
@@ -47,15 +64,21 @@ FastLioLocalizationScQn::FastLioLocalizationScQn(const ros::NodeHandle &n_privat
     nh_.param<double>("/quatro/rotation/rot_cost_diff_threshold", qc.rot_cost_diff_thr_, 0.25);
     nh_.param<int>("/quatro/rotation/num_max_iter", qc.quatro_max_iter_, 50);
 
+    // 按参数初始化全局匹配器（ScanContext + Quatro + NanoGICP）
+    ////// Matching init
     ////// Matching init
     map_matcher_ = std::make_shared<MapMatcher>(mm_config);
 
+    // 从 rosbag 加载离线地图并注册进 ScanContext
+    ////// Load map
     ////// Load map
     loadMap(saved_map_path);
 
     ////// ROS things
     raw_odom_path_.header.frame_id = map_frame_;
     corrected_odom_path_.header.frame_id = map_frame_;
+    // 发布者：原始/校正轨迹、实时位姿、匹配调试点云与离线地图
+    // publishers
     // publishers
     odom_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/ori_odom", 10, true);
     path_pub_ = nh_.advertise<nav_msgs::Path>("/ori_path", 10, true);
@@ -69,21 +92,30 @@ FastLioLocalizationScQn::FastLioLocalizationScQn(const ros::NodeHandle &n_privat
     debug_dst_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/dst", 10);
     debug_coarse_aligned_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/coarse_aligned_quatro", 10);
     debug_fine_aligned_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/fine_aligned_nano_gicp", 10);
+    // 订阅者：FAST-LIO 的 /Odometry 与 /cloud_registered，近似时间同步后进回调
+    // subscribers
     // subscribers
     sub_odom_ = std::make_shared<message_filters::Subscriber<nav_msgs::Odometry>>(nh_, "/Odometry", 10);
     sub_pcd_ = std::make_shared<message_filters::Subscriber<sensor_msgs::PointCloud2>>(nh_, "/cloud_registered", 10);
     sub_odom_pcd_sync_ = std::make_shared<message_filters::Synchronizer<odom_pcd_sync_pol>>(odom_pcd_sync_pol(10), *sub_odom_, *sub_pcd_);
     sub_odom_pcd_sync_->registerCallback(boost::bind(&FastLioLocalizationScQn::odomPcdCallback, this, _1, _2));
+    // 定时器最后创建：确保参数/地图/订阅全部就绪后才开始周期匹配
+    // Timers at the end
     // Timers at the end
     match_timer_ = nh_.createTimer(ros::Duration(1 / map_match_hz), &FastLioLocalizationScQn::matchingTimerFunc, this);
 
     ROS_WARN("Main class, starting node...");
 }
 
+// 里程计 + 点云同步回调（FAST-LIO 输出）。职责：
+//   1. 用累积校正 TF 计算实时校正位姿并发布（/pose_stamped、TF、当前点云）；
+//   2. 首次数据无条件保存为初始键帧，之后按距离阈值决定是否保存新键帧。
 void FastLioLocalizationScQn::odomPcdCallback(const nav_msgs::OdometryConstPtr &odom_msg, const sensor_msgs::PointCloud2ConstPtr &pcd_msg)
 {
     PosePcd current_frame = PosePcd(*odom_msg, *pcd_msg, current_keyframe_idx_); // to be checked if keyframe or not
     //// 1. realtime pose = last TF * odom
+    // 实时位姿 = 最近一次累积校正 TF * 里程计位姿（把全局匹配的校正量实时叠加）
+    current_frame.pose_corrected_eig_ = last_corrected_TF_ * current_frame.pose_eig_;
     current_frame.pose_corrected_eig_ = last_corrected_TF_ * current_frame.pose_eig_;
     geometry_msgs::PoseStamped current_pose_stamped_ = poseEigToPoseStamped(current_frame.pose_corrected_eig_, map_frame_);
     realtime_pose_pub_.publish(current_pose_stamped_);
@@ -94,6 +126,8 @@ void FastLioLocalizationScQn::odomPcdCallback(const nav_msgs::OdometryConstPtr &
     // pub current scan in corrected pose frame
     corrected_current_pcd_pub_.publish(pclToPclRos(transformPcd(current_frame.pcd_, current_frame.pose_corrected_eig_), map_frame_));
 
+    // 初始化分支：无条件保存首帧作为匹配基准
+    if (!is_initialized_) //// init only once
     if (!is_initialized_) //// init only once
     {
         // 1. save first keyframe
@@ -130,6 +164,9 @@ void FastLioLocalizationScQn::odomPcdCallback(const nav_msgs::OdometryConstPtr &
     return;
 }
 
+// 匹配定时器回调：对最新未处理键帧执行全局匹配（ScanContext 检索 +
+// Quatro/NanoGICP 配准）。匹配有效时把相对变换累积进 last_corrected_TF_
+// 并修正校正轨迹，最后发布轨迹、匹配连线与调试点云。
 void FastLioLocalizationScQn::matchingTimerFunc(const ros::TimerEvent &event)
 {
     if (!is_initialized_)
@@ -137,6 +174,8 @@ void FastLioLocalizationScQn::matchingTimerFunc(const ros::TimerEvent &event)
         return;
     }
 
+    // 在锁内拷贝最新键帧并标记为已处理，避免重复匹配同一帧
+    //// 1. copy not processed keyframes
     //// 1. copy not processed keyframes
     high_resolution_clock::time_point t1_ = high_resolution_clock::now();
     PosePcd last_keyframe_copy;
@@ -145,6 +184,8 @@ void FastLioLocalizationScQn::matchingTimerFunc(const ros::TimerEvent &event)
         last_keyframe_copy = last_keyframe_;
         last_keyframe_.processed_ = true;
     }
+    // 跳过初始帧（无匹配基准）与已处理帧
+    if (last_keyframe_copy.idx_ == 0 || last_keyframe_copy.processed_)
     if (last_keyframe_copy.idx_ == 0 || last_keyframe_copy.processed_)
     {
         return; // already processed or initial keyframe
@@ -163,9 +204,13 @@ void FastLioLocalizationScQn::matchingTimerFunc(const ros::TimerEvent &event)
                                                                            closest_keyframe_idx);
 
     //// 3. handle corrected results
+    // 匹配通过有效性判定：更新累积校正 TF，并修正该键帧的校正位姿
+    if (reg_output.is_valid_) // TF the pose with the result of match
     if (reg_output.is_valid_) // TF the pose with the result of match
     {
         ROS_INFO("\033[1;32mMap matching accepted. Score: %.3f\033[0m", reg_output.score_);
+        // 累积校正：匹配得到的相对变换左乘到既有校正之上（校正量随时间叠加）
+        last_corrected_TF_ = reg_output.pose_between_eig_ * last_corrected_TF_; // update TF
         last_corrected_TF_ = reg_output.pose_between_eig_ * last_corrected_TF_; // update TF
         Eigen::Matrix4d TFed_pose = reg_output.pose_between_eig_ * last_keyframe_copy.pose_corrected_eig_;
         // correct poses in vis data
@@ -180,11 +225,15 @@ void FastLioLocalizationScQn::matchingTimerFunc(const ros::TimerEvent &event)
     }
     high_resolution_clock::time_point t2_ = high_resolution_clock::now();
 
+    // 发布调试点云：源/目标/Quatro 粗对齐/GICP 精对齐
+    debug_src_pub_.publish(pclToPclRos(map_matcher_->getSourceCloud(), map_frame_));
     debug_src_pub_.publish(pclToPclRos(map_matcher_->getSourceCloud(), map_frame_));
     debug_dst_pub_.publish(pclToPclRos(map_matcher_->getTargetCloud(), map_frame_));
     debug_coarse_aligned_pub_.publish(pclToPclRos(map_matcher_->getCoarseAlignedCloud(), map_frame_));
     debug_fine_aligned_pub_.publish(pclToPclRos(map_matcher_->getFinalAlignedCloud(), map_frame_));
 
+    // 发布原始与校正后的轨迹（点云 + 路径）
+    // publish odoms and paths
     // publish odoms and paths
     {
         std::lock_guard<std::mutex> lock(vis_mutex_);
@@ -193,6 +242,8 @@ void FastLioLocalizationScQn::matchingTimerFunc(const ros::TimerEvent &event)
     }
     odom_pub_.publish(pclToPclRos(raw_odoms_, map_frame_));
     path_pub_.publish(raw_odom_path_);
+    // 离线地图点云只在有订阅者时发布一次，避免反复序列化大点云
+    // publish saved map
     // publish saved map
     if (saved_map_vis_switch_ && saved_map_pub_.getNumSubscribers() > 0)
     {
@@ -210,6 +261,7 @@ void FastLioLocalizationScQn::matchingTimerFunc(const ros::TimerEvent &event)
     return;
 }
 
+// 把键帧的原始/校正位姿追加进轨迹点云与路径容器（可视化数据，与键帧索引一一对应）
 void FastLioLocalizationScQn::updateOdomsAndPaths(const PosePcd &pose_pcd_in)
 {
     raw_odoms_.points.emplace_back(pose_pcd_in.pose_eig_(0, 3),
@@ -223,6 +275,7 @@ void FastLioLocalizationScQn::updateOdomsAndPaths(const PosePcd &pose_pcd_in)
     return;
 }
 
+// 把"校正后位姿-原始位姿"点对转成 rviz 线段 Marker（type 5 为 LINE_LIST）
 visualization_msgs::Marker FastLioLocalizationScQn::getMatchMarker(const std::vector<std::pair<pcl::PointXYZ, pcl::PointXYZ>> &match_xyz_pairs)
 {
     visualization_msgs::Marker edges_;
@@ -249,11 +302,14 @@ visualization_msgs::Marker FastLioLocalizationScQn::getMatchMarker(const std::ve
     return edges_;
 }
 
+// 平移距离超过阈值即视为新键帧（基于校正后位姿计算）
 bool FastLioLocalizationScQn::checkIfKeyframe(const PosePcd &pose_pcd_in, const PosePcd &latest_pose_pcd)
 {
     return keyframe_dist_thr_ < (latest_pose_pcd.pose_corrected_eig_.block<3, 1>(0, 3) - pose_pcd_in.pose_corrected_eig_.block<3, 1>(0, 3)).norm();
 }
 
+// 从 rosbag 读取离线地图键帧（话题 /keyframe_pcd 与 /keyframe_pose），
+// 构造 PosePcdReduced 列表，拼接可视化地图点云并注册进 ScanContext 数据库
 void FastLioLocalizationScQn::loadMap(const std::string &saved_map_path)
 {
     rosbag::Bag bag;
@@ -278,10 +334,14 @@ void FastLioLocalizationScQn::loadMap(const std::string &saved_map_path)
             load_pose_vec.push_back(*pose_msg_ptr);
         }
     }
+    // 键帧点云与位姿数量必须一致，否则说明 bag 文件有问题
+    if (load_pcd_vec.size() != load_pose_vec.size())
     if (load_pcd_vec.size() != load_pose_vec.size())
     {
         ROS_ERROR("WRONG BAG FILE!!!!!");
     }
+    // 逐帧构造 PosePcdReduced：拼接地图点云，并注册 ScanContext 用于回环候选检索
+    for (size_t i = 0; i < load_pose_vec.size(); ++i)
     for (size_t i = 0; i < load_pose_vec.size(); ++i)
     {
         saved_map_from_bag_.push_back(PosePcdReduced(load_pose_vec[i], load_pcd_vec[i], i));

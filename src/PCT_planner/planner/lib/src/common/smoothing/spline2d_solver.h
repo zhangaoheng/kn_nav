@@ -14,6 +14,12 @@
  * limitations under the License.
  *****************************************************************************/
 
+// ============================================================================
+// 文件名: spline2d_solver.h
+// 用途:   二维样条求解器抽象基类: 组合样条、核、约束三个对象,
+//         定义 Reset/求解/结果提取接口, 具体实现见 osqp_spline2d_solver。
+// 结构:   Spline2dSolver 抽象类, 含 spline_/kernel_/constraint_ 三成员
+// ============================================================================
 #pragma once
 
 #include <Eigen/Core>
@@ -25,6 +31,7 @@
 
 namespace common {
 
+// 抽象基类: 通过 mutable_*() 暴露约束与核供调用方配置, Solve() 完成求解。
 class Spline2dSolver {
  public:
   Spline2dSolver() = default;

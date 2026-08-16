@@ -1,4 +1,19 @@
 #!/usr/bin/env python3
+# ============================================================================
+# migrate_navigation_config.py
+# ----------------------------------------------------------------------------
+# 配置迁移工具：把某个机型目录下的 legacy 拆分 YAML（fast_lio.yaml、
+# open3d_loc.yaml、scan_planner.yaml、coordinator.yaml、map_profiles.yaml、
+# go2_bridge.yaml 等）合并成一份统一 navigation.yaml。
+#
+# 用途：
+#   * 新增/重做机型配置时一键生成统一文件，保证 nodes.<node> 与旧拆分
+#     文件内容完全一致（test_navigation_contract.py 会校验这一点）。
+#
+# 用法：python3 migrate_navigation_config.py <legacy_dir> [-o OUTPUT]
+# 默认输出到 LEGACY_DIR/navigation.yaml。
+# ============================================================================
+
 """Merge a legacy pct_scan_navigation profile into one navigation.yaml."""
 
 import argparse
@@ -7,6 +22,7 @@ from pathlib import Path
 import yaml
 
 
+# 读取单个 YAML 文件并确保根节点是字典。
 def _load(path):
     with path.open('r', encoding='utf-8') as handle:
         data = yaml.safe_load(handle) or {}
@@ -15,6 +31,8 @@ def _load(path):
     return data
 
 
+# 从 legacy 拆分文件里取出指定节点的 ros__parameters 段；
+# fastlio_mapping 兼容 /** 顶层写法（FAST-LIO 默认参数表挂在 /** 下）。
 def _ros_parameters(path, node_name):
     data = _load(path)
     node = data.get(node_name)
@@ -26,6 +44,9 @@ def _ros_parameters(path, node_name):
     return node['ros__parameters']
 
 
+# 核心合并逻辑：按统一配置 schema 组装 version/launch/topics/maps/nodes；
+# launch 段按机型名推断默认值（local 不开 go2 桥、网卡 enp2s0，其余机型
+# 开桥、网卡 eth0）；nav_manager_node 使用固定服务/话题契约。
 def build_unified_config(legacy_dir):
     profile_name = legacy_dir.name
     open3d = _load(legacy_dir / 'open3d_loc.yaml')
@@ -85,6 +106,7 @@ def build_unified_config(legacy_dir):
     }
 
 
+# CLI 入口：解析 legacy 目录与输出路径，合并后写 navigation.yaml 并打印结果。
 def main():
     parser = argparse.ArgumentParser(
         description='Merge one legacy navigation profile into navigation.yaml')

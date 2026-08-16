@@ -14,6 +14,14 @@
  * limitations under the License.
  *****************************************************************************/
 
+// ============================================================================
+// 文件名: affine_constraint.h
+// 用途:   仿射(线性)不等式约束容器, 约束形式为 l <= A*x <= u
+//         (等式约束即 l == u); 用于把样条优化问题的约束整理后交给 QP 求解器
+// 结构:   AffineConstraint 类, 内部保存约束矩阵与上下界向量
+// 依赖:   common/base/type.h
+// ============================================================================
+
 #pragma once
 
 #include <Eigen/Core>
@@ -23,6 +31,7 @@
 
 #define udrive_inf ((double)1e30)  // NOLINT
 
+// 仿射约束容器: 描述 l <= A*x <= u, 支持追加多组约束
 namespace common {
 /**
  * @class AffineConstraint
@@ -42,10 +51,12 @@ class AffineConstraint {
 
   const std::vector<double>& upper_bound() const;
 
+// 追加一组约束(约束矩阵行数与上下界长度需一致)
   bool AddConstraint(const Eigen::MatrixXd& constraint_matrix,
                      const std::vector<double>& lower_bound,
                      const std::vector<double>& upper_bound);
 
+// 打印约束矩阵与上下界(调试用)
   void Print() const;
 
  private:

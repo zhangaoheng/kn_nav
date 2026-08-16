@@ -1,3 +1,10 @@
+// ============================================================================
+// 文件名: data_types.h
+// 用途:   规划器通用数据类型: 固定尺寸向量别名 Vector4/Vector6,
+//         以及路径点结构 PathPoint(含图层、坐标、航向、参考速度、高度)
+// 数据流: A* 与高程规划器输出 std::vector<PathPoint> 作为原始路径
+// ============================================================================
+
 #pragma once
 
 #include <Eigen/Dense>
@@ -6,6 +13,8 @@
 using Vector4 = Eigen::Matrix<double, 4, 1>;
 using Vector6 = Eigen::Matrix<double, 6, 1>;
 
+// 路径点: 记录所在图层 layer、平面坐标(x,y)、航向 heading、参考速度 ref_v、
+// 高度 height; 提供两点间线性插值工具
 struct PathPoint {
   int layer = 0;
   double x = 0.0;
@@ -18,6 +27,7 @@ struct PathPoint {
   PathPoint(int layer, double x, double y, double heading, double ref_v)
       : layer(layer), x(x), y(y), heading(heading), ref_v(ref_v) {}
 
+  // 两点线性插值(t 为 [0,1] 比例): 位置/高度/参考速度插值, 航向直接取终点值
   static PathPoint Interpolate(const PathPoint& p1, const PathPoint& p2,
                                double t) {
     PathPoint p;

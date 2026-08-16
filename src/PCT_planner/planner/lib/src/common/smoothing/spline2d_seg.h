@@ -14,6 +14,13 @@
  * limitations under the License.
  *****************************************************************************/
 
+// ============================================================================
+// 文件名: spline2d_seg.h
+// 用途:   二维样条的单个分段: x(t) 与 y(t) 各用一个多项式 (PolynomialXd)
+//         表达, 并缓存其一至三阶导数多项式, 提供 t 处求值接口。
+//         一条 Spline2d 由多个该分段按节点拼接而成。
+// 结构:   Spline2dSeg 类, 内部持有 x/y 两个多项式及其导数多项式
+// ============================================================================
 #pragma once
 
 #include <utility>
@@ -23,6 +30,7 @@
 
 namespace common {
 
+// 二维样条分段: 阶数指参数个数 (非最高次数), 求值基于局部参数 t。
 class Spline2dSeg {
  public:
   // order represent the number of parameters (not the highest order);
