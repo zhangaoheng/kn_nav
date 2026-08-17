@@ -1,28 +1,29 @@
 # syntax=docker/dockerfile:1.7
 #
-# AMD64 构建（在本文件所在目录执行）：
-# docker buildx build --platform linux/amd64 --load -t cross-floor-nav:amd64-v1 -f Dockerfile .
+# ARM64 构建（在本文件所在目录执行）：
+# docker buildx build --platform linux/arm64 --load -t cross-floor-nav:arm64-v1 -f Dockerfile.arm64 .
 #
-# AMD64 运行：
-# docker run --rm -it --name kn-nav-amd64 --network host --ipc host --privileged \
-#   -v /实际地图目录:/home/nav_map:ro cross-floor-nav:amd64-v1
+# ARM64 运行：
+# docker run --rm -it --name kn-nav-arm64 --network host --ipc host --privileged \
+#   -v /实际地图目录:/home/nav_map:ro cross-floor-nav:arm64-v1
 #
 # 后台运行：
-# docker run -d --name kn-nav-amd64 --restart unless-stopped \
+# docker run -d --name kn-nav-arm64 --restart unless-stopped \
 #   --network host --ipc host --privileged \
-#   -v /实际地图目录:/home/nav_map:ro cross-floor-nav:amd64-v1 sleep infinity
+#   -v /实际地图目录:/home/nav_map:ro cross-floor-nav:arm64-v1 sleep infinity
 #
 # 进入后台容器：
-# docker exec -it kn-nav-amd64 bash
+# docker exec -it kn-nav-arm64 bash
 #
 # 导出 / 导入：
-# docker save -o cross-floor-nav-amd64-v1.tar cross-floor-nav:amd64-v1
-# docker load -i cross-floor-nav-amd64-v1.tar
+# docker save -o cross-floor-nav-arm64-v1.tar cross-floor-nav:arm64-v1
+# docker load -i cross-floor-nav-arm64-v1.tar
 #
 FROM ros:humble-ros-base-jammy
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
+ARG TARGETARCH
 ARG DEBIAN_FRONTEND=noninteractive
 ARG BUILD_JOBS=4
 ARG KN_NAV_REPO=https://github.com/zhangaoheng/kn_nav.git
@@ -30,6 +31,8 @@ ARG KN_NAV_REF=d17706e8844370da1b33875fbd576920784a4afa
 ARG UNITREE_SDK2_REF=21d0a3b2c46ee48c8fdf2783becb6be3beb0a59b
 ARG LIVOX_SDK2_REF=f5d9375f84efe2b15bc0a052d3e18482ed13adf4
 ARG LIVOX_ROS_DRIVER2_REF=v1.1.3
+
+RUN test "${TARGETARCH}" = arm64
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential ca-certificates cmake git pkg-config unzip vim \
@@ -47,6 +50,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN mkdir -p /home/code/thirdparty /home/code/work_space/ws_livox/src /tmp/ros_logs \
     && git clone https://github.com/unitreerobotics/unitree_sdk2.git /home/code/thirdparty/unitree_sdk2 \
     && git -C /home/code/thirdparty/unitree_sdk2 checkout "${UNITREE_SDK2_REF}" \
+    && test -f /home/code/thirdparty/unitree_sdk2/lib/aarch64/libunitree_sdk2.a \
     && git clone https://github.com/Livox-SDK/Livox-SDK2.git /home/code/thirdparty/Livox-SDK2 \
     && git -C /home/code/thirdparty/Livox-SDK2 checkout "${LIVOX_SDK2_REF}" \
     && git clone https://github.com/Livox-SDK/livox_ros_driver2.git /home/code/work_space/ws_livox/src/livox_ros_driver2 \
@@ -84,14 +88,14 @@ RUN source /opt/ros/humble/setup.bash \
     && cd /home/code/work_space/kn_nav \
     && colcon build --symlink-install --cmake-args \
       -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
-      -DOpen3D_DIR=/usr/lib/x86_64-linux-gnu/cmake/Open3D
+      -DOpen3D_DIR=/usr/lib/aarch64-linux-gnu/cmake/Open3D
 
-COPY docker-entrypoint.sh /usr/local/bin/kn-nav-entrypoint
-RUN chmod +x /usr/local/bin/kn-nav-entrypoint
+COPY docker-entrypoint-arm64.sh /usr/local/bin/kn-nav-entrypoint-arm64
+RUN chmod +x /usr/local/bin/kn-nav-entrypoint-arm64
 
 ENV ROS_LOG_DIR=/tmp/ros_logs \
-    Open3D_DIR=/usr/lib/x86_64-linux-gnu/cmake/Open3D
+    Open3D_DIR=/usr/lib/aarch64-linux-gnu/cmake/Open3D
 
 WORKDIR /home/code/work_space/kn_nav
-ENTRYPOINT ["/usr/local/bin/kn-nav-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/kn-nav-entrypoint-arm64"]
 CMD ["bash"]
