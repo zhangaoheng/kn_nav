@@ -22,12 +22,7 @@ from launch_ros.substitutions import FindPackageShare
 # 组装 LaunchDescription：声明可覆盖参数后，Include 底层统一 launch，
 # 并把自身的 LaunchConfiguration 原样转发（config_profile 固定为 unitree_go2）。
 def generate_launch_description():
-    default_config = PathJoinSubstitution([
-        FindPackageShare('pct_scan_navigation'),
-        'config',
-        'unitree_go2',
-        'navigation.yaml',
-    ])
+    default_config = '/home/nav_map/config/unitree_go2/navigation.yaml'
     base_launch = PathJoinSubstitution([
         FindPackageShare('pct_scan_navigation'),
         'launch',
