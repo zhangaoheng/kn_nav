@@ -1,0 +1,25 @@
+# ============================================================================
+# go2_bridge.yaml —— go2_cmd_vel_bridge 节点参数（Go2 底盘速度桥）。
+#   把 /cmd_vel 通过 Unitree SDK 网络协议转发给机器人底盘。
+#   dds_domain_id          Unitree DDS 域 ID
+#   sport_state_topic      底盘状态话题（rt/sportmodestate）
+#   sdk_timeout / *_timeout 各类超时（s），超时触发安全停车
+#   control_rate           控制发送频率（Hz）
+#   min/max_vx、max_abs_vy/vyaw 线速度/角速度限幅
+#   max_*_acceleration     加速度限幅
+# ============================================================================
+go2_cmd_vel_bridge:
+  ros__parameters:
+    dds_domain_id: 0
+    sport_state_topic: "rt/sportmodestate"
+    sdk_timeout: 0.5
+    control_rate: 20.0
+    min_vx: 0.0
+    max_vx: 0.75
+    max_abs_vy: 0.5
+    max_abs_vyaw: 2.0
+    max_linear_acceleration: 1.5
+    max_yaw_acceleration: 1.2
+    command_timeout: 0.3
+    odometry_timeout: 1.0
+    sport_state_timeout: 0.5

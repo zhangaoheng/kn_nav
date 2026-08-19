@@ -1,0 +1,22 @@
+# ============================================================================
+# coordinator.yaml —— pct_scan_coordinator 节点参数（旧式拆分配置，仅供迁移对照；
+# 统一启动文件实际读取 navigation.yaml 的 nodes.pct_scan_coordinator 分区）。
+#   mode             导航模式：1=RViz 目标直通 SCAN，2=PCT 完整路径（默认）
+#   global_frame     全局坐标系（map）
+#   path_topic       PCT 全局路径话题（/pct_path）
+#   odom_topic       里程计话题（/Odometry_open3d）
+#   waypoints_topic  重采样后的 SCAN waypoint 路线话题
+#   waypoint_spacing 三维弧长采样间距（m）
+#   waypoint_z_offset waypoint 统一高度偏移（m）
+#   goal_tolerance   终点判定容差（m）
+# ============================================================================
+pct_scan_coordinator:
+  ros__parameters:
+    mode: 2
+    global_frame: map
+    path_topic: /pct_path
+    odom_topic: /Odometry_open3d
+    waypoints_topic: /scan_planner/waypoints
+    waypoint_spacing: 1.0
+    waypoint_z_offset: 0.2
+    goal_tolerance: 0.15
