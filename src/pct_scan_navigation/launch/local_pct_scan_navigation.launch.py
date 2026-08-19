@@ -81,212 +81,104 @@ def _prepare_log_directory(context):
     ]
 
 
-def _bool_value(value, setting_name):
-    if isinstance(value, bool):
-        return value
-    normalized = str(value).strip().lower()
-    if normalized in ('1', 'true', 'yes', 'on'):
-        return True
-    if normalized in ('0', 'false', 'no', 'off'):
-        return False
-    raise ValueError(f'{setting_name} must be true or false, got: {value!r}')
-
-
-def _setting(context, name, config, default):
-    """Use a non-empty launch override, otherwise read the unified YAML."""
-    override = LaunchConfiguration(name).perform(context).strip()
-    return override if override else config.get(name, default)
-
-
-def _node_parameters(config, node_name):
-    parameters = config.get('nodes', {}).get(node_name)
-    if not isinstance(parameters, dict):
-        raise ValueError(
-            f'unified navigation config requires nodes.{node_name} dictionary')
-    return dict(parameters)
-
-
-def _load_unified_config(config_path):
-    if not config_path.is_file():
-        raise FileNotFoundError(
-            f'unified navigation config does not exist: {config_path}')
-    with config_path.open('r', encoding='utf-8') as handle:
-        config = yaml.safe_load(handle) or {}
-    if not isinstance(config, dict):
-        raise ValueError('unified navigation config root must be a dictionary')
-    if config.get('version') != 1:
-        raise ValueError('unified navigation config requires version: 1')
-    for section in ('launch', 'topics', 'maps', 'nodes'):
-        if not isinstance(config.get(section, {}), dict):
-            raise ValueError(
-                f'unified navigation config {section} section must be a dictionary')
-    return config
-
-
-def _launch_setup(context):
-    config_path = Path(
-        LaunchConfiguration('config_file').perform(context)
-    ).expanduser().resolve()
-    config = _load_unified_config(config_path)
-    launch_config = config.get('launch', {})
-    topics = config.get('topics', {})
-
-    use_sim_time = _bool_value(
-        _setting(context, 'use_sim_time', launch_config, False), 'use_sim_time')
-    navigation_mode = int(_setting(context, 'navigation_mode', launch_config, 2))
-    if navigation_mode not in (1, 2):
-        raise ValueError('navigation_mode must be 1 or 2')
-    start_open3d_loc = _bool_value(
-        _setting(context, 'start_open3d_loc', launch_config, True),
-        'start_open3d_loc')
-    start_pct_planner = _bool_value(
-        _setting(context, 'start_pct_planner', launch_config, True),
-        'start_pct_planner')
-    start_go2_bridge = _bool_value(
-        _setting(context, 'start_go2_bridge', launch_config, False),
-        'start_go2_bridge')
-    network_interface = str(
-        _setting(context, 'network_interface', launch_config, 'enp2s0'))
-    full_restart_command = str(
-        _setting(context, 'full_restart_command', launch_config, ''))
-    initial_map_name = str(launch_config.get('initial_map_name', '')).strip()
-    if not initial_map_name:
-        raise ValueError(
-            'unified navigation config launch.initial_map_name is required')
-    maps = config.get('maps', {})
-    if initial_map_name not in maps:
-        raise ValueError(
-            'unified navigation config launch.initial_map_name must reference '
-            f'an entry in maps: {initial_map_name}')
-
-    common_overrides = {'use_sim_time': use_sim_time}
-    actions = []
-
-    if start_open3d_loc:
-        actions.extend([
-            Node(
-                package='fast_lio', executable='fastlio_mapping',
-                name='fastlio_mapping', output='both', emulate_tty=True,
-                parameters=[
-                    _node_parameters(config, 'fastlio_mapping'),
-                    common_overrides,
-                ],
-            ),
-            Node(
-                package='pct_scan_navigation',
-                executable='fastlio_monitor_node.py',
-                name='fastlio_monitor', output='both',
-                parameters=[
-                    dict(config.get('nodes', {}).get('fastlio_monitor', {})),
-                    common_overrides,
-                ],
-            ),
-            Node(
-                package='open3d_loc', executable='global_localization_node',
-                name='global_localization_node', output='both',
-                parameters=[
-                    _node_parameters(config, 'global_localization_node'),
-                    common_overrides,
-                ],
-            ),
-            Node(
-                package='open3d_loc', executable='localization_service_node',
-                name='localization_service_node', output='both',
-                parameters=[
-                    _node_parameters(config, 'localization_service_node'),
-                    common_overrides,
-                ],
-            ),
-        ])
-
-    if navigation_mode == 2 and start_pct_planner:
-        actions.append(Node(
-            package='pct_planner', executable='run_ros2_global_planner',
-            name='pct_global_planner', output='both',
-            parameters=[
-                _node_parameters(config, 'pct_global_planner'),
-                common_overrides,
-            ],
-        ))
-
-    actions.extend([
-        Node(
-            package='scan_planner', executable='scan_planner_node',
-            name='scan_planner_node', output='both',
-            parameters=[
-                _node_parameters(config, 'scan_planner_node'),
-                {'fsm.navi_mode': navigation_mode, **common_overrides},
-            ],
-            remappings=[
-                ('body_pose', topics.get('body_pose', '/Odometry_open3d')),
-                ('sensor_pose', topics.get('sensor_pose', '/Odometry_open3d')),
-                ('cloud', topics.get('cloud', '/scan_map')),
-                ('move_base_simple/goal', topics.get('goal', '/goal_pose')),
-                ('waypoints', topics.get('waypoints', '/scan_planner/waypoints')),
-                ('initial_path', topics.get('initial_path', '/initial_path')),
-            ],
-        ),
-        Node(
-            package='scan_planner', executable='closed_loop_controller',
-            name='closed_loop_controller', output='both',
-            parameters=[
-                _node_parameters(config, 'closed_loop_controller'),
-                common_overrides,
-            ],
-            remappings=[
-                ('body_pose', topics.get('body_pose', '/Odometry_open3d')),
-            ],
-        ),
-        Node(
-            package='pct_scan_navigation', executable='pct_scan_coordinator',
-            name='pct_scan_coordinator', output='both',
-            parameters=[
-                _node_parameters(config, 'pct_scan_coordinator'),
-                {'mode': navigation_mode, **common_overrides},
-            ],
-            on_exit=Shutdown(reason='pct_scan_coordinator exited'),
-        ),
-        Node(
-            package='pct_scan_navigation', executable='nav_manager_node.py',
-            name='nav_manager_node', output='both',
-            parameters=[
-                _node_parameters(config, 'nav_manager_node'),
-                {
-                    'navigation_config_path': str(config_path),
-                    'initial_map_name': initial_map_name,
-                    'full_restart_command': full_restart_command,
-                    **common_overrides,
-                },
-            ],
-        ),
-    ])
-
-    if start_go2_bridge:
-        actions.append(Node(
-            package='pure_pursuit_planner', executable='go2_cmd_vel_bridge',
-            name='go2_cmd_vel_bridge', output='both',
-            parameters=[
-                _node_parameters(config, 'go2_cmd_vel_bridge'),
-                {
-                    'network_interface': network_interface,
-                    **common_overrides,
-                },
-            ],
-        ))
-
-    print(f'[pct_scan_navigation] Unified config: {config_path}')
-    print(
-        f'[pct_scan_navigation] mode={navigation_mode}, map={initial_map_name}, '
-        f'bridge={start_go2_bridge}, interface={network_interface}'
-    )
-    return actions
-
-
 def generate_launch_description():
-    navigation_share = FindPackageShare('pct_scan_navigation')
+    use_sim_time = LaunchConfiguration('use_sim_time')
+    start_open3d_loc = LaunchConfiguration('start_open3d_loc')
+    start_pct_planner = LaunchConfiguration('start_pct_planner')
+    start_go2_bridge = LaunchConfiguration('start_go2_bridge')
+    network_interface = LaunchConfiguration('network_interface')
+    scan_params_file = LaunchConfiguration('scan_params_file')
+    coordinator_params_file = LaunchConfiguration('coordinator_params_file')
+    pct_params_file = LaunchConfiguration('pct_params_file')
+    map_profiles_file = LaunchConfiguration('map_profiles_file')
+    full_restart_command = LaunchConfiguration('full_restart_command')
     config_profile = LaunchConfiguration('config_profile')
-    default_config = PathJoinSubstitution([
-        navigation_share, 'config', config_profile, 'navigation.yaml'])
+    navigation_mode = LaunchConfiguration('navigation_mode')
+    navigation_mode_value = ParameterValue(navigation_mode, value_type=int)
+
+    navigation_share = FindPackageShare('pct_scan_navigation')
+    # navigation_share = str(Path.home() / 'nav_map')
+
+    def navigation_config(name):
+        return PathJoinSubstitution([navigation_share, 'config', config_profile, name])
+
+    fast_lio = Node(
+        package='fast_lio', executable='fastlio_mapping', name='fastlio_mapping',
+        output='both', emulate_tty=True,
+        parameters=[navigation_config('fast_lio.yaml'), {'use_sim_time': use_sim_time}],
+        condition=IfCondition(start_open3d_loc),
+    )
+    open3d_global = Node(
+        package='open3d_loc', executable='global_localization_node',
+        name='global_localization_node', output='both',
+        parameters=[navigation_config('open3d_loc.yaml'), {'use_sim_time': use_sim_time}],
+        condition=IfCondition(start_open3d_loc),
+    )
+    open3d_service = Node(
+        package='open3d_loc', executable='localization_service_node',
+        name='localization_service_node', output='both',
+        parameters=[navigation_config('open3d_loc.yaml'), {'use_sim_time': use_sim_time}],
+        condition=IfCondition(start_open3d_loc),
+    )
+    pct_planner = Node(
+        package='pct_planner', executable='run_ros2_global_planner',
+        name='pct_global_planner', output='both',
+        parameters=[pct_params_file, {'use_sim_time': use_sim_time}],
+        condition=IfCondition(PythonExpression([
+            "'", navigation_mode, "' == '2' and '", start_pct_planner, "' == 'true'",
+        ])),
+    )
+    scan_planner = Node(
+        package='scan_planner', executable='scan_planner_node',
+        name='scan_planner_node', output='both',
+        parameters=[scan_params_file, {
+            'fsm.navi_mode': navigation_mode_value,
+            'use_sim_time': use_sim_time,
+        }],
+        remappings=[
+            ('body_pose', '/Odometry_open3d'),
+            ('sensor_pose', '/Odometry_open3d'),
+            ('cloud', '/scan_map'),
+            ('move_base_simple/goal', '/goal_pose'),
+            ('waypoints', '/scan_planner/waypoints'),
+            ('initial_path', '/initial_path'),
+        ],
+    )
+    controller = Node(
+        package='scan_planner', executable='closed_loop_controller',
+        name='closed_loop_controller', output='both',
+        parameters=[scan_params_file, {'use_sim_time': use_sim_time}],
+        remappings=[('body_pose', '/Odometry_open3d'),],
+
+    )
+    coordinator = Node(
+        package='pct_scan_navigation', executable='pct_scan_coordinator',
+        name='pct_scan_coordinator', output='both',
+        parameters=[coordinator_params_file, {
+            'mode': navigation_mode_value,
+            'use_sim_time': use_sim_time,
+        }],
+        on_exit=Shutdown(reason='pct_scan_coordinator exited'),
+    )
+    nav_manager = Node(
+        package='pct_scan_navigation', executable='nav_manager_node.py',
+        name='nav_manager_node', output='both',
+        parameters=[{
+            'map_profiles_path': map_profiles_file,
+            'initial_map_name': 'outdoor',
+            'full_restart_command': full_restart_command,
+            'use_sim_time': use_sim_time,
+        }],
+    )
+    bridge = Node(
+        package='pure_pursuit_planner', executable='go2_cmd_vel_bridge',
+        name='go2_cmd_vel_bridge', output='both',
+        parameters=[navigation_config('go2_bridge.yaml'), {
+            'network_interface': network_interface,
+            'use_sim_time': use_sim_time,
+        }],
+        condition=IfCondition(start_go2_bridge),
+    )
 
     return LaunchDescription([
         DeclareLaunchArgument('config_profile', default_value='local'),
