@@ -26,7 +26,7 @@ launch:
   start_pct_planner: true
   start_go2_bridge: true
   network_interface: eth0
-  initial_map_name: fourfloors
+  initial_map_name: floor
   full_restart_command: ''
   start_global_relocalization: true
 
@@ -58,13 +58,13 @@ maps:
       fitness_eval_threshold: 0.2
       threshold_fitness: 0.8
       threshold_fitness_init: 0.9
-  fourfloors:
-    pcd_path: /home/nav_map/four_floors/four_floors_005.pcd
-    tomo_path: /home/nav_map/four_floors/four_floors_005.pickle
-    localization:
-      fitness_eval_threshold: 0.2
-      threshold_fitness: 0.8
-      threshold_fitness_init: 0.9
+  # fourfloors:
+  #   pcd_path: /home/nav_map/four_floors/four_floors_005.pcd
+  #   tomo_path: /home/nav_map/four_floors/four_floors_005.pickle
+  #   localization:
+  #     fitness_eval_threshold: 0.2
+  #     threshold_fitness: 0.8
+  #     threshold_fitness_init: 0.9
 # --- nodes：各节点 ROS 参数（按节点名分组）---
 #   fastlio_mapping FAST-LIO 里程计；global_localization_node Open3D 全局定位；
 #   global_relocalization_node 全局重定位；localization_service_node 定位服务；
@@ -125,15 +125,15 @@ nodes:
       pcd_save_en: false
       interval: -1
   global_localization_node:
-    map_name: fourfloors
-    # path_map: /home/nav_map/cross-floor-kn/global_map_downsize.pcd
-    # path_imu_to_base: /home/nav_map/cross-floor-kn/imu_to_base.txt
+    map_name: floor
+    path_map: /home/nav_map/cross-floor-kn/global_map_downsize.pcd
+    path_imu_to_base: /home/nav_map/cross-floor-kn/imu_to_base.txt
 
     # path_map: /home/nav_map/outdoor/outdoor_global_voxel02.pcd
     # path_imu_to_base: /home/nav_map/outdoor/imu_to_base.txt
 
-    path_map: /home/nav_map/four_floors/four_floors_005.pcd
-    path_imu_to_base: /home/nav_map/four_floors/imu_to_base.txt
+    # path_map: /home/nav_map/four_floors/four_floors_005.pcd
+    # path_imu_to_base: /home/nav_map/four_floors/imu_to_base.txt
     
     pcd_queue_maxsize: 10
     loc_frequence: 0.5
@@ -219,11 +219,11 @@ nodes:
     goal_topic: /goal_pose
     relocalize_timeout_sec: 20.0
   pct_global_planner:
-    # tomo_path: /home/nav_map/cross-floor-kn/liuxing_ground_voxel005_radius015.pickle
+    tomo_path: /home/nav_map/cross-floor-kn/liuxing_ground_voxel005_radius015.pickle
 
     # tomo_path: /home/nav_map/outdoor/outdoor_global_voxel002_ground.pickle
 
-    tomo_path: /home/nav_map/four_floors/four_floors_005.pickle
+    # tomo_path: /home/nav_map/four_floors/four_floors_005.pickle
     global_frame: map
     robot_frame: base_link
     goal_pose_topic: /goal_pose
@@ -242,7 +242,7 @@ nodes:
     goal_z_search_radius_cells: 2
     allow_new_goal_during_planning: true
   scan_planner_node:
-    map_name: fourfloors
+    map_name: floor
     fsm.navi_mode: 2
     fsm.thresh_replan: 4.0
     fsm.thresh_no_replan: 0.1
