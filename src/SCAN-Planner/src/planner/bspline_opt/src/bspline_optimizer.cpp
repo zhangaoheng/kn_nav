@@ -56,10 +56,12 @@ namespace scan_planner
   }
 
   void BsplineOptimizer::setCorridorPath(
-      const vector<Eigen::Vector3d> &corridor_path, double max_deviation)
+      const vector<Eigen::Vector3d> &corridor_path, double max_deviation,
+      double preferred_deviation)
   {
     corridor_path_ = corridor_path;
     corridor_max_deviation_ = max_deviation;
+    corridor_preferred_deviation_ = std::clamp(preferred_deviation, 0.0, max_deviation);
   }
 
   double BsplineOptimizer::estimateSegmentYaw(const Eigen::Vector3d &from, const Eigen::Vector3d &to) const
@@ -552,8 +554,9 @@ namespace scan_planner
   }
 
   // calcCorridorCost：PCT 走廊偏离代价（本包最近新增）。
-  // 当控制点偏离走廊中心线的距离超过 corridor_max_deviation_ 时，
-  // 按超出量的平方计惩罚并回传梯度，把整条轨迹约束在走廊内。
+  // 控制点偏离中心线超过 preferred_deviation 后即产生贴线代价；最大允许
+  // 偏差由规划管理器对整条轨迹做硬校验。这样正常路段贴线，遇障碍时仍可
+  // 在更宽的硬走廊内通过碰撞回弹临时绕行。
   void BsplineOptimizer::calcCorridorCost(const Eigen::MatrixXd &q, double &cost,
                                           Eigen::MatrixXd &gradient)
   {
@@ -566,10 +569,10 @@ namespace scan_planner
     {
       const Eigen::Vector3d delta = q.col(i) - nearestCorridorPoint(q.col(i));
       const double distance = delta.norm();
-      if (distance <= corridor_max_deviation_ || distance <= 1e-9)
+      if (distance <= corridor_preferred_deviation_ || distance <= 1e-9)
         continue;
 
-      const double error = distance - corridor_max_deviation_;
+      const double error = distance - corridor_preferred_deviation_;
       cost += error * error;
       gradient.col(i) += 2.0 * error * delta / distance;
     }
@@ -1315,33 +1318,35 @@ namespace scan_planner
     memcpy(grad, grad_3D.data() + 3 * order_, n * sizeof(grad[0]));
   }
 
-  // combineCostRefine：Refine 阶段总代价。
-  // 组合平滑/拟合/可行性三项：lambda1_*平滑 + lambda4_*拟合 +
-  // lambda3_*可行性，梯度叠加后同样置零 z 方向。
+  // combineCostRefine：Refine 阶段也保留中心线约束，防止时间重分配后的
+  // 精修再次把已经贴合的轨迹拉离 PCT 路径。
   void BsplineOptimizer::combineCostRefine(const double *x, double *grad, double &f_combine, const int n)
   {
 
     memcpy(cps_.points.data() + 3 * order_, x, n * sizeof(x[0]));
 
     /* ---------- evaluate cost and gradient ---------- */
-    double f_smoothness, f_fitness, f_feasibility;
+    double f_smoothness, f_fitness, f_feasibility, f_corridor;
 
     Eigen::MatrixXd g_smoothness = Eigen::MatrixXd::Zero(3, cps_.points.cols());
     Eigen::MatrixXd g_fitness = Eigen::MatrixXd::Zero(3, cps_.points.cols());
     Eigen::MatrixXd g_feasibility = Eigen::MatrixXd::Zero(3, cps_.points.cols());
+    Eigen::MatrixXd g_corridor = Eigen::MatrixXd::Zero(3, cps_.points.cols());
 
     //time_satrt = ros::Time::now();
 
     calcSmoothnessCost(cps_.points, f_smoothness, g_smoothness);
     calcFitnessCost(cps_.points, f_fitness, g_fitness);
     calcFeasibilityCost(cps_.points, f_feasibility, g_feasibility);
+    calcCorridorCost(cps_.points, f_corridor, g_corridor);
 
     /* ---------- convert to solver format...---------- */
-    f_combine = lambda1_ * f_smoothness + lambda4_ * f_fitness + lambda3_ * f_feasibility;
+    f_combine = lambda1_ * f_smoothness + lambda4_ * f_fitness +
+                lambda3_ * f_feasibility + lambda_corridor_ * f_corridor;
     // printf("origin %f %f %f %f\n", f_smoothness, f_fitness, f_feasibility, f_combine);
 
     Eigen::MatrixXd grad_3D = lambda1_ * g_smoothness + lambda4_ * g_fitness +
-                              lambda3_ * g_feasibility;
+                              lambda3_ * g_feasibility + lambda_corridor_ * g_corridor;
     grad_3D.row(2).setZero();
     memcpy(grad, grad_3D.data() + 3 * order_, n * sizeof(grad[0]));
   }

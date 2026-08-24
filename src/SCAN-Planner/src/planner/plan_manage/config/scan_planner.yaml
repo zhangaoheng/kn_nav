@@ -58,11 +58,15 @@ scan_planner_node:
     manager.control_points_distance: 0.2
     manager.feasibility_tolerance: 0.5
     manager.planning_horizon: 7.5
+    manager.corridor_max_deviation: 0.6
+    manager.nominal_corridor_max_deviation: 0.15
 
     optimization.lambda_smooth: 1.0
     optimization.lambda_collision: 1.0
     optimization.lambda_feasibility: 0.1
     optimization.lambda_fitness: 1.0
+    optimization.lambda_corridor: 5.0
+    optimization.corridor_preferred_deviation: 0.05
     optimization.dist0: 0.2
     optimization.max_vel: 0.75
     optimization.max_acc: 0.5

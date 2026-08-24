@@ -95,7 +95,7 @@ namespace scan_planner
     // optional inputs
     void setGuidePath(const vector<Eigen::Vector3d> &guide_pt);
     void setCorridorPath(const vector<Eigen::Vector3d> &corridor_path,
-                         double max_deviation);
+                         double max_deviation, double preferred_deviation);
     void setWaypoints(const vector<Eigen::Vector3d> &waypts,
                       const vector<int> &waypt_idx); // N-2 constraints at most
 
@@ -144,7 +144,8 @@ namespace scan_planner
     double lambda3_;               // feasibility weight
     double lambda4_;               // curve fitting
     double lambda_corridor_;       // PCT path corridor weight
-    double corridor_max_deviation_;
+    double corridor_max_deviation_{0.6};
+    double corridor_preferred_deviation_{0.05};
     int a;
     //
     double dist0_;             // safe distance

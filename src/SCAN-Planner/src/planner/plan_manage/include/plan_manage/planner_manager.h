@@ -84,6 +84,8 @@ namespace scan_planner
 
     int continuous_failures_count_{0};
     double corridor_max_deviation_{0.6};
+    double nominal_corridor_max_deviation_{0.15};
+    double corridor_preferred_deviation_{0.05};
 
     // 用当前 B 样条轨迹刷新 local_data_ 中的轨迹信息（位置/速度/加速度/
     // 时间），供可视化与闭环控制回路读取。
@@ -95,7 +97,8 @@ namespace scan_planner
     // 结合 PCT 走廊路径 corridor_path 限制轨迹与走廊的偏离，任何采样点
     // 碰撞或越界均返回 false（最近新增逻辑）。
     bool checkFullTrajectorySafety(UniformBspline position_traj,
-                                   const std::vector<Eigen::Vector3d> &corridor_path);
+                                   const std::vector<Eigen::Vector3d> &corridor_path,
+                                   double max_corridor_deviation);
 
     // B 样条重参数化：按时间缩放比例 ratio 调整控制点与时间步长 dt，
     // 用于动态可行性检查失败后放慢/加快轨迹，输出新的控制点与时间增量。

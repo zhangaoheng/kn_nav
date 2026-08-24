@@ -109,6 +109,84 @@ namespace scan_planner
       return segment;
     }
 
+    // 按弧长等间距采样折线路径。正常跟踪模式用它直接生成局部轨迹初值，
+    // 避免用 start->target 的直连多项式在弯道处抄近道。
+    std::vector<Eigen::Vector3d> samplePathSegment(
+        const std::vector<Eigen::Vector3d> &path, const Eigen::Vector3d &start,
+        const Eigen::Vector3d &target, double spacing)
+    {
+      std::vector<Eigen::Vector3d> route;
+      route.reserve(path.size() + 2);
+      route.push_back(start);
+      for (const auto &point : path)
+      {
+        if ((route.back() - point).norm() > 1e-6)
+          route.push_back(point);
+      }
+      if ((route.back() - target).norm() > 1e-6)
+        route.push_back(target);
+      else
+        route.back() = target;
+
+      if (route.size() < 2)
+        return route;
+
+      std::vector<double> arc(route.size(), 0.0);
+      for (size_t i = 1; i < route.size(); ++i)
+        arc[i] = arc[i - 1] + (route[i] - route[i - 1]).norm();
+      if (arc.back() <= 1e-6)
+        return route;
+
+      const size_t sample_count = std::max<size_t>(
+          7, static_cast<size_t>(std::ceil(arc.back() / std::max(spacing, 0.05))) + 1);
+      std::vector<Eigen::Vector3d> samples;
+      samples.reserve(sample_count);
+      size_t segment = 1;
+      for (size_t i = 0; i < sample_count; ++i)
+      {
+        const double target_arc = arc.back() * static_cast<double>(i) /
+                                  static_cast<double>(sample_count - 1);
+        while (segment + 1 < arc.size() && arc[segment] < target_arc)
+          ++segment;
+        const double length = arc[segment] - arc[segment - 1];
+        const double ratio = length > 1e-9
+                                 ? (target_arc - arc[segment - 1]) / length
+                                 : 0.0;
+        samples.push_back(route[segment - 1] +
+                          ratio * (route[segment] - route[segment - 1]));
+      }
+      samples.front() = start;
+      samples.back() = target;
+      return samples;
+    }
+
+    // 检查 PCT 中心线对应的机器人膨胀体是否被占据。只有这里确认碰撞，
+    // 本次规划才从窄跟踪走廊切换到宽避障走廊。
+    bool pathSegmentInCollision(const std::vector<Eigen::Vector3d> &path,
+                                const GridMap::Ptr &grid_map)
+    {
+      if (!grid_map || path.size() < 2)
+        return false;
+      const double spacing = std::max(0.05, grid_map->getResolution() * 0.5);
+      for (size_t i = 1; i < path.size(); ++i)
+      {
+        const Eigen::Vector3d segment = path[i] - path[i - 1];
+        const double length = segment.norm();
+        const int samples = std::max(1, static_cast<int>(std::ceil(length / spacing)));
+        const double yaw = segment.head<2>().squaredNorm() > 1e-8
+                               ? std::atan2(segment(1), segment(0))
+                               : 0.0;
+        for (int sample = 0; sample <= samples; ++sample)
+        {
+          const Eigen::Vector3d point =
+              path[i - 1] + (static_cast<double>(sample) / samples) * segment;
+          if (grid_map->getInflateOccupancy(point, yaw) > 0)
+            return true;
+        }
+      }
+      return false;
+    }
+
     // 把走廊路径的 Z 值按弧长比例映射到给定点列上（首尾强制为 start_z/
     // target_z），使局部轨迹高度与 PCT 走廊的 Z 参考保持一致。
     void applyPathZReference(std::vector<Eigen::Vector3d> &points,
@@ -174,6 +252,14 @@ namespace scan_planner
     pp_.ctrl_pt_dist = get_double("manager.control_points_distance", -1.0);
     pp_.planning_horizon_ = get_double("manager.planning_horizon", 5.0);
     corridor_max_deviation_ = get_double("manager.corridor_max_deviation", 0.6);
+    nominal_corridor_max_deviation_ =
+        get_double("manager.nominal_corridor_max_deviation", 0.15);
+    corridor_preferred_deviation_ =
+        get_double("optimization.corridor_preferred_deviation", 0.05);
+    nominal_corridor_max_deviation_ = std::clamp(
+        nominal_corridor_max_deviation_, 0.01, corridor_max_deviation_);
+    corridor_preferred_deviation_ = std::clamp(
+        corridor_preferred_deviation_, 0.0, nominal_corridor_max_deviation_);
 
     local_data_.traj_id_ = 0;
     grid_map_.reset(new GridMap);
@@ -222,6 +308,25 @@ namespace scan_planner
 
     auto t_start = std::chrono::steady_clock::now();
     double t_init = 0.0, t_opt = 0.0, t_refine = 0.0;
+
+    const std::vector<Eigen::Vector3d> local_corridor =
+        extractPathSegment(corridor_path, start_pt, local_target_pt);
+    const bool avoidance_mode = pathSegmentInCollision(local_corridor, grid_map_);
+    const double start_deviation =
+        local_corridor.size() >= 2
+            ? std::sqrt((start_pt - nearestPointOnPath(start_pt, local_corridor)).squaredNorm())
+            : 0.0;
+    const double tracking_deviation = std::min(
+        corridor_max_deviation_,
+        std::max(nominal_corridor_max_deviation_,
+                 start_deviation + (grid_map_ ? grid_map_->getResolution() : 0.0)));
+    const double allowed_deviation =
+        avoidance_mode ? corridor_max_deviation_ : tracking_deviation;
+    RCLCPP_INFO_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 1000,
+        "Local planning mode=%s, corridor_limit=%.2f, start_deviation=%.2f",
+        avoidance_mode ? "LOCAL_AVOIDANCE" : "TRACK_GLOBAL",
+        allowed_deviation, start_deviation);
 
     /*** STEP 1: INIT ***/
     double ts = (start_pt - local_target_pt).norm() > 0.1 ? pp_.ctrl_pt_dist / pp_.max_vel_ * 1.2 : pp_.ctrl_pt_dist / pp_.max_vel_ * 5; // pp_.ctrl_pt_dist / pp_.max_vel_ is too tense, and will surely exceed the acc/vel limits
@@ -370,13 +475,14 @@ namespace scan_planner
       }
     } while (flag_regenerate);
 
-    // 点睛：从全局走廊中截取起点到局部目标之间的子段作为局部走廊，
-    // 并施加 Z 参考；走廊约束（corridor_max_deviation_）在优化器与
-    // 整条轨迹安全校验中被共用。
-    const std::vector<Eigen::Vector3d> local_corridor =
-        extractPathSegment(corridor_path, start_pt, local_target_pt);
+    // 无障碍时直接沿 PCT 局部段初始化，不再使用 start->target 的直连曲线；
+    // 有障碍时保留原始初始化和 A* 回弹，让规划器拥有绕行自由度。
+    if (!avoidance_mode && local_corridor.size() >= 2)
+      point_set = samplePathSegment(
+          local_corridor, start_pt, local_target_pt, pp_.ctrl_pt_dist);
     applyPathZReference(point_set, local_corridor, start_pt(2), local_target_pt(2));
-    bspline_optimizer_rebound_->setCorridorPath(local_corridor, corridor_max_deviation_);
+    bspline_optimizer_rebound_->setCorridorPath(
+        local_corridor, allowed_deviation, corridor_preferred_deviation_);
 
     Eigen::MatrixXd ctrl_pts;
     UniformBspline::parameterizeToBspline(ts, point_set, start_end_derivatives, ctrl_pts);
@@ -423,7 +529,7 @@ namespace scan_planner
     }
 
     if (!flag_step_2_success || !checkDynamicFeasibility(pos) ||
-        !checkFullTrajectorySafety(pos, local_corridor))
+        !checkFullTrajectorySafety(pos, local_corridor, allowed_deviation))
     {
       printf("\033[34mThis refined trajectory is unsafe or dynamically infeasible. Skip publishing it.\n\033[0m");
       continuous_failures_count_++;
@@ -686,7 +792,8 @@ namespace scan_planner
   // 还校验轨迹点到走廊最近点的偏离不超过 corridor_max_deviation_。
   bool SCANPlannerManager::checkFullTrajectorySafety(
       UniformBspline position_traj,
-      const std::vector<Eigen::Vector3d> &corridor_path)
+      const std::vector<Eigen::Vector3d> &corridor_path,
+      double max_corridor_deviation)
   {
     if (!grid_map_)
       return false;
@@ -715,14 +822,14 @@ namespace scan_planner
         return false;
       }
 
-      if (corridor_path.size() >= 2 && corridor_max_deviation_ > 0.0)
+      if (corridor_path.size() >= 2 && max_corridor_deviation > 0.0)
       {
         const double deviation = (point - nearestPointOnPath(point, corridor_path)).norm();
-        if (deviation > corridor_max_deviation_)
+        if (deviation > max_corridor_deviation)
         {
           RCLCPP_WARN(node_->get_logger(),
                       "Reject full trajectory: corridor deviation at t=%.3f is %.3f > %.3f",
-                      t, deviation, corridor_max_deviation_);
+                      t, deviation, max_corridor_deviation);
           return false;
         }
       }
