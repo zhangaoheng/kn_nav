@@ -322,11 +322,14 @@ namespace scan_planner
                  start_deviation + (grid_map_ ? grid_map_->getResolution() : 0.0)));
     const double allowed_deviation =
         avoidance_mode ? corridor_max_deviation_ : tracking_deviation;
+    const double preferred_deviation =
+        avoidance_mode ? allowed_deviation : corridor_preferred_deviation_;
     RCLCPP_INFO_THROTTLE(
         node_->get_logger(), *node_->get_clock(), 1000,
-        "Local planning mode=%s, corridor_limit=%.2f, start_deviation=%.2f",
+        "Local planning mode=%s, corridor_limit=%.2f, preferred_deviation=%.2f, "
+        "start_deviation=%.2f",
         avoidance_mode ? "LOCAL_AVOIDANCE" : "TRACK_GLOBAL",
-        allowed_deviation, start_deviation);
+        allowed_deviation, preferred_deviation, start_deviation);
 
     /*** STEP 1: INIT ***/
     double ts = (start_pt - local_target_pt).norm() > 0.1 ? pp_.ctrl_pt_dist / pp_.max_vel_ * 1.2 : pp_.ctrl_pt_dist / pp_.max_vel_ * 5; // pp_.ctrl_pt_dist / pp_.max_vel_ is too tense, and will surely exceed the acc/vel limits
@@ -482,7 +485,7 @@ namespace scan_planner
           local_corridor, start_pt, local_target_pt, pp_.ctrl_pt_dist);
     applyPathZReference(point_set, local_corridor, start_pt(2), local_target_pt(2));
     bspline_optimizer_rebound_->setCorridorPath(
-        local_corridor, allowed_deviation, corridor_preferred_deviation_);
+        local_corridor, allowed_deviation, preferred_deviation);
 
     Eigen::MatrixXd ctrl_pts;
     UniformBspline::parameterizeToBspline(ts, point_set, start_end_derivatives, ctrl_pts);
