@@ -6,8 +6,8 @@
 #
 # 职责：
 #   * 固定 config_profile=A2。
-#   * 默认 config_file 指向 /home/nav_map/config/A2/navigation.yaml，
-#     运行时配置以 /home/nav_map 为唯一数据源（见下方内联注释）。
+#   * 默认 config_file 指向 /home/code/work_space/kn_nav/src/pct_scan_navigation/config/A2/navigation.yaml，
+#     运行时配置以 /home/code/work_space/kn_nav/src/pct_scan_navigation/config 为唯一数据源（见下方内联注释）。
 #   * 透传 navigation_mode / start_go2_bridge / use_sim_time 等全部开关参数。
 # ============================================================================
 
@@ -24,9 +24,9 @@ from launch_ros.substitutions import FindPackageShare
 # 并把自身的 LaunchConfiguration 原样转发（config_profile 固定为 A2）。
 def generate_launch_description():
     # Runtime map/navigation configuration lives outside the ROS install tree.
-    # This keeps /home/nav_map as the single source of truth and avoids stale
+    # This keeps /home/code/work_space/kn_nav/src/pct_scan_navigation/config as the single source of truth and avoids stale
     # generated copies under install/pct_scan_navigation/share/.
-    default_config = '/home/nav_map/config/A2/navigation.yaml'
+    default_config = '/home/code/work_space/kn_nav/src/pct_scan_navigation/config/A2/navigation.yaml'
     base_launch = PathJoinSubstitution([
         FindPackageShare('pct_scan_navigation'),
         'launch',
