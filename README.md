@@ -109,6 +109,14 @@ ros2 service call /pct_scan_navigation/cancel std_srvs/srv/Trigger '{}'
 
 ### 2026-08-26
 
+#### FAST-LIO 漂移复现分析与估计器诊断补充
+
+- 问题：实机已再次复现 FAST-LIO 位姿发散，需要区分 IMU 冲击先触发、点云约束先退化或滤波更新异常，并定位首次异常帧。
+- 分析：独立探针全程约 `200 Hz`、IMU header 无 gap/倒序，FAST-LIO 在漂移时也保持每帧约 `19～21` 个 IMU、雷达约 `10 Hz`，排除数据阻塞为本次主因。发散前 `6 s` 内有 `103` 帧加速度单轴超过 `3.8`，Open3D fitness 随后由约 `0.96` 降至 `0.785/0.753/0.548`，FAST-LIO 估算速度继而从正常值增长到数百米每秒。现有 FAST-LIO 会直接积分冲击 IMU，并在状态异常时继续将点云写入增量地图，存在错误状态与地图相互强化的风险。
+- 修改：FAST-LIO 新增每秒聚合的 `[FASTLIO_IMU_VALUE_DIAG]`，记录原始加速度/角速度单轴及模长峰值、加速度超阈值数量、最长连续数量和峰值时间戳；新增 `[FASTLIO_ESTIMATOR_DIAG]`，记录位置、速度、加速度/角速度 bias、重力、有效匹配点范围及最低比例、残差、点云更新前后位置/姿态/速度修正峰值和相邻输出帧位姿增量峰值。统计只做数值更新，每秒统一输出，不改变 IMU、ESKF、点云匹配和增量建图行为。
+- 验证：`git diff --check` 通过，`colcon build --packages-select fast_lio --symlink-install` 编译通过；仅有依赖中的既存 Boost Bind 弃用提示。新增诊断随 FAST-LIO 标准日志输出，将同时保存在单次运行目录的 `launch.log` 和 `fastlio_mapping_*.log` 中。
+- 遗留事项：将本机修改同步到实机容器并重新编译 `fast_lio`；实机再次复现后，使用 `grep -E 'IMU_INPUT_DIAG|FASTLIO_INPUT_DIAG|FASTLIO_EXEC_DIAG|FASTLIO_IMU_VALUE_DIAG|FASTLIO_ESTIMATOR_DIAG|fastlio_monitor' launch.log > drift_diagnostics.log` 汇总诊断，按峰值时间戳判断 IMU 预测、点云有效约束和 ESKF 状态三者的首次异常顺序，再决定采用冲击降权、退化保护、暂停增量建图或状态重置。
+
 #### FAST-LIO IMU数据链路与执行阻塞诊断日志
 
 - 问题：现有 `fastlio_monitor` 同时在 Python 单线程节点中订阅 `200 Hz` IMU 和 `10 Hz` 大点云，其 IMU gap 可能是监控节点自身丢帧，不能确认 FAST-LIO 实际收到的数据；需要在不改变定位行为的前提下，定位问题发生在驱动输出、FAST-LIO订阅、点云回调还是同步处理阶段。
