@@ -333,7 +333,8 @@ struct FastlioInputDiagnostics
     }
 
     void observeEstimator(const state_ikfom &predicted,
-                          const state_ikfom &updated,
+                          const state_ikfom &candidate,
+                          const state_ikfom &output,
                           size_t downsampled, size_t effective,
                           double residual)
     {
@@ -352,35 +353,35 @@ struct FastlioInputDiagnostics
         residual_max = std::max(residual_max, residual);
 
         update_dpos_max = std::max(
-            update_dpos_max, (updated.pos - predicted.pos).norm());
+            update_dpos_max, (candidate.pos - predicted.pos).norm());
         update_dvel_max = std::max(
-            update_dvel_max, (updated.vel - predicted.vel).norm());
+            update_dvel_max, (candidate.vel - predicted.vel).norm());
         update_drot_max_deg = std::max(
             update_drot_max_deg,
-            Log((predicted.rot.conjugate() * updated.rot).toRotationMatrix()).norm() *
+            Log((predicted.rot.conjugate() * candidate.rot).toRotationMatrix()).norm() *
                 180.0 / PI_M);
 
         if (have_previous_state)
         {
             frame_dpos_max = std::max(
-                frame_dpos_max, (updated.pos - previous_state_pos).norm());
+                frame_dpos_max, (output.pos - previous_state_pos).norm());
             const M3D frame_delta_rot = previous_state_rot.transpose() *
-                updated.rot.toRotationMatrix();
+                output.rot.toRotationMatrix();
             frame_drot_max_deg = std::max(
                 frame_drot_max_deg,
                 Log(frame_delta_rot).norm() * 180.0 / PI_M);
         }
-        previous_state_pos = updated.pos;
-        previous_state_rot = updated.rot.toRotationMatrix();
+        previous_state_pos = output.pos;
+        previous_state_rot = output.rot.toRotationMatrix();
         have_previous_state = true;
 
-        state_pos = updated.pos;
-        state_vel = updated.vel;
-        state_ba = updated.ba;
-        state_bg = updated.bg;
-        state_grav << updated.grav[0], updated.grav[1], updated.grav[2];
+        state_pos = output.pos;
+        state_vel = output.vel;
+        state_ba = output.ba;
+        state_bg = output.bg;
+        state_grav << output.grav[0], output.grav[1], output.grav[2];
         state_vel_norm_max = std::max(
-            state_vel_norm_max, updated.vel.norm());
+            state_vel_norm_max, output.vel.norm());
     }
 
     void resetWindow(const Clock::time_point &now)
@@ -1261,6 +1262,22 @@ public:
         this->declare_parameter<double>("diagnostics.slow_timer_warn_s", 0.05);
         this->declare_parameter<double>("diagnostics.accel_axis_warn", 3.8);
         this->declare_parameter<int>("diagnostics.min_imu_per_scan", 10);
+        this->declare_parameter<bool>("robustness.enable", true);
+        this->declare_parameter<double>("robustness.imu_accel_saturation_threshold", 3.9);
+        this->declare_parameter<double>("robustness.imu_saturation_noise_scale", 100.0);
+        this->declare_parameter<double>("robustness.imu_saturation_ratio_warn", 0.05);
+        this->declare_parameter<int>("robustness.imu_saturation_streak_warn", 3);
+        this->declare_parameter<double>("robustness.min_effective_ratio", 0.30);
+        this->declare_parameter<int>("robustness.min_effective_points", 80);
+        this->declare_parameter<double>("robustness.max_mean_residual", 0.05);
+        this->declare_parameter<double>("robustness.critical_effective_ratio", 0.15);
+        this->declare_parameter<double>("robustness.critical_mean_residual", 0.08);
+        this->declare_parameter<double>("robustness.max_update_translation", 0.15);
+        this->declare_parameter<double>("robustness.max_update_rotation_deg", 2.0);
+        this->declare_parameter<double>("robustness.max_update_velocity", 1.0);
+        this->declare_parameter<int>("robustness.degraded_enter_frames", 3);
+        this->declare_parameter<int>("robustness.recover_enter_frames", 10);
+        this->declare_parameter<int>("robustness.recover_normal_frames", 10);
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
 
@@ -1305,6 +1322,22 @@ public:
         this->get_parameter_or<double>("diagnostics.slow_timer_warn_s", input_diagnostics.slow_timer_warn_s, 0.05);
         this->get_parameter_or<double>("diagnostics.accel_axis_warn", input_diagnostics.accel_axis_warn, 3.8);
         this->get_parameter_or<int>("diagnostics.min_imu_per_scan", input_diagnostics.min_imu_per_scan, 10);
+        this->get_parameter_or<bool>("robustness.enable", robustness_enable_, true);
+        this->get_parameter_or<double>("robustness.imu_accel_saturation_threshold", imu_accel_saturation_threshold_, 3.9);
+        this->get_parameter_or<double>("robustness.imu_saturation_noise_scale", imu_saturation_noise_scale_, 100.0);
+        this->get_parameter_or<double>("robustness.imu_saturation_ratio_warn", imu_saturation_ratio_warn_, 0.05);
+        this->get_parameter_or<int>("robustness.imu_saturation_streak_warn", imu_saturation_streak_warn_, 3);
+        this->get_parameter_or<double>("robustness.min_effective_ratio", min_effective_ratio_, 0.30);
+        this->get_parameter_or<int>("robustness.min_effective_points", min_effective_points_, 80);
+        this->get_parameter_or<double>("robustness.max_mean_residual", max_mean_residual_, 0.05);
+        this->get_parameter_or<double>("robustness.critical_effective_ratio", critical_effective_ratio_, 0.15);
+        this->get_parameter_or<double>("robustness.critical_mean_residual", critical_mean_residual_, 0.08);
+        this->get_parameter_or<double>("robustness.max_update_translation", max_update_translation_, 0.15);
+        this->get_parameter_or<double>("robustness.max_update_rotation_deg", max_update_rotation_deg_, 2.0);
+        this->get_parameter_or<double>("robustness.max_update_velocity", max_update_velocity_, 1.0);
+        this->get_parameter_or<int>("robustness.degraded_enter_frames", degraded_enter_frames_, 3);
+        this->get_parameter_or<int>("robustness.recover_enter_frames", recover_enter_frames_, 10);
+        this->get_parameter_or<int>("robustness.recover_normal_frames", recover_normal_frames_, 10);
         double diagnostics_report_period_s = 1.0;
         this->get_parameter_or<double>("diagnostics.report_period_s", diagnostics_report_period_s, 1.0);
         diagnostics_report_period_s = std::max(0.2, diagnostics_report_period_s);
@@ -1341,6 +1374,17 @@ public:
         p_imu->set_acc_cov(V3D(acc_cov, acc_cov, acc_cov));
         p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
         p_imu->set_acc_bias_cov(V3D(b_acc_cov, b_acc_cov, b_acc_cov));
+        p_imu->set_saturation_protection(
+            imu_accel_saturation_threshold_,
+            robustness_enable_ ? imu_saturation_noise_scale_ : 1.0);
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "FAST-LIO robustness %s: imu_sat=%.3f noise_scale=%.1f "
+            "effective_ratio>=%.2f effective_points>=%d residual<=%.3f",
+            robustness_enable_ ? "enabled" : "disabled",
+            imu_accel_saturation_threshold_, imu_saturation_noise_scale_,
+            min_effective_ratio_, min_effective_points_, max_mean_residual_);
 
         fill(epsi, epsi + 23, 0.001);
         kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
@@ -1412,6 +1456,77 @@ public:
     }
 
 private:
+    enum class LocalizationHealth
+    {
+        NORMAL,
+        DEGRADED,
+        RECOVERING
+    };
+
+    const char *health_name(LocalizationHealth health) const
+    {
+        switch (health)
+        {
+        case LocalizationHealth::NORMAL:
+            return "NORMAL";
+        case LocalizationHealth::DEGRADED:
+            return "DEGRADED";
+        case LocalizationHealth::RECOVERING:
+            return "RECOVERING";
+        }
+        return "UNKNOWN";
+    }
+
+    void set_health(LocalizationHealth next, const char *reason)
+    {
+        if (next == localization_health_)
+            return;
+        const auto previous = localization_health_;
+        localization_health_ = next;
+        RCLCPP_WARN(
+            get_logger(), "[FASTLIO_HEALTH] %s -> %s reason=%s",
+            health_name(previous), health_name(next), reason);
+    }
+
+    void update_health(bool scan_bad, bool scan_critical, bool imu_stressed)
+    {
+        if (!robustness_enable_)
+            return;
+
+        if (scan_bad)
+        {
+            healthy_scan_count_ = 0;
+            bad_scan_count_ += scan_critical
+                ? degraded_enter_frames_
+                : (imu_stressed ? 2 : 1);
+            if (localization_health_ == LocalizationHealth::RECOVERING ||
+                bad_scan_count_ >= degraded_enter_frames_)
+            {
+                set_health(LocalizationHealth::DEGRADED,
+                           scan_critical ? "critical_scan" : "scan_quality");
+            }
+            return;
+        }
+
+        bad_scan_count_ = 0;
+        if (localization_health_ == LocalizationHealth::NORMAL)
+            return;
+
+        ++healthy_scan_count_;
+        if (localization_health_ == LocalizationHealth::DEGRADED &&
+            healthy_scan_count_ >= recover_enter_frames_)
+        {
+            healthy_scan_count_ = 0;
+            set_health(LocalizationHealth::RECOVERING, "stable_scans");
+        }
+        else if (localization_health_ == LocalizationHealth::RECOVERING &&
+                 healthy_scan_count_ >= recover_normal_frames_)
+        {
+            healthy_scan_count_ = 0;
+            set_health(LocalizationHealth::NORMAL, "recovered");
+        }
+    }
+
     // 主循环（定时触发，FAST-LIO 每帧主流程）：
     // 同步数据 -> IMU 传播/点云去畸变 -> 地图 FOV 分割 -> 特征降采样
     // -> ikd-Tree 初始化或最近面搜索 -> 迭代 ESKF 更新 -> 地图增量更新
@@ -1510,11 +1625,68 @@ private:
             /*** iterated state estimation ***/
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
-            const state_ikfom predicted_state = state_point;
+            state_ikfom predicted_state = state_point;
+            auto predicted_covariance = kf.get_P();
             kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
+            const state_ikfom candidate_state = kf.get_x();
+
+            const double effective_ratio = feats_down_size > 0
+                ? static_cast<double>(effct_feat_num) / feats_down_size
+                : 0.0;
+            const double update_translation =
+                (candidate_state.pos - predicted_state.pos).norm();
+            const double update_velocity =
+                (candidate_state.vel - predicted_state.vel).norm();
+            const double update_rotation_deg =
+                Log((predicted_state.rot.conjugate() * candidate_state.rot)
+                        .toRotationMatrix()).norm() * 180.0 / PI_M;
+            const bool finite_update = std::isfinite(effective_ratio) &&
+                std::isfinite(res_mean_last) &&
+                std::isfinite(update_translation) &&
+                std::isfinite(update_velocity) &&
+                std::isfinite(update_rotation_deg) &&
+                candidate_state.pos.allFinite() && candidate_state.vel.allFinite();
+            const bool scan_bad = robustness_enable_ && flg_EKF_inited &&
+                (!finite_update ||
+                 effct_feat_num < min_effective_points_ ||
+                 effective_ratio < min_effective_ratio_ ||
+                 res_mean_last > max_mean_residual_ ||
+                 update_translation > max_update_translation_ ||
+                 update_rotation_deg > max_update_rotation_deg_ ||
+                 update_velocity > max_update_velocity_);
+            const bool scan_critical = robustness_enable_ && flg_EKF_inited &&
+                (!finite_update ||
+                 effective_ratio < critical_effective_ratio_ ||
+                 res_mean_last > critical_mean_residual_);
+            const bool imu_stressed =
+                p_imu->last_scan_saturation_ratio() >=
+                    imu_saturation_ratio_warn_ ||
+                static_cast<int>(p_imu->last_scan_saturation_streak()) >=
+                    imu_saturation_streak_warn_;
+            if (p_imu->last_scan_saturated_samples() > 0)
+                ++saturated_scan_count_window_;
+
+            update_health(scan_bad, scan_critical, imu_stressed);
+            const bool accept_lidar_update = !scan_bad;
+            if (!accept_lidar_update)
+            {
+                kf.change_x(predicted_state);
+                kf.change_P(predicted_covariance);
+                ++rejected_update_count_window_;
+                RCLCPP_WARN_THROTTLE(
+                    get_logger(), *get_clock(), 1000,
+                    "[FASTLIO_HEALTH] reject lidar update: health=%s "
+                    "effective=%d/%d ratio=%.3f residual=%.4f "
+                    "dpos=%.3f drot=%.2fdeg dvel=%.3f imu_sat=%.1f%% streak=%zu",
+                    health_name(localization_health_), effct_feat_num,
+                    feats_down_size, effective_ratio, res_mean_last,
+                    update_translation, update_rotation_deg, update_velocity,
+                    100.0 * p_imu->last_scan_saturation_ratio(),
+                    p_imu->last_scan_saturation_streak());
+            }
             state_point = kf.get_x();
             input_diagnostics.observeEstimator(
-                predicted_state, state_point,
+                predicted_state, candidate_state, state_point,
                 static_cast<size_t>(std::max(0, feats_down_size)),
                 static_cast<size_t>(std::max(0, effct_feat_num)),
                 res_mean_last);
@@ -1532,7 +1704,17 @@ private:
 
             /*** add the feature points to map kdtree ***/
             t3 = omp_get_wtime();
-            map_incremental();
+            const bool allow_map_increment = accept_lidar_update &&
+                (!robustness_enable_ ||
+                 localization_health_ == LocalizationHealth::NORMAL);
+            if (allow_map_increment)
+            {
+                map_incremental();
+            }
+            else
+            {
+                ++skipped_map_count_window_;
+            }
             t5 = omp_get_wtime();
 
             /******* Publish points *******/
@@ -1749,7 +1931,20 @@ private:
             input_diagnostics.frame_dpos_max,
             input_diagnostics.frame_drot_max_deg);
 
+        RCLCPP_INFO(
+            get_logger(),
+            "[FASTLIO_HEALTH_DIAG] state=%s bad_streak=%d healthy_streak=%d "
+            "saturated_scans=%lu rejected_updates=%lu skipped_map_updates=%lu",
+            health_name(localization_health_), bad_scan_count_,
+            healthy_scan_count_,
+            static_cast<unsigned long>(saturated_scan_count_window_),
+            static_cast<unsigned long>(rejected_update_count_window_),
+            static_cast<unsigned long>(skipped_map_count_window_));
+
         input_diagnostics.resetWindow(now);
+        saturated_scan_count_window_ = 0;
+        rejected_update_count_window_ = 0;
+        skipped_map_count_window_ = 0;
     }
 
     // map_save 服务回调：pcd_save_en 使能时将累积地图保存为 PCD 文件。
@@ -1788,6 +1983,28 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
 
     bool effect_pub_en = false, map_pub_en = false;
+    bool robustness_enable_ = true;
+    double imu_accel_saturation_threshold_ = 3.9;
+    double imu_saturation_noise_scale_ = 100.0;
+    double imu_saturation_ratio_warn_ = 0.05;
+    int imu_saturation_streak_warn_ = 3;
+    double min_effective_ratio_ = 0.30;
+    int min_effective_points_ = 80;
+    double max_mean_residual_ = 0.05;
+    double critical_effective_ratio_ = 0.15;
+    double critical_mean_residual_ = 0.08;
+    double max_update_translation_ = 0.15;
+    double max_update_rotation_deg_ = 2.0;
+    double max_update_velocity_ = 1.0;
+    int degraded_enter_frames_ = 3;
+    int recover_enter_frames_ = 10;
+    int recover_normal_frames_ = 10;
+    LocalizationHealth localization_health_ = LocalizationHealth::NORMAL;
+    int bad_scan_count_ = 0;
+    int healthy_scan_count_ = 0;
+    uint64_t saturated_scan_count_window_ = 0;
+    uint64_t rejected_update_count_window_ = 0;
+    uint64_t skipped_map_count_window_ = 0;
     int effect_feat_num = 0, frame_num = 0;
     double deltaT, deltaR, aver_time_consu = 0, aver_time_icp = 0, aver_time_match = 0, aver_time_incre = 0, aver_time_solve = 0, aver_time_const_H_time = 0;
     bool flg_EKF_converged, EKF_stop_flg = 0;
