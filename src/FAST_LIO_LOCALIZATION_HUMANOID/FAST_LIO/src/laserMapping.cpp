@@ -49,6 +49,8 @@
 #include <fstream>
 #include <csignal>
 #include <chrono>
+#include <cstdint>
+#include <limits>
 #include <unistd.h>
 #include <Python.h>
 #include <so3_math.h>
@@ -110,6 +112,204 @@ bool point_selected_surf[100000] = {0};
 bool lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false, publish_odom_imu_tf_en = false;
 bool is_first_lidar = true;
+
+// Low-overhead, one-second aggregate diagnostics. Sensor callbacks only update
+// counters and maxima; no per-message console or disk I/O is performed.
+struct FastlioInputDiagnostics
+{
+    using Clock = std::chrono::steady_clock;
+
+    bool enabled = true;
+    double imu_gap_warn_s = 0.02;
+    double arrival_gap_warn_s = 0.02;
+    double slow_lidar_warn_s = 0.05;
+    double slow_timer_warn_s = 0.05;
+    int min_imu_per_scan = 10;
+
+    Clock::time_point window_start = Clock::now();
+    Clock::time_point last_imu_arrival{};
+    Clock::time_point last_lidar_arrival{};
+    bool have_imu = false;
+    bool have_lidar = false;
+    double last_imu_stamp = 0.0;
+    double last_lidar_stamp = 0.0;
+
+    uint64_t imu_count = 0;
+    uint64_t imu_gap_count = 0;
+    uint64_t imu_backward_count = 0;
+    uint64_t imu_arrival_gap_count = 0;
+    double imu_last_dt_s = 0.0;
+    double imu_max_dt_s = 0.0;
+    double imu_max_arrival_dt_s = 0.0;
+    double imu_max_lock_wait_s = 0.0;
+    double worst_imu_gap_dt_s = 0.0;
+    double worst_imu_gap_stamp = 0.0;
+    size_t imu_buffer_max = 0;
+
+    uint64_t lidar_count = 0;
+    uint64_t lidar_gap_count = 0;
+    uint64_t lidar_slow_count = 0;
+    double lidar_max_dt_s = 0.0;
+    double lidar_max_arrival_dt_s = 0.0;
+    double lidar_max_lock_wait_s = 0.0;
+    double lidar_max_preprocess_s = 0.0;
+    double lidar_max_callback_s = 0.0;
+    size_t lidar_buffer_max = 0;
+
+    uint64_t sync_count = 0;
+    uint64_t sync_low_imu_count = 0;
+    size_t sync_imu_min = std::numeric_limits<size_t>::max();
+    size_t sync_imu_max = 0;
+    double sync_max_imu_dt_s = 0.0;
+    double sync_max_span_s = 0.0;
+
+    uint64_t timer_count = 0;
+    uint64_t timer_slow_count = 0;
+    double timer_total_s = 0.0;
+    double timer_max_s = 0.0;
+
+    static double seconds(const Clock::time_point &newer,
+                          const Clock::time_point &older)
+    {
+        return std::chrono::duration<double>(newer - older).count();
+    }
+
+    void observeImu(double stamp, const Clock::time_point &arrival,
+                    double lock_wait_s, size_t buffer_size)
+    {
+        if (!enabled)
+            return;
+        ++imu_count;
+        if (have_imu)
+        {
+            const double header_dt = stamp - last_imu_stamp;
+            const double arrival_dt = seconds(arrival, last_imu_arrival);
+            imu_last_dt_s = header_dt;
+            imu_max_dt_s = std::max(imu_max_dt_s, header_dt);
+            imu_max_arrival_dt_s = std::max(imu_max_arrival_dt_s, arrival_dt);
+            if (header_dt <= 0.0)
+                ++imu_backward_count;
+            else if (header_dt > imu_gap_warn_s)
+            {
+                ++imu_gap_count;
+                if (header_dt >= worst_imu_gap_dt_s)
+                {
+                    worst_imu_gap_dt_s = header_dt;
+                    worst_imu_gap_stamp = stamp;
+                }
+            }
+            if (arrival_dt > arrival_gap_warn_s)
+                ++imu_arrival_gap_count;
+        }
+        have_imu = true;
+        last_imu_stamp = stamp;
+        last_imu_arrival = arrival;
+        imu_max_lock_wait_s = std::max(imu_max_lock_wait_s, lock_wait_s);
+        imu_buffer_max = std::max(imu_buffer_max, buffer_size);
+    }
+
+    void observeLidar(double stamp, const Clock::time_point &arrival,
+                      double lock_wait_s, double preprocess_s,
+                      double callback_s, size_t buffer_size)
+    {
+        if (!enabled)
+            return;
+        ++lidar_count;
+        if (have_lidar)
+        {
+            const double header_dt = stamp - last_lidar_stamp;
+            const double arrival_dt = seconds(arrival, last_lidar_arrival);
+            lidar_max_dt_s = std::max(lidar_max_dt_s, header_dt);
+            lidar_max_arrival_dt_s = std::max(lidar_max_arrival_dt_s, arrival_dt);
+            if (header_dt <= 0.0 || header_dt > 0.2)
+                ++lidar_gap_count;
+        }
+        have_lidar = true;
+        last_lidar_stamp = stamp;
+        last_lidar_arrival = arrival;
+        lidar_max_lock_wait_s = std::max(lidar_max_lock_wait_s, lock_wait_s);
+        lidar_max_preprocess_s = std::max(lidar_max_preprocess_s, preprocess_s);
+        lidar_max_callback_s = std::max(lidar_max_callback_s, callback_s);
+        lidar_buffer_max = std::max(lidar_buffer_max, buffer_size);
+        if (callback_s > slow_lidar_warn_s)
+            ++lidar_slow_count;
+    }
+
+    void observeSync(const MeasureGroup &meas)
+    {
+        if (!enabled)
+            return;
+        ++sync_count;
+        const size_t count = meas.imu.size();
+        sync_imu_min = std::min(sync_imu_min, count);
+        sync_imu_max = std::max(sync_imu_max, count);
+        if (count < static_cast<size_t>(std::max(0, min_imu_per_scan)))
+            ++sync_low_imu_count;
+        if (count >= 2)
+        {
+            double previous = get_time_sec(meas.imu.front()->header.stamp);
+            const double first = previous;
+            double last = previous;
+            for (size_t i = 1; i < count; ++i)
+            {
+                last = get_time_sec(meas.imu[i]->header.stamp);
+                sync_max_imu_dt_s = std::max(sync_max_imu_dt_s, last - previous);
+                previous = last;
+            }
+            sync_max_span_s = std::max(sync_max_span_s, last - first);
+        }
+    }
+
+    void observeTimer(double duration_s)
+    {
+        if (!enabled)
+            return;
+        ++timer_count;
+        timer_total_s += duration_s;
+        timer_max_s = std::max(timer_max_s, duration_s);
+        if (duration_s > slow_timer_warn_s)
+            ++timer_slow_count;
+    }
+
+    void resetWindow(const Clock::time_point &now)
+    {
+        window_start = now;
+        imu_count = imu_gap_count = imu_backward_count = 0;
+        imu_arrival_gap_count = 0;
+        imu_last_dt_s = imu_max_dt_s = imu_max_arrival_dt_s = 0.0;
+        imu_max_lock_wait_s = 0.0;
+        worst_imu_gap_dt_s = 0.0;
+        worst_imu_gap_stamp = 0.0;
+        imu_buffer_max = 0;
+        lidar_count = lidar_gap_count = lidar_slow_count = 0;
+        lidar_max_dt_s = lidar_max_arrival_dt_s = 0.0;
+        lidar_max_lock_wait_s = lidar_max_preprocess_s = 0.0;
+        lidar_max_callback_s = 0.0;
+        lidar_buffer_max = 0;
+        sync_count = sync_low_imu_count = 0;
+        sync_imu_min = std::numeric_limits<size_t>::max();
+        sync_imu_max = 0;
+        sync_max_imu_dt_s = sync_max_span_s = 0.0;
+        timer_count = timer_slow_count = 0;
+        timer_total_s = timer_max_s = 0.0;
+    }
+};
+
+FastlioInputDiagnostics input_diagnostics;
+
+class ScopedFastlioTimer
+{
+public:
+    ScopedFastlioTimer() : start_(FastlioInputDiagnostics::Clock::now()) {}
+    ~ScopedFastlioTimer()
+    {
+        input_diagnostics.observeTimer(FastlioInputDiagnostics::seconds(
+            FastlioInputDiagnostics::Clock::now(), start_));
+    }
+
+private:
+    FastlioInputDiagnostics::Clock::time_point start_;
+};
 
 vector<vector<int>> pointSearchInd_surf;
 vector<BoxPointType> cub_needrm;
@@ -314,7 +514,10 @@ void lasermap_fov_segment()
 // （特征提取/抽稀）后存入待同步队列，并唤醒主处理线程。
 void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
 {
+    const auto callback_start = FastlioInputDiagnostics::Clock::now();
+    const auto lock_start = callback_start;
     mtx_buffer.lock();
+    const auto lock_acquired = FastlioInputDiagnostics::Clock::now();
     scan_count++;
     double cur_time = get_time_sec(msg->header.stamp);
     double preprocess_start_time = omp_get_wtime();
@@ -333,9 +536,18 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
     lidar_buffer.push_back(ptr);
     time_buffer.push_back(cur_time);
     last_timestamp_lidar = cur_time;
-    s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
+    const double preprocess_s = omp_get_wtime() - preprocess_start_time;
+    s_plot11[scan_count] = preprocess_s;
+    const size_t buffer_size = lidar_buffer.size();
     mtx_buffer.unlock();
     sig_buffer.notify_all();
+    const auto callback_end = FastlioInputDiagnostics::Clock::now();
+    input_diagnostics.observeLidar(
+        cur_time, callback_start,
+        FastlioInputDiagnostics::seconds(lock_acquired, lock_start),
+        preprocess_s,
+        FastlioInputDiagnostics::seconds(callback_end, callback_start),
+        buffer_size);
 }
 
 double timediff_lidar_wrt_imu = 0.0;
@@ -345,7 +557,10 @@ bool timediff_set_flg = false;
 void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg)
 // void livox_pcl_cbk(const livox_interfaces::msg::CustomMsg::UniquePtr msg)
 {
+    const auto callback_start = FastlioInputDiagnostics::Clock::now();
+    const auto lock_start = callback_start;
     mtx_buffer.lock();
+    const auto lock_acquired = FastlioInputDiagnostics::Clock::now();
     double cur_time = get_time_sec(msg->header.stamp);
     double preprocess_start_time = omp_get_wtime();
     scan_count++;
@@ -377,19 +592,30 @@ void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg)
     lidar_buffer.push_back(ptr);
     time_buffer.push_back(last_timestamp_lidar);
 
-    s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
+    const double preprocess_s = omp_get_wtime() - preprocess_start_time;
+    s_plot11[scan_count] = preprocess_s;
+    const size_t buffer_size = lidar_buffer.size();
     mtx_buffer.unlock();
     sig_buffer.notify_all();
+    const auto callback_end = FastlioInputDiagnostics::Clock::now();
+    input_diagnostics.observeLidar(
+        cur_time, callback_start,
+        FastlioInputDiagnostics::seconds(lock_acquired, lock_start),
+        preprocess_s,
+        FastlioInputDiagnostics::seconds(callback_end, callback_start),
+        buffer_size);
 }
 
 // IMU 回调：按时间同步偏差修正时间戳后压入 IMU 缓存队列，供帧同步与预测使用。
 void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
 {
+    const auto callback_arrival = FastlioInputDiagnostics::Clock::now();
     publish_count++;
     // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
     sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
 
-    msg->header.stamp = get_ros_time(get_time_sec(msg_in->header.stamp) - time_diff_lidar_to_imu);
+    const double input_timestamp = get_time_sec(msg_in->header.stamp);
+    msg->header.stamp = get_ros_time(input_timestamp - time_diff_lidar_to_imu);
     if (abs(timediff_lidar_wrt_imu) > 0.1 && time_sync_en)
     {
         msg->header.stamp =
@@ -398,7 +624,9 @@ void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
 
     double timestamp = get_time_sec(msg->header.stamp);
 
+    const auto lock_start = FastlioInputDiagnostics::Clock::now();
     mtx_buffer.lock();
+    const auto lock_acquired = FastlioInputDiagnostics::Clock::now();
 
     if (timestamp < last_timestamp_imu)
     {
@@ -409,8 +637,13 @@ void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
     last_timestamp_imu = timestamp;
 
     imu_buffer.push_back(msg);
+    const size_t buffer_size = imu_buffer.size();
     mtx_buffer.unlock();
     sig_buffer.notify_all();
+    input_diagnostics.observeImu(
+        input_timestamp, callback_arrival,
+        FastlioInputDiagnostics::seconds(lock_acquired, lock_start),
+        buffer_size);
 }
 
 double lidar_mean_scantime = 0.0;
@@ -470,6 +703,7 @@ bool sync_packages(MeasureGroup &meas)
     lidar_buffer.pop_front();
     time_buffer.pop_front();
     lidar_pushed = false;
+    input_diagnostics.observeSync(meas);
     return true;
 }
 
@@ -894,6 +1128,13 @@ public:
         this->declare_parameter<bool>("mapping.extrinsic_est_en", true);
         this->declare_parameter<bool>("pcd_save.pcd_save_en", false);
         this->declare_parameter<int>("pcd_save.interval", -1);
+        this->declare_parameter<bool>("diagnostics.enable", true);
+        this->declare_parameter<double>("diagnostics.report_period_s", 1.0);
+        this->declare_parameter<double>("diagnostics.imu_gap_warn_s", 0.02);
+        this->declare_parameter<double>("diagnostics.arrival_gap_warn_s", 0.02);
+        this->declare_parameter<double>("diagnostics.slow_lidar_warn_s", 0.05);
+        this->declare_parameter<double>("diagnostics.slow_timer_warn_s", 0.05);
+        this->declare_parameter<int>("diagnostics.min_imu_per_scan", 10);
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
 
@@ -931,6 +1172,16 @@ public:
         this->get_parameter_or<bool>("mapping.extrinsic_est_en", extrinsic_est_en, true);
         this->get_parameter_or<bool>("pcd_save.pcd_save_en", pcd_save_en, false);
         this->get_parameter_or<int>("pcd_save.interval", pcd_save_interval, -1);
+        this->get_parameter_or<bool>("diagnostics.enable", input_diagnostics.enabled, true);
+        this->get_parameter_or<double>("diagnostics.imu_gap_warn_s", input_diagnostics.imu_gap_warn_s, 0.02);
+        this->get_parameter_or<double>("diagnostics.arrival_gap_warn_s", input_diagnostics.arrival_gap_warn_s, 0.02);
+        this->get_parameter_or<double>("diagnostics.slow_lidar_warn_s", input_diagnostics.slow_lidar_warn_s, 0.05);
+        this->get_parameter_or<double>("diagnostics.slow_timer_warn_s", input_diagnostics.slow_timer_warn_s, 0.05);
+        this->get_parameter_or<int>("diagnostics.min_imu_per_scan", input_diagnostics.min_imu_per_scan, 10);
+        double diagnostics_report_period_s = 1.0;
+        this->get_parameter_or<double>("diagnostics.report_period_s", diagnostics_report_period_s, 1.0);
+        diagnostics_report_period_s = std::max(0.2, diagnostics_report_period_s);
+        input_diagnostics.resetWindow(FastlioInputDiagnostics::Clock::now());
         this->get_parameter_or<vector<double>>("mapping.extrinsic_T", extrinT, vector<double>());
         this->get_parameter_or<vector<double>>("mapping.extrinsic_R", extrinR, vector<double>());
 
@@ -1007,6 +1258,20 @@ public:
         auto map_period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0));
         map_pub_timer_ = rclcpp::create_timer(this, this->get_clock(), map_period_ms, std::bind(&LaserMappingNode::map_publish_callback, this));
 
+        if (input_diagnostics.enabled)
+        {
+            diagnostics_timer_ = create_wall_timer(
+                std::chrono::duration<double>(diagnostics_report_period_s),
+                std::bind(&LaserMappingNode::diagnostics_report_callback, this));
+            RCLCPP_INFO(
+                this->get_logger(),
+                "FAST-LIO input diagnostics enabled: report=%.2fs imu_gap=%.3fs "
+                "slow_lidar=%.3fs slow_timer=%.3fs",
+                diagnostics_report_period_s, input_diagnostics.imu_gap_warn_s,
+                input_diagnostics.slow_lidar_warn_s,
+                input_diagnostics.slow_timer_warn_s);
+        }
+
         map_save_srv_ = this->create_service<std_srvs::srv::Trigger>("map_save", std::bind(&LaserMappingNode::map_save_callback, this, std::placeholders::_1, std::placeholders::_2));
 
         RCLCPP_INFO(this->get_logger(), "Node init finished.");
@@ -1026,6 +1291,7 @@ private:
     // -> 发布里程计/点云/路径；并在使能时记录各阶段耗时日志。
     void timer_callback()
     {
+        ScopedFastlioTimer diagnostics_timer_guard;
         if (sync_packages(Measures))
         {
             if (flg_first_scan)
@@ -1186,6 +1452,123 @@ private:
             publish_map(pubLaserCloudMap_);
     }
 
+    // Report only aggregate counters once per period. This keeps the 200 Hz IMU
+    // callback free of formatting, terminal output and disk flushes.
+    void diagnostics_report_callback()
+    {
+        const auto now = FastlioInputDiagnostics::Clock::now();
+        const double elapsed = std::max(
+            1e-9, FastlioInputDiagnostics::seconds(
+                      now, input_diagnostics.window_start));
+        const double imu_rate = input_diagnostics.imu_count / elapsed;
+        const double timer_mean_ms = input_diagnostics.timer_count > 0
+            ? input_diagnostics.timer_total_s * 1000.0 /
+                  input_diagnostics.timer_count
+            : 0.0;
+        const size_t sync_imu_min = input_diagnostics.sync_count > 0
+            ? input_diagnostics.sync_imu_min
+            : 0;
+        const bool input_warning = input_diagnostics.imu_gap_count > 0 ||
+            input_diagnostics.imu_backward_count > 0 ||
+            input_diagnostics.imu_arrival_gap_count > 0 ||
+            input_diagnostics.lidar_gap_count > 0;
+        const bool execution_warning = input_diagnostics.lidar_slow_count > 0 ||
+            input_diagnostics.timer_slow_count > 0 ||
+            input_diagnostics.sync_low_imu_count > 0 ||
+            input_diagnostics.sync_max_imu_dt_s >
+                input_diagnostics.imu_gap_warn_s;
+
+        if (input_warning)
+        {
+            RCLCPP_WARN(
+                get_logger(),
+                "[FASTLIO_INPUT_DIAG] period=%.3fs imu_count=%lu rate=%.2fHz "
+                "header_dt_last=%.3fms header_dt_max=%.3fms gaps=%lu backward=%lu "
+                "worst_gap_stamp=%.9f arrival_dt_max=%.3fms arrival_gaps=%lu "
+                "lock_wait_max=%.3fms buffer_max=%zu | lidar_count=%lu "
+                "header_dt_max=%.3fms arrival_dt_max=%.3fms gaps=%lu buffer_max=%zu",
+                elapsed, static_cast<unsigned long>(input_diagnostics.imu_count),
+                imu_rate, input_diagnostics.imu_last_dt_s * 1000.0,
+                input_diagnostics.imu_max_dt_s * 1000.0,
+                static_cast<unsigned long>(input_diagnostics.imu_gap_count),
+                static_cast<unsigned long>(input_diagnostics.imu_backward_count),
+                input_diagnostics.worst_imu_gap_stamp,
+                input_diagnostics.imu_max_arrival_dt_s * 1000.0,
+                static_cast<unsigned long>(input_diagnostics.imu_arrival_gap_count),
+                input_diagnostics.imu_max_lock_wait_s * 1000.0,
+                input_diagnostics.imu_buffer_max,
+                static_cast<unsigned long>(input_diagnostics.lidar_count),
+                input_diagnostics.lidar_max_dt_s * 1000.0,
+                input_diagnostics.lidar_max_arrival_dt_s * 1000.0,
+                static_cast<unsigned long>(input_diagnostics.lidar_gap_count),
+                input_diagnostics.lidar_buffer_max);
+        }
+        else
+        {
+            RCLCPP_INFO(
+                get_logger(),
+                "[FASTLIO_INPUT_DIAG] period=%.3fs imu_count=%lu rate=%.2fHz "
+                "header_dt_last=%.3fms header_dt_max=%.3fms gaps=0 backward=0 "
+                "arrival_dt_max=%.3fms arrival_gaps=0 lock_wait_max=%.3fms "
+                "buffer_max=%zu | lidar_count=%lu header_dt_max=%.3fms "
+                "arrival_dt_max=%.3fms gaps=0 buffer_max=%zu",
+                elapsed, static_cast<unsigned long>(input_diagnostics.imu_count),
+                imu_rate, input_diagnostics.imu_last_dt_s * 1000.0,
+                input_diagnostics.imu_max_dt_s * 1000.0,
+                input_diagnostics.imu_max_arrival_dt_s * 1000.0,
+                input_diagnostics.imu_max_lock_wait_s * 1000.0,
+                input_diagnostics.imu_buffer_max,
+                static_cast<unsigned long>(input_diagnostics.lidar_count),
+                input_diagnostics.lidar_max_dt_s * 1000.0,
+                input_diagnostics.lidar_max_arrival_dt_s * 1000.0,
+                input_diagnostics.lidar_buffer_max);
+        }
+
+        if (execution_warning)
+        {
+            RCLCPP_WARN(
+                get_logger(),
+                "[FASTLIO_EXEC_DIAG] lidar_preprocess_max=%.3fms "
+                "lidar_callback_max=%.3fms lidar_lock_max=%.3fms slow_lidar=%lu | "
+                "sync_count=%lu imu_per_scan=%zu..%zu low_imu=%lu "
+                "sync_imu_dt_max=%.3fms sync_span_max=%.3fms | "
+                "timer_count=%lu timer_mean=%.3fms timer_max=%.3fms slow_timer=%lu",
+                input_diagnostics.lidar_max_preprocess_s * 1000.0,
+                input_diagnostics.lidar_max_callback_s * 1000.0,
+                input_diagnostics.lidar_max_lock_wait_s * 1000.0,
+                static_cast<unsigned long>(input_diagnostics.lidar_slow_count),
+                static_cast<unsigned long>(input_diagnostics.sync_count),
+                sync_imu_min, input_diagnostics.sync_imu_max,
+                static_cast<unsigned long>(input_diagnostics.sync_low_imu_count),
+                input_diagnostics.sync_max_imu_dt_s * 1000.0,
+                input_diagnostics.sync_max_span_s * 1000.0,
+                static_cast<unsigned long>(input_diagnostics.timer_count),
+                timer_mean_ms, input_diagnostics.timer_max_s * 1000.0,
+                static_cast<unsigned long>(input_diagnostics.timer_slow_count));
+        }
+        else
+        {
+            RCLCPP_INFO(
+                get_logger(),
+                "[FASTLIO_EXEC_DIAG] lidar_preprocess_max=%.3fms "
+                "lidar_callback_max=%.3fms lidar_lock_max=%.3fms slow_lidar=0 | "
+                "sync_count=%lu imu_per_scan=%zu..%zu low_imu=0 "
+                "sync_imu_dt_max=%.3fms sync_span_max=%.3fms | "
+                "timer_count=%lu timer_mean=%.3fms timer_max=%.3fms slow_timer=0",
+                input_diagnostics.lidar_max_preprocess_s * 1000.0,
+                input_diagnostics.lidar_max_callback_s * 1000.0,
+                input_diagnostics.lidar_max_lock_wait_s * 1000.0,
+                static_cast<unsigned long>(input_diagnostics.sync_count),
+                sync_imu_min, input_diagnostics.sync_imu_max,
+                input_diagnostics.sync_max_imu_dt_s * 1000.0,
+                input_diagnostics.sync_max_span_s * 1000.0,
+                static_cast<unsigned long>(input_diagnostics.timer_count),
+                timer_mean_ms, input_diagnostics.timer_max_s * 1000.0);
+        }
+
+        input_diagnostics.resetWindow(now);
+    }
+
     // map_save 服务回调：pcd_save_en 使能时将累积地图保存为 PCD 文件。
     void map_save_callback(std_srvs::srv::Trigger::Request::ConstSharedPtr req, std_srvs::srv::Trigger::Response::SharedPtr res)
     {
@@ -1218,6 +1601,7 @@ private:
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::TimerBase::SharedPtr map_pub_timer_;
+    rclcpp::TimerBase::SharedPtr diagnostics_timer_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
 
     bool effect_pub_en = false, map_pub_en = false;

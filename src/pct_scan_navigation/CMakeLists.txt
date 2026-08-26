@@ -12,6 +12,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 
@@ -38,7 +39,10 @@ ament_target_dependencies(pct_scan_coordinator
   geometry_msgs nav_msgs rclcpp std_srvs)
 target_link_libraries(pct_scan_coordinator waypoint_utils)
 
-install(TARGETS pct_scan_coordinator waypoint_utils
+add_executable(imu_timing_probe src/imu_timing_probe.cpp)
+ament_target_dependencies(imu_timing_probe rclcpp sensor_msgs)
+
+install(TARGETS pct_scan_coordinator imu_timing_probe waypoint_utils
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})

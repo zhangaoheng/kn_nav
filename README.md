@@ -107,6 +107,16 @@ ros2 service call /pct_scan_navigation/cancel std_srvs/srv/Trigger '{}'
 - 遗留事项：
 ```
 
+### 2026-08-26
+
+#### FAST-LIO IMU数据链路与执行阻塞诊断日志
+
+- 问题：现有 `fastlio_monitor` 同时在 Python 单线程节点中订阅 `200 Hz` IMU 和 `10 Hz` 大点云，其 IMU gap 可能是监控节点自身丢帧，不能确认 FAST-LIO 实际收到的数据；需要在不改变定位行为的前提下，定位问题发生在驱动输出、FAST-LIO订阅、点云回调还是同步处理阶段。
+- 分析：当前 FAST-LIO 使用单线程 `rclcpp::spin()`，IMU订阅深度为 `10`，只能覆盖约 `50 ms`；Livox点云预处理和 FAST-LIO 主计算也在同一个 executor 中执行。若任一回调超过约 `50 ms`，存在 IMU订阅队列溢出的可能。
+- 修改：新增独立 C++ 节点 `imu_timing_probe`，只订阅 `/livox/imu`，使用 reliable、volatile、depth `1000`，每秒输出 `[IMU_INPUT_DIAG]`，统计消息数、频率、header/到达时间最大间隔、倒序、触顶次数和最严重gap时间戳；统一导航启动定位链路时自动启动该节点。在 FAST-LIO 内部增加低开销聚合统计，每秒输出 `[FASTLIO_INPUT_DIAG]` 和 `[FASTLIO_EXEC_DIAG]`，覆盖实际收到的 IMU、雷达间隔、buffer峰值、点云预处理/回调耗时、每帧同步IMU数量及最大dt、100 Hz主循环平均/最大耗时。回调中只进行计数、比较和单调时钟采样，不逐帧格式化、打印或写盘，不修改QoS、队列、executor、滤波和同步行为；启动器已启用缓冲日志输出。
+- 验证：`fast_lio` 和 `pct_scan_navigation` 编译通过；launch Python语法和 `git diff --check` 通过；`imu_timing_probe` 可独立启动并按周期稳定输出。`pct_scan_navigation` 的 C++ waypoint 测试通过；配置契约测试仍有既存失败（A2重定位开关、coordinator参数旧期望、环境缺少 `rosbag2_py`），与本次诊断代码无关。
+- 遗留事项：在漂移机器上部署并复现后，从 `src/log/latest/launch.log` 提取三类诊断行。若独立探针连续而 FAST-LIO 出现gap，定位到FAST-LIO订阅/executor；两者同时出现相同header gap则检查驱动、DDS或源数据；header连续但FAST-LIO arrival gap和主循环/点云回调超时同步出现，则说明单线程处理阻塞。当前仓库不包含 `livox_ros_driver2` 源码，如仍需区分SDK输入与驱动发布，应在实机的 Livox 驱动工程内部增加同类接收/发布计时。
+
 ### 2026-08-25
 
 #### FAST-LIO 漂移与 Livox IMU 峰值、时间连续性排查

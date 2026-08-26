@@ -221,6 +221,15 @@ def _launch_setup(context):
                 ],
             ),
             Node(
+                package='pct_scan_navigation',
+                executable='imu_timing_probe',
+                name='imu_timing_probe', output='both',
+                parameters=[
+                    dict(config.get('nodes', {}).get('imu_timing_probe', {})),
+                    common_overrides,
+                ],
+            ),
+            Node(
                 package='open3d_loc', executable='global_localization_node',
                 name='global_localization_node', output='both',
                 parameters=[
