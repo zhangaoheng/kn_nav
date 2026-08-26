@@ -124,6 +124,7 @@ struct FastlioInputDiagnostics
     double arrival_gap_warn_s = 0.02;
     double slow_lidar_warn_s = 0.05;
     double slow_timer_warn_s = 0.05;
+    double accel_axis_warn = 3.8;
     int min_imu_per_scan = 10;
 
     Clock::time_point window_start = Clock::now();
@@ -145,6 +146,14 @@ struct FastlioInputDiagnostics
     double worst_imu_gap_dt_s = 0.0;
     double worst_imu_gap_stamp = 0.0;
     size_t imu_buffer_max = 0;
+    double imu_acc_axis_max = 0.0;
+    double imu_acc_norm_max = 0.0;
+    double imu_gyr_axis_max = 0.0;
+    double imu_gyr_norm_max = 0.0;
+    double imu_peak_stamp = 0.0;
+    uint64_t imu_acc_over_count = 0;
+    uint64_t imu_acc_over_streak = 0;
+    uint64_t imu_acc_over_streak_max = 0;
 
     uint64_t lidar_count = 0;
     uint64_t lidar_gap_count = 0;
@@ -168,6 +177,27 @@ struct FastlioInputDiagnostics
     double timer_total_s = 0.0;
     double timer_max_s = 0.0;
 
+    uint64_t estimator_count = 0;
+    size_t effective_min = std::numeric_limits<size_t>::max();
+    size_t effective_max = 0;
+    double effective_ratio_min = std::numeric_limits<double>::infinity();
+    double residual_last = 0.0;
+    double residual_max = 0.0;
+    double update_dpos_max = 0.0;
+    double update_drot_max_deg = 0.0;
+    double update_dvel_max = 0.0;
+    double frame_dpos_max = 0.0;
+    double frame_drot_max_deg = 0.0;
+    double state_vel_norm_max = 0.0;
+    V3D state_pos = V3D::Zero();
+    V3D state_vel = V3D::Zero();
+    V3D state_ba = V3D::Zero();
+    V3D state_bg = V3D::Zero();
+    V3D state_grav = V3D::Zero();
+    V3D previous_state_pos = V3D::Zero();
+    M3D previous_state_rot = M3D::Identity();
+    bool have_previous_state = false;
+
     static double seconds(const Clock::time_point &newer,
                           const Clock::time_point &older)
     {
@@ -175,7 +205,8 @@ struct FastlioInputDiagnostics
     }
 
     void observeImu(double stamp, const Clock::time_point &arrival,
-                    double lock_wait_s, size_t buffer_size)
+                    double lock_wait_s, size_t buffer_size,
+                    const sensor_msgs::msg::Imu &imu)
     {
         if (!enabled)
             return;
@@ -206,6 +237,36 @@ struct FastlioInputDiagnostics
         last_imu_arrival = arrival;
         imu_max_lock_wait_s = std::max(imu_max_lock_wait_s, lock_wait_s);
         imu_buffer_max = std::max(imu_buffer_max, buffer_size);
+
+        const auto &acc = imu.linear_acceleration;
+        const auto &gyr = imu.angular_velocity;
+        const double acc_axis = std::max(
+            std::abs(acc.x), std::max(std::abs(acc.y), std::abs(acc.z)));
+        const double acc_norm = std::sqrt(
+            acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
+        const double gyr_axis = std::max(
+            std::abs(gyr.x), std::max(std::abs(gyr.y), std::abs(gyr.z)));
+        const double gyr_norm = std::sqrt(
+            gyr.x * gyr.x + gyr.y * gyr.y + gyr.z * gyr.z);
+        if (acc_axis >= imu_acc_axis_max)
+        {
+            imu_acc_axis_max = acc_axis;
+            imu_peak_stamp = stamp;
+        }
+        imu_acc_norm_max = std::max(imu_acc_norm_max, acc_norm);
+        imu_gyr_axis_max = std::max(imu_gyr_axis_max, gyr_axis);
+        imu_gyr_norm_max = std::max(imu_gyr_norm_max, gyr_norm);
+        if (acc_axis >= accel_axis_warn)
+        {
+            ++imu_acc_over_count;
+            ++imu_acc_over_streak;
+            imu_acc_over_streak_max = std::max(
+                imu_acc_over_streak_max, imu_acc_over_streak);
+        }
+        else
+        {
+            imu_acc_over_streak = 0;
+        }
     }
 
     void observeLidar(double stamp, const Clock::time_point &arrival,
@@ -271,6 +332,57 @@ struct FastlioInputDiagnostics
             ++timer_slow_count;
     }
 
+    void observeEstimator(const state_ikfom &predicted,
+                          const state_ikfom &updated,
+                          size_t downsampled, size_t effective,
+                          double residual)
+    {
+        if (!enabled)
+            return;
+        ++estimator_count;
+        effective_min = std::min(effective_min, effective);
+        effective_max = std::max(effective_max, effective);
+        if (downsampled > 0)
+        {
+            effective_ratio_min = std::min(
+                effective_ratio_min,
+                static_cast<double>(effective) / downsampled);
+        }
+        residual_last = residual;
+        residual_max = std::max(residual_max, residual);
+
+        update_dpos_max = std::max(
+            update_dpos_max, (updated.pos - predicted.pos).norm());
+        update_dvel_max = std::max(
+            update_dvel_max, (updated.vel - predicted.vel).norm());
+        update_drot_max_deg = std::max(
+            update_drot_max_deg,
+            Log((predicted.rot.conjugate() * updated.rot).toRotationMatrix()).norm() *
+                180.0 / PI_M);
+
+        if (have_previous_state)
+        {
+            frame_dpos_max = std::max(
+                frame_dpos_max, (updated.pos - previous_state_pos).norm());
+            const M3D frame_delta_rot = previous_state_rot.transpose() *
+                updated.rot.toRotationMatrix();
+            frame_drot_max_deg = std::max(
+                frame_drot_max_deg,
+                Log(frame_delta_rot).norm() * 180.0 / PI_M);
+        }
+        previous_state_pos = updated.pos;
+        previous_state_rot = updated.rot.toRotationMatrix();
+        have_previous_state = true;
+
+        state_pos = updated.pos;
+        state_vel = updated.vel;
+        state_ba = updated.ba;
+        state_bg = updated.bg;
+        state_grav << updated.grav[0], updated.grav[1], updated.grav[2];
+        state_vel_norm_max = std::max(
+            state_vel_norm_max, updated.vel.norm());
+    }
+
     void resetWindow(const Clock::time_point &now)
     {
         window_start = now;
@@ -281,6 +393,11 @@ struct FastlioInputDiagnostics
         worst_imu_gap_dt_s = 0.0;
         worst_imu_gap_stamp = 0.0;
         imu_buffer_max = 0;
+        imu_acc_axis_max = imu_acc_norm_max = 0.0;
+        imu_gyr_axis_max = imu_gyr_norm_max = 0.0;
+        imu_peak_stamp = 0.0;
+        imu_acc_over_count = 0;
+        imu_acc_over_streak_max = imu_acc_over_streak;
         lidar_count = lidar_gap_count = lidar_slow_count = 0;
         lidar_max_dt_s = lidar_max_arrival_dt_s = 0.0;
         lidar_max_lock_wait_s = lidar_max_preprocess_s = 0.0;
@@ -292,6 +409,14 @@ struct FastlioInputDiagnostics
         sync_max_imu_dt_s = sync_max_span_s = 0.0;
         timer_count = timer_slow_count = 0;
         timer_total_s = timer_max_s = 0.0;
+        estimator_count = 0;
+        effective_min = std::numeric_limits<size_t>::max();
+        effective_max = 0;
+        effective_ratio_min = std::numeric_limits<double>::infinity();
+        residual_last = residual_max = 0.0;
+        update_dpos_max = update_drot_max_deg = update_dvel_max = 0.0;
+        frame_dpos_max = frame_drot_max_deg = 0.0;
+        state_vel_norm_max = 0.0;
     }
 };
 
@@ -643,7 +768,7 @@ void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
     input_diagnostics.observeImu(
         input_timestamp, callback_arrival,
         FastlioInputDiagnostics::seconds(lock_acquired, lock_start),
-        buffer_size);
+        buffer_size, *msg_in);
 }
 
 double lidar_mean_scantime = 0.0;
@@ -1134,6 +1259,7 @@ public:
         this->declare_parameter<double>("diagnostics.arrival_gap_warn_s", 0.02);
         this->declare_parameter<double>("diagnostics.slow_lidar_warn_s", 0.05);
         this->declare_parameter<double>("diagnostics.slow_timer_warn_s", 0.05);
+        this->declare_parameter<double>("diagnostics.accel_axis_warn", 3.8);
         this->declare_parameter<int>("diagnostics.min_imu_per_scan", 10);
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
@@ -1177,6 +1303,7 @@ public:
         this->get_parameter_or<double>("diagnostics.arrival_gap_warn_s", input_diagnostics.arrival_gap_warn_s, 0.02);
         this->get_parameter_or<double>("diagnostics.slow_lidar_warn_s", input_diagnostics.slow_lidar_warn_s, 0.05);
         this->get_parameter_or<double>("diagnostics.slow_timer_warn_s", input_diagnostics.slow_timer_warn_s, 0.05);
+        this->get_parameter_or<double>("diagnostics.accel_axis_warn", input_diagnostics.accel_axis_warn, 3.8);
         this->get_parameter_or<int>("diagnostics.min_imu_per_scan", input_diagnostics.min_imu_per_scan, 10);
         double diagnostics_report_period_s = 1.0;
         this->get_parameter_or<double>("diagnostics.report_period_s", diagnostics_report_period_s, 1.0);
@@ -1383,8 +1510,14 @@ private:
             /*** iterated state estimation ***/
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
+            const state_ikfom predicted_state = state_point;
             kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
             state_point = kf.get_x();
+            input_diagnostics.observeEstimator(
+                predicted_state, state_point,
+                static_cast<size_t>(std::max(0, feats_down_size)),
+                static_cast<size_t>(std::max(0, effct_feat_num)),
+                res_mean_last);
             euler_cur = SO3ToEuler(state_point.rot);
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
             geoQuat.x = state_point.rot.coeffs()[0];
@@ -1565,6 +1698,56 @@ private:
                 static_cast<unsigned long>(input_diagnostics.timer_count),
                 timer_mean_ms, input_diagnostics.timer_max_s * 1000.0);
         }
+
+        RCLCPP_INFO(
+            get_logger(),
+            "[FASTLIO_IMU_VALUE_DIAG] acc_axis_max=%.6f acc_norm_max=%.6f "
+            "gyr_axis_max=%.6f gyr_norm_max=%.6f acc_over_%.3f=%lu "
+            "over_streak_max=%lu peak_stamp=%.9f",
+            input_diagnostics.imu_acc_axis_max,
+            input_diagnostics.imu_acc_norm_max,
+            input_diagnostics.imu_gyr_axis_max,
+            input_diagnostics.imu_gyr_norm_max,
+            input_diagnostics.accel_axis_warn,
+            static_cast<unsigned long>(input_diagnostics.imu_acc_over_count),
+            static_cast<unsigned long>(input_diagnostics.imu_acc_over_streak_max),
+            input_diagnostics.imu_peak_stamp);
+
+        const size_t effective_min = input_diagnostics.estimator_count > 0
+            ? input_diagnostics.effective_min : 0;
+        const double effective_ratio_min =
+            std::isfinite(input_diagnostics.effective_ratio_min)
+                ? input_diagnostics.effective_ratio_min : 0.0;
+        RCLCPP_INFO(
+            get_logger(),
+            "[FASTLIO_ESTIMATOR_DIAG] frames=%lu effective=%zu..%zu "
+            "ratio_min=%.6f residual_last=%.6f residual_max=%.6f | "
+            "pos=(%.6f,%.6f,%.6f) vel=(%.6f,%.6f,%.6f) "
+            "vel_norm=%.6f vel_norm_max=%.6f | "
+            "ba=(%.6f,%.6f,%.6f) bg=(%.6f,%.6f,%.6f) "
+            "grav=(%.6f,%.6f,%.6f) | "
+            "update_dpos_max=%.6f update_drot_max_deg=%.6f "
+            "update_dvel_max=%.6f frame_dpos_max=%.6f "
+            "frame_drot_max_deg=%.6f",
+            static_cast<unsigned long>(input_diagnostics.estimator_count),
+            effective_min, input_diagnostics.effective_max,
+            effective_ratio_min, input_diagnostics.residual_last,
+            input_diagnostics.residual_max,
+            input_diagnostics.state_pos.x(), input_diagnostics.state_pos.y(),
+            input_diagnostics.state_pos.z(), input_diagnostics.state_vel.x(),
+            input_diagnostics.state_vel.y(), input_diagnostics.state_vel.z(),
+            input_diagnostics.state_vel.norm(),
+            input_diagnostics.state_vel_norm_max,
+            input_diagnostics.state_ba.x(), input_diagnostics.state_ba.y(),
+            input_diagnostics.state_ba.z(), input_diagnostics.state_bg.x(),
+            input_diagnostics.state_bg.y(), input_diagnostics.state_bg.z(),
+            input_diagnostics.state_grav.x(), input_diagnostics.state_grav.y(),
+            input_diagnostics.state_grav.z(),
+            input_diagnostics.update_dpos_max,
+            input_diagnostics.update_drot_max_deg,
+            input_diagnostics.update_dvel_max,
+            input_diagnostics.frame_dpos_max,
+            input_diagnostics.frame_drot_max_deg);
 
         input_diagnostics.resetWindow(now);
     }
