@@ -35,6 +35,24 @@
                         0., 1., 0.,
                         0., 0., 1.]
 
+        robustness:
+            enable: true
+            imu_accel_saturation_threshold: 3.9
+            imu_saturation_noise_scale: 100.0
+            imu_saturation_ratio_warn: 0.05
+            imu_saturation_streak_warn: 3
+            min_effective_ratio: 0.30
+            min_effective_points: 80
+            max_mean_residual: 0.05
+            critical_effective_ratio: 0.15
+            critical_mean_residual: 0.08
+            max_update_translation: 0.15
+            max_update_rotation_deg: 2.0
+            max_update_velocity: 1.0
+            degraded_enter_frames: 3
+            recover_enter_frames: 10
+            recover_normal_frames: 10
+
         publish:
             path_en:  false
             scan_publish_en:  true       # false: close all the point cloud output

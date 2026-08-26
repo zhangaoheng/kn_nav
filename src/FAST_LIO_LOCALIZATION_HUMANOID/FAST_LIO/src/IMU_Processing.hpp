@@ -57,6 +57,17 @@ class ImuProcess
   void set_acc_cov(const V3D &scaler);
   void set_gyr_bias_cov(const V3D &b_g);
   void set_acc_bias_cov(const V3D &b_a);
+  void set_saturation_protection(double accel_threshold,
+                                 double noise_scale);
+  size_t last_scan_saturated_samples() const { return last_scan_saturated_samples_; }
+  size_t last_scan_imu_samples() const { return last_scan_imu_samples_; }
+  size_t last_scan_saturation_streak() const { return last_scan_saturation_streak_; }
+  double last_scan_saturation_ratio() const
+  {
+    return last_scan_imu_samples_ > 0
+      ? static_cast<double>(last_scan_saturated_samples_) / last_scan_imu_samples_
+      : 0.0;
+  }
   Eigen::Matrix<double, 12, 12> Q;
   void Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI::Ptr pcl_un_);
 
@@ -90,6 +101,11 @@ class ImuProcess
   int    init_iter_num = 1;
   bool   b_first_frame_ = true;
   bool   imu_need_init_ = true;
+  double accel_saturation_threshold_ = 3.9;
+  double saturation_noise_scale_ = 100.0;
+  size_t last_scan_saturated_samples_ = 0;
+  size_t last_scan_imu_samples_ = 0;
+  size_t last_scan_saturation_streak_ = 0;
 };
 
 ImuProcess::ImuProcess()
@@ -162,6 +178,13 @@ void ImuProcess::set_gyr_bias_cov(const V3D &b_g)
 void ImuProcess::set_acc_bias_cov(const V3D &b_a)
 {
   cov_bias_acc = b_a;
+}
+
+void ImuProcess::set_saturation_protection(double accel_threshold,
+                                           double noise_scale)
+{
+  accel_saturation_threshold_ = std::max(0.0, accel_threshold);
+  saturation_noise_scale_ = std::max(1.0, noise_scale);
 }
 
 // IMU 初始化：统计多帧 IMU 测量的均值与协方差，估计重力方向与陀螺零偏，
@@ -288,7 +311,26 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
     in.acc = acc_avr;
     in.gyro = angvel_avr;
     Q.block<3, 3>(0, 0).diagonal() = cov_gyr;
-    Q.block<3, 3>(3, 3).diagonal() = cov_acc;
+    V3D dynamic_cov_acc = cov_acc;
+    const double saturation_threshold_raw = accel_saturation_threshold_ *
+      std::max(1e-6, mean_acc.norm());
+    const double head_acc[3] = {
+      head->linear_acceleration.x,
+      head->linear_acceleration.y,
+      head->linear_acceleration.z};
+    const double tail_acc[3] = {
+      tail->linear_acceleration.x,
+      tail->linear_acceleration.y,
+      tail->linear_acceleration.z};
+    for (int axis = 0; axis < 3; ++axis)
+    {
+      if (std::abs(head_acc[axis]) >= saturation_threshold_raw ||
+          std::abs(tail_acc[axis]) >= saturation_threshold_raw)
+      {
+        dynamic_cov_acc[axis] *= saturation_noise_scale_;
+      }
+    }
+    Q.block<3, 3>(3, 3).diagonal() = dynamic_cov_acc;
     Q.block<3, 3>(6, 6).diagonal() = cov_bias_gyr;
     Q.block<3, 3>(9, 9).diagonal() = cov_bias_acc;
     kf_state.predict(dt, Q, in);
@@ -361,6 +403,32 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
 
   if(meas.imu.empty()) {return;};
   assert(meas.lidar != nullptr);
+
+  last_scan_imu_samples_ = meas.imu.size();
+  last_scan_saturated_samples_ = 0;
+  last_scan_saturation_streak_ = 0;
+  size_t saturation_streak = 0;
+  const double saturation_threshold_raw = accel_saturation_threshold_ *
+    std::max(1e-6, mean_acc.norm());
+  for (const auto &imu : meas.imu)
+  {
+    const auto &acc = imu->linear_acceleration;
+    const bool saturated =
+      std::abs(acc.x) >= saturation_threshold_raw ||
+      std::abs(acc.y) >= saturation_threshold_raw ||
+      std::abs(acc.z) >= saturation_threshold_raw;
+    if (saturated)
+    {
+      ++last_scan_saturated_samples_;
+      ++saturation_streak;
+      last_scan_saturation_streak_ =
+        std::max(last_scan_saturation_streak_, saturation_streak);
+    }
+    else
+    {
+      saturation_streak = 0;
+    }
+  }
 
   if (imu_need_init_)
   {
