@@ -59,6 +59,7 @@ class ImuProcess
   void set_acc_bias_cov(const V3D &b_a);
   void set_saturation_protection(double accel_threshold,
                                  double noise_scale);
+  void set_timing_protection(double max_imu_dt, double gap_noise_scale);
   size_t last_scan_saturated_samples() const { return last_scan_saturated_samples_; }
   size_t last_scan_imu_samples() const { return last_scan_imu_samples_; }
   size_t last_scan_saturation_streak() const { return last_scan_saturation_streak_; }
@@ -68,6 +69,8 @@ class ImuProcess
       ? static_cast<double>(last_scan_saturated_samples_) / last_scan_imu_samples_
       : 0.0;
   }
+  size_t last_scan_time_gap_count() const { return last_scan_time_gap_count_; }
+  double last_scan_max_imu_dt() const { return last_scan_max_imu_dt_; }
   Eigen::Matrix<double, 12, 12> Q;
   void Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI::Ptr pcl_un_);
 
@@ -103,9 +106,15 @@ class ImuProcess
   bool   imu_need_init_ = true;
   double accel_saturation_threshold_ = 3.9;
   double saturation_noise_scale_ = 100.0;
+  double max_imu_dt_ = 0.02;
+  double gap_noise_scale_ = 100.0;
   size_t last_scan_saturated_samples_ = 0;
   size_t last_scan_imu_samples_ = 0;
   size_t last_scan_saturation_streak_ = 0;
+  size_t last_scan_time_gap_count_ = 0;
+  double last_scan_max_imu_dt_ = 0.0;
+  V3D last_valid_acc_raw_ = V3D(0.0, 0.0, -1.0);
+  bool last_valid_acc_axis_[3] = {false, false, false};
 };
 
 ImuProcess::ImuProcess()
@@ -123,6 +132,8 @@ ImuProcess::ImuProcess()
   Lidar_T_wrt_IMU = Zero3d;
   Lidar_R_wrt_IMU = Eye3d;
   last_imu_.reset(new sensor_msgs::msg::Imu());
+  std::fill(std::begin(last_valid_acc_axis_),
+            std::end(last_valid_acc_axis_), false);
 }
 
 ImuProcess::~ImuProcess() {}
@@ -187,6 +198,13 @@ void ImuProcess::set_saturation_protection(double accel_threshold,
   saturation_noise_scale_ = std::max(1.0, noise_scale);
 }
 
+void ImuProcess::set_timing_protection(double max_imu_dt,
+                                       double gap_noise_scale)
+{
+  max_imu_dt_ = std::max(1e-3, max_imu_dt);
+  gap_noise_scale_ = std::max(1.0, gap_noise_scale);
+}
+
 // IMU 初始化：统计多帧 IMU 测量的均值与协方差，估计重力方向与陀螺零偏，
 // 设置初始状态与协方差矩阵；需累计 MAX_INI_COUNT 帧后完成初始化。
 void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, int &N)
@@ -243,6 +261,9 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
   init_P(21,21) = init_P(22,22) = 0.00001; 
   kf_state.change_P(init_P);
   last_imu_ = meas.imu.back();
+  last_valid_acc_raw_ = mean_acc;
+  std::fill(std::begin(last_valid_acc_axis_),
+            std::end(last_valid_acc_axis_), true);
 
 }
 
@@ -277,6 +298,36 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   double dt = 0;
 
   input_ikfom in;
+  auto predict_interval = [&](double interval)
+  {
+    if (!std::isfinite(interval) || interval == 0.0)
+    {
+      if (!std::isfinite(interval))
+        ++last_scan_time_gap_count_;
+      return;
+    }
+
+    const double interval_abs = std::abs(interval);
+    last_scan_max_imu_dt_ = std::max(last_scan_max_imu_dt_, interval_abs);
+    const bool time_gap = interval_abs > max_imu_dt_;
+    if (time_gap)
+      ++last_scan_time_gap_count_;
+
+    Eigen::Matrix<double, 12, 12> predict_Q = Q;
+    if (time_gap)
+    {
+      predict_Q.block<3, 3>(0, 0) *= gap_noise_scale_;
+      predict_Q.block<3, 3>(3, 3) *= gap_noise_scale_;
+    }
+
+    const int step_count = time_gap
+      ? std::max(1, static_cast<int>(std::ceil(interval_abs / max_imu_dt_)))
+      : 1;
+    double step_dt = interval / static_cast<double>(step_count);
+    for (int step = 0; step < step_count; ++step)
+      kf_state.predict(step_dt, predict_Q, in);
+  };
+
   for (auto it_imu = v_imu.begin(); it_imu < (v_imu.end() - 1); it_imu++)
   {
     auto &&head = *(it_imu);
@@ -293,6 +344,33 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
     acc_avr   <<0.5 * (head->linear_acceleration.x + tail->linear_acceleration.x),
                 0.5 * (head->linear_acceleration.y + tail->linear_acceleration.y),
                 0.5 * (head->linear_acceleration.z + tail->linear_acceleration.z);
+
+    // 量程触顶的轴已经丢失真实幅值，继续把约 4 g 的截断值积分进状态会
+    // 直接制造速度误差。仅对触顶轴保持最近一个未触顶值，其他轴、时间戳
+    // 和样本数量保持不变；过程噪声仍在下方放大。
+    const double saturation_threshold_raw = accel_saturation_threshold_ *
+      std::max(1e-6, mean_acc.norm());
+    const double head_acc[3] = {
+      head->linear_acceleration.x,
+      head->linear_acceleration.y,
+      head->linear_acceleration.z};
+    const double tail_acc[3] = {
+      tail->linear_acceleration.x,
+      tail->linear_acceleration.y,
+      tail->linear_acceleration.z};
+    for (int axis = 0; axis < 3; ++axis)
+    {
+      const bool saturated =
+        std::abs(head_acc[axis]) >= saturation_threshold_raw ||
+        std::abs(tail_acc[axis]) >= saturation_threshold_raw;
+      if (saturated && last_valid_acc_axis_[axis])
+        acc_avr[axis] = last_valid_acc_raw_[axis];
+      else if (!saturated)
+      {
+        last_valid_acc_raw_[axis] = acc_avr[axis];
+        last_valid_acc_axis_[axis] = true;
+      }
+    }
 
     // fout_imu << setw(10) << head->header.stamp.toSec() - first_lidar_time << " " << angvel_avr.transpose() << " " << acc_avr.transpose() << endl;
 
@@ -312,16 +390,6 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
     in.gyro = angvel_avr;
     Q.block<3, 3>(0, 0).diagonal() = cov_gyr;
     V3D dynamic_cov_acc = cov_acc;
-    const double saturation_threshold_raw = accel_saturation_threshold_ *
-      std::max(1e-6, mean_acc.norm());
-    const double head_acc[3] = {
-      head->linear_acceleration.x,
-      head->linear_acceleration.y,
-      head->linear_acceleration.z};
-    const double tail_acc[3] = {
-      tail->linear_acceleration.x,
-      tail->linear_acceleration.y,
-      tail->linear_acceleration.z};
     for (int axis = 0; axis < 3; ++axis)
     {
       if (std::abs(head_acc[axis]) >= saturation_threshold_raw ||
@@ -333,7 +401,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
     Q.block<3, 3>(3, 3).diagonal() = dynamic_cov_acc;
     Q.block<3, 3>(6, 6).diagonal() = cov_bias_gyr;
     Q.block<3, 3>(9, 9).diagonal() = cov_bias_acc;
-    kf_state.predict(dt, Q, in);
+    predict_interval(dt);
 
     /* save the poses at each IMU measurements */
     imu_state = kf_state.get_x();
@@ -350,7 +418,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   /*** calculated the pos and attitude prediction at the frame-end ***/
   double note = pcl_end_time > imu_end_time ? 1.0 : -1.0;
   dt = note * (pcl_end_time - imu_end_time);
-  kf_state.predict(dt, Q, in);
+  predict_interval(dt);
   
   imu_state = kf_state.get_x();
   last_imu_ = meas.imu.back();
@@ -407,6 +475,8 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
   last_scan_imu_samples_ = meas.imu.size();
   last_scan_saturated_samples_ = 0;
   last_scan_saturation_streak_ = 0;
+  last_scan_time_gap_count_ = 0;
+  last_scan_max_imu_dt_ = 0.0;
   size_t saturation_streak = 0;
   const double saturation_threshold_raw = accel_saturation_threshold_ *
     std::max(1e-6, mean_acc.norm());

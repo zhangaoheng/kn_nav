@@ -28,6 +28,7 @@ OPEN3D_LOC = (
     ROOT.parent / 'FAST_LIO_LOCALIZATION_HUMANOID' / 'open3d_loc'
 )
 PCT_PLANNER = ROOT.parent / 'PCT_planner'
+FAST_LIO = ROOT.parent / 'FAST_LIO_LOCALIZATION_HUMANOID' / 'FAST_LIO'
 
 
 # 读取某机型目录下的 YAML 配置。
@@ -364,6 +365,37 @@ def test_soft_reset_clears_coordinator_route_and_is_idempotent():
     assert 'self._call_service(self.coordinator_reset_cli, req)' in manager
     assert 'const bool was_active = have_target_ || !active_waypoints_.empty();' in fsm
     assert 'if (was_active && have_odom_)' in fsm
+
+
+# 约束 FAST-LIO 退化保护：手动遥控持续运动时软退化激光仍可约束状态，
+# 但不能写入地图；临界退化回到有界 IMU 预测，不冻结在旧位姿。
+def test_fastlio_degraded_state_preserves_bounded_motion_without_map_pollution():
+    mapping = (FAST_LIO / 'src/laserMapping.cpp').read_text()
+    imu = (FAST_LIO / 'src/IMU_Processing.hpp').read_text()
+    manager = (ROOT / 'scripts/nav_manager_node.py').read_text()
+
+    assert 'last_good_state_' in mapping
+    assert 'LocalizationHealth::LOST' in mapping
+    assert '"/fastlio/localization_valid"' in mapping
+    assert 'zero_effective_lost_frames_' in mapping
+    assert 'bounded_prediction' in mapping
+    assert 'max_propagation_translation_' in mapping
+    assert 'accept_lidar_update =\n                !scan_critical' in mapping
+    assert 'accept_lidar_update && !scan_bad' in mapping
+    assert 'predict_interval(dt)' in imu
+    assert 'last_scan_time_gap_count_' in imu
+    assert 'last_valid_acc_raw_' in imu
+    assert 'self._fastlio_valid_cb' not in manager
+    assert "self._soft_reset(reason='fastlio_invalid')" not in manager
+
+    for profile in ('A2', 'B2'):
+        nodes = load(profile, 'navigation.yaml')['nodes']
+        robust = nodes['fastlio_mapping']['robustness']
+        assert robust['max_degraded_duration'] > 1.0
+        assert robust['zero_effective_lost_frames'] > 0
+        assert robust['max_imu_dt'] == 0.02
+        assert robust['max_propagation_translation'] == 0.20
+        assert robust['max_propagation_velocity'] == 2.0
 
 
 # 约束纯全局跟踪测试链路（coordinator 可执行 + pure_pursuit 启动）保留。

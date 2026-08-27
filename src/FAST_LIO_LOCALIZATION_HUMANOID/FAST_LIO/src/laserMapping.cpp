@@ -67,6 +67,7 @@
 #include <pcl/io/pcd_io.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -1023,25 +1024,31 @@ void save_to_pcd()
 }
 
 template <typename T>
-void set_posestamp(T &out)
+void set_posestamp(T &out, const state_ikfom &state)
 {
-    out.pose.position.x = state_point.pos(0);
-    out.pose.position.y = state_point.pos(1);
-    out.pose.position.z = state_point.pos(2);
-    out.pose.orientation.x = geoQuat.x;
-    out.pose.orientation.y = geoQuat.y;
-    out.pose.orientation.z = geoQuat.z;
-    out.pose.orientation.w = geoQuat.w;
+    out.pose.position.x = state.pos(0);
+    out.pose.position.y = state.pos(1);
+    out.pose.position.z = state.pos(2);
+    out.pose.orientation.x = state.rot.coeffs()[0];
+    out.pose.orientation.y = state.rot.coeffs()[1];
+    out.pose.orientation.z = state.rot.coeffs()[2];
+    out.pose.orientation.w = state.rot.coeffs()[3];
 }
 
 // 发布里程计消息（位姿 + 协方差），并可选广播 odom -> imu_link 的 TF 变换。
-void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped, std::unique_ptr<tf2_ros::TransformBroadcaster> &tf_br)
+void publish_odometry(
+    const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped,
+    std::unique_ptr<tf2_ros::TransformBroadcaster> &tf_br,
+    const state_ikfom &published_state,
+    bool localization_valid)
 {
     odomAftMapped.header.frame_id = "odom";
     odomAftMapped.child_frame_id = "imu_link";
     odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
-    set_posestamp(odomAftMapped.pose);
-    pubOdomAftMapped->publish(odomAftMapped);
+    set_posestamp(odomAftMapped.pose, published_state);
+    odomAftMapped.twist.twist.linear.x = published_state.vel.x();
+    odomAftMapped.twist.twist.linear.y = published_state.vel.y();
+    odomAftMapped.twist.twist.linear.z = published_state.vel.z();
     auto P = kf.get_P();
     for (int i = 0; i < 6; i++)
     {
@@ -1053,6 +1060,12 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
         odomAftMapped.pose.covariance[i * 6 + 4] = P(k, 1);
         odomAftMapped.pose.covariance[i * 6 + 5] = P(k, 2);
     }
+    if (!localization_valid)
+    {
+        for (int i = 0; i < 6; ++i)
+            odomAftMapped.pose.covariance[i * 6 + i] = 1e6;
+    }
+    pubOdomAftMapped->publish(odomAftMapped);
 
     geometry_msgs::msg::TransformStamped trans;
     trans.header.frame_id = "odom";
@@ -1074,7 +1087,7 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
 // 发布运动轨迹路径，每 10 帧添加一个位姿点，避免路径过长导致 RViz 卡顿。
 void publish_path(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath)
 {
-    set_posestamp(msg_body_pose);
+    set_posestamp(msg_body_pose, state_point);
     msg_body_pose.header.stamp = get_ros_time(lidar_end_time); // ros::Time().fromSec(lidar_end_time);
     msg_body_pose.header.frame_id = "odom";
 
@@ -1278,6 +1291,12 @@ public:
         this->declare_parameter<int>("robustness.degraded_enter_frames", 3);
         this->declare_parameter<int>("robustness.recover_enter_frames", 10);
         this->declare_parameter<int>("robustness.recover_normal_frames", 10);
+        this->declare_parameter<double>("robustness.max_degraded_duration", 1.5);
+        this->declare_parameter<int>("robustness.zero_effective_lost_frames", 5);
+        this->declare_parameter<double>("robustness.max_imu_dt", 0.02);
+        this->declare_parameter<double>("robustness.imu_gap_noise_scale", 100.0);
+        this->declare_parameter<double>("robustness.max_propagation_translation", 0.20);
+        this->declare_parameter<double>("robustness.max_propagation_velocity", 2.0);
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
 
@@ -1338,6 +1357,12 @@ public:
         this->get_parameter_or<int>("robustness.degraded_enter_frames", degraded_enter_frames_, 3);
         this->get_parameter_or<int>("robustness.recover_enter_frames", recover_enter_frames_, 10);
         this->get_parameter_or<int>("robustness.recover_normal_frames", recover_normal_frames_, 10);
+        this->get_parameter_or<double>("robustness.max_degraded_duration", max_degraded_duration_, 1.5);
+        this->get_parameter_or<int>("robustness.zero_effective_lost_frames", zero_effective_lost_frames_, 5);
+        this->get_parameter_or<double>("robustness.max_imu_dt", max_imu_dt_, 0.02);
+        this->get_parameter_or<double>("robustness.imu_gap_noise_scale", imu_gap_noise_scale_, 100.0);
+        this->get_parameter_or<double>("robustness.max_propagation_translation", max_propagation_translation_, 0.20);
+        this->get_parameter_or<double>("robustness.max_propagation_velocity", max_propagation_velocity_, 2.0);
         double diagnostics_report_period_s = 1.0;
         this->get_parameter_or<double>("diagnostics.report_period_s", diagnostics_report_period_s, 1.0);
         diagnostics_report_period_s = std::max(0.2, diagnostics_report_period_s);
@@ -1377,6 +1402,8 @@ public:
         p_imu->set_saturation_protection(
             imu_accel_saturation_threshold_,
             robustness_enable_ ? imu_saturation_noise_scale_ : 1.0);
+        p_imu->set_timing_protection(
+            max_imu_dt_, robustness_enable_ ? imu_gap_noise_scale_ : 1.0);
 
         RCLCPP_INFO(
             this->get_logger(),
@@ -1420,6 +1447,11 @@ public:
         pubLaserCloudMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/Laser_map_1", 20);
         pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry_loc", 20);
         pubPath_ = this->create_publisher<nav_msgs::msg::Path>("/path_1", 20);
+        auto validity_qos = rclcpp::QoS(rclcpp::KeepLast(1));
+        validity_qos.reliable().transient_local();
+        pubLocalizationValid_ = this->create_publisher<std_msgs::msg::Bool>(
+            "/fastlio/localization_valid", validity_qos);
+        publish_localization_valid(false);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
         //------------------------------------------------------------------------------------------------------
@@ -1460,7 +1492,8 @@ private:
     {
         NORMAL,
         DEGRADED,
-        RECOVERING
+        RECOVERING,
+        LOST
     };
 
     const char *health_name(LocalizationHealth health) const
@@ -1473,8 +1506,22 @@ private:
             return "DEGRADED";
         case LocalizationHealth::RECOVERING:
             return "RECOVERING";
+        case LocalizationHealth::LOST:
+            return "LOST";
         }
         return "UNKNOWN";
+    }
+
+    void publish_localization_valid(bool valid)
+    {
+        if (!pubLocalizationValid_ ||
+            (localization_valid_published_ && last_localization_valid_ == valid))
+            return;
+        std_msgs::msg::Bool msg;
+        msg.data = valid;
+        pubLocalizationValid_->publish(msg);
+        last_localization_valid_ = valid;
+        localization_valid_published_ = true;
     }
 
     void set_health(LocalizationHealth next, const char *reason)
@@ -1483,24 +1530,47 @@ private:
             return;
         const auto previous = localization_health_;
         localization_health_ = next;
+        if (next == LocalizationHealth::DEGRADED)
+            degraded_start_time_ = lidar_end_time;
+        else if (next == LocalizationHealth::NORMAL)
+            degraded_start_time_ = -1.0;
+        publish_localization_valid(next == LocalizationHealth::NORMAL &&
+                                   last_good_valid_);
         RCLCPP_WARN(
             get_logger(), "[FASTLIO_HEALTH] %s -> %s reason=%s",
             health_name(previous), health_name(next), reason);
     }
 
-    void update_health(bool scan_bad, bool scan_critical, bool imu_stressed)
+    void update_health(bool scan_bad, bool scan_critical, bool imu_stressed,
+                       bool no_effective_points)
     {
         if (!robustness_enable_)
             return;
 
+        if (localization_health_ == LocalizationHealth::DEGRADED &&
+            degraded_start_time_ >= 0.0 &&
+            lidar_end_time - degraded_start_time_ >= max_degraded_duration_)
+        {
+            set_health(LocalizationHealth::LOST, "degraded_timeout");
+            return;
+        }
+
         if (scan_bad)
         {
             healthy_scan_count_ = 0;
-            bad_scan_count_ += scan_critical
-                ? degraded_enter_frames_
-                : (imu_stressed ? 2 : 1);
+            ++bad_scan_count_;
+            zero_effective_count_ = no_effective_points
+                ? zero_effective_count_ + 1 : 0;
+            if (zero_effective_count_ >= zero_effective_lost_frames_)
+            {
+                set_health(LocalizationHealth::LOST, "no_effective_points");
+                return;
+            }
             if (localization_health_ == LocalizationHealth::RECOVERING ||
-                bad_scan_count_ >= degraded_enter_frames_)
+                scan_critical ||
+                bad_scan_count_ >= (imu_stressed
+                    ? std::max(1, degraded_enter_frames_ - 1)
+                    : degraded_enter_frames_))
             {
                 set_health(LocalizationHealth::DEGRADED,
                            scan_critical ? "critical_scan" : "scan_quality");
@@ -1509,11 +1579,13 @@ private:
         }
 
         bad_scan_count_ = 0;
+        zero_effective_count_ = 0;
         if (localization_health_ == LocalizationHealth::NORMAL)
             return;
 
         ++healthy_scan_count_;
-        if (localization_health_ == LocalizationHealth::DEGRADED &&
+        if ((localization_health_ == LocalizationHealth::DEGRADED ||
+             localization_health_ == LocalizationHealth::LOST) &&
             healthy_scan_count_ >= recover_enter_frames_)
         {
             healthy_scan_count_ = 0;
@@ -1553,6 +1625,7 @@ private:
             svd_time = 0;
             t0 = omp_get_wtime();
 
+            const state_ikfom propagation_base_state = kf.get_x();
             p_imu->Process(Measures, kf, feats_undistort);
             state_point = kf.get_x();
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
@@ -1658,33 +1731,76 @@ private:
                 (!finite_update ||
                  effective_ratio < critical_effective_ratio_ ||
                  res_mean_last > critical_mean_residual_);
+            const bool correction_critical = robustness_enable_ && flg_EKF_inited &&
+                (update_translation > max_update_translation_ ||
+                 update_rotation_deg > max_update_rotation_deg_ ||
+                 update_velocity > max_update_velocity_);
             const bool imu_stressed =
                 p_imu->last_scan_saturation_ratio() >=
                     imu_saturation_ratio_warn_ ||
                 static_cast<int>(p_imu->last_scan_saturation_streak()) >=
-                    imu_saturation_streak_warn_;
+                    imu_saturation_streak_warn_ ||
+                p_imu->last_scan_time_gap_count() > 0;
             if (p_imu->last_scan_saturated_samples() > 0)
                 ++saturated_scan_count_window_;
 
-            update_health(scan_bad, scan_critical, imu_stressed);
-            const bool accept_lidar_update = !scan_bad;
+            update_health(scan_bad, scan_critical, imu_stressed,
+                          effct_feat_num == 0);
+            // 软退化只冻结地图，仍接受幅度合理的激光校正来约束持续运动；
+            // 只有匹配临界退化或校正量异常时才拒绝本次激光更新。
+            const bool accept_lidar_update =
+                !scan_critical && !correction_critical;
             if (!accept_lidar_update)
             {
-                kf.change_x(predicted_state);
+                state_ikfom bounded_prediction = predicted_state;
+                if (!bounded_prediction.pos.allFinite() ||
+                    !bounded_prediction.vel.allFinite())
+                    bounded_prediction = propagation_base_state;
+                if (robustness_enable_ && flg_EKF_inited && last_good_valid_)
+                {
+                    V3D propagation_delta =
+                        bounded_prediction.pos - propagation_base_state.pos;
+                    const double propagation_distance = propagation_delta.norm();
+                    if (propagation_distance > max_propagation_translation_)
+                    {
+                        bounded_prediction.pos = propagation_base_state.pos +
+                            propagation_delta *
+                            (max_propagation_translation_ / propagation_distance);
+                    }
+                    const double velocity_norm = bounded_prediction.vel.norm();
+                    if (velocity_norm > max_propagation_velocity_)
+                        bounded_prediction.vel *=
+                            max_propagation_velocity_ / velocity_norm;
+                }
+                kf.change_x(bounded_prediction);
                 kf.change_P(predicted_covariance);
                 ++rejected_update_count_window_;
                 RCLCPP_WARN_THROTTLE(
                     get_logger(), *get_clock(), 1000,
                     "[FASTLIO_HEALTH] reject lidar update: health=%s "
                     "effective=%d/%d ratio=%.3f residual=%.4f "
-                    "dpos=%.3f drot=%.2fdeg dvel=%.3f imu_sat=%.1f%% streak=%zu",
+                    "dpos=%.3f drot=%.2fdeg dvel=%.3f imu_sat=%.1f%% "
+                    "streak=%zu imu_gap=%zu max_dt=%.1fms "
+                    "bounded_step=%.3f bounded_vel=%.3f",
                     health_name(localization_health_), effct_feat_num,
                     feats_down_size, effective_ratio, res_mean_last,
                     update_translation, update_rotation_deg, update_velocity,
                     100.0 * p_imu->last_scan_saturation_ratio(),
-                    p_imu->last_scan_saturation_streak());
+                    p_imu->last_scan_saturation_streak(),
+                    p_imu->last_scan_time_gap_count(),
+                    1000.0 * p_imu->last_scan_max_imu_dt(),
+                    (bounded_prediction.pos - propagation_base_state.pos).norm(),
+                    bounded_prediction.vel.norm());
             }
             state_point = kf.get_x();
+            if (flg_EKF_inited && accept_lidar_update && !scan_bad &&
+                localization_health_ == LocalizationHealth::NORMAL)
+            {
+                last_good_state_ = state_point;
+                last_good_covariance_ = kf.get_P();
+                last_good_valid_ = true;
+                publish_localization_valid(true);
+            }
             input_diagnostics.observeEstimator(
                 predicted_state, candidate_state, state_point,
                 static_cast<size_t>(std::max(0, feats_down_size)),
@@ -1700,11 +1816,15 @@ private:
             double t_update_end = omp_get_wtime();
 
             /******* Publish odometry *******/
-            publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+            const bool localization_valid =
+                localization_health_ == LocalizationHealth::NORMAL &&
+                last_good_valid_;
+            publish_odometry(pubOdomAftMapped_, tf_broadcaster_,
+                             state_point, localization_valid);
 
             /*** add the feature points to map kdtree ***/
             t3 = omp_get_wtime();
-            const bool allow_map_increment = accept_lidar_update &&
+            const bool allow_map_increment = accept_lidar_update && !scan_bad &&
                 (!robustness_enable_ ||
                  localization_health_ == LocalizationHealth::NORMAL);
             if (allow_map_increment)
@@ -1934,9 +2054,11 @@ private:
         RCLCPP_INFO(
             get_logger(),
             "[FASTLIO_HEALTH_DIAG] state=%s bad_streak=%d healthy_streak=%d "
+            "zero_effective_streak=%d valid=%d last_good=%d "
             "saturated_scans=%lu rejected_updates=%lu skipped_map_updates=%lu",
             health_name(localization_health_), bad_scan_count_,
-            healthy_scan_count_,
+            healthy_scan_count_, zero_effective_count_,
+            last_localization_valid_ ? 1 : 0, last_good_valid_ ? 1 : 0,
             static_cast<unsigned long>(saturated_scan_count_window_),
             static_cast<unsigned long>(rejected_update_count_window_),
             static_cast<unsigned long>(skipped_map_count_window_));
@@ -1971,6 +2093,7 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudMap_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pubLocalizationValid_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_pcl_livox_;
@@ -1999,9 +2122,24 @@ private:
     int degraded_enter_frames_ = 3;
     int recover_enter_frames_ = 10;
     int recover_normal_frames_ = 10;
+    double max_degraded_duration_ = 1.5;
+    int zero_effective_lost_frames_ = 5;
+    double max_imu_dt_ = 0.02;
+    double imu_gap_noise_scale_ = 100.0;
+    double max_propagation_translation_ = 0.20;
+    double max_propagation_velocity_ = 2.0;
     LocalizationHealth localization_health_ = LocalizationHealth::NORMAL;
     int bad_scan_count_ = 0;
     int healthy_scan_count_ = 0;
+    int zero_effective_count_ = 0;
+    double degraded_start_time_ = -1.0;
+    using StateCovariance =
+        esekfom::esekf<state_ikfom, 12, input_ikfom>::cov;
+    state_ikfom last_good_state_;
+    StateCovariance last_good_covariance_ = StateCovariance::Identity();
+    bool last_good_valid_ = false;
+    bool localization_valid_published_ = false;
+    bool last_localization_valid_ = false;
     uint64_t saturated_scan_count_window_ = 0;
     uint64_t rejected_update_count_window_ = 0;
     uint64_t skipped_map_count_window_ = 0;

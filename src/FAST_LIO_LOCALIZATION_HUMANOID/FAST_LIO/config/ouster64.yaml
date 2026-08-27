@@ -52,6 +52,12 @@
             degraded_enter_frames: 3
             recover_enter_frames: 10
             recover_normal_frames: 10
+            max_degraded_duration: 1.5
+            zero_effective_lost_frames: 5
+            max_imu_dt: 0.02
+            imu_gap_noise_scale: 100.0
+            max_propagation_translation: 0.20
+            max_propagation_velocity: 2.0
 
         publish:
             path_en:  false
