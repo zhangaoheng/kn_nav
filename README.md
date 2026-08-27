@@ -109,6 +109,14 @@ ros2 service call /pct_scan_navigation/cancel std_srvs/srv/Trigger '{}'
 
 ### 2026-08-27
 
+#### FAST-LIO 失锁隔离、局部地图重建与 Open3D 恢复第三版
+
+- 问题：最新遥控上下楼实验中，RViz 里 FAST-LIO 局部地图没有像旧版那样瞬间炸掉，但全局定位持续飘移。
+- 分析：FAST-LIO 在 `1787799766` 由 `NORMAL` 进入退化，有效匹配点由约 `170` 降到 `82/4/0`，`1787799771` 进入 `LOST`。之后激光更新持续被拒绝，但原实现仍以 `0.20 m/frame`、`2.0 m/s` 上限积分 IMU 预测，最终 `/Odometry_loc` 走到约 `(201,100,40)`。Open3D fitness 同期由 `0.98` 降至 `0.74/0.37/0.14/0`，低质量 ICP 均被门限拒绝，说明全局飘移主要是无效 FAST-LIO odom 继续通过坐标链传播，不是 Open3D 误接受大幅校正。IMU 约 `200 Hz`、LiDAR 约 `10 Hz`且 header 无 gap，本次不支持数据阻塞为主因。
+- 修改：修正健康状态机，`LOST` 收到坏扫描时保持 `LOST`，禁止再出现 `LOST -> DEGRADED reason=scan_quality/critical_scan`；`RECOVERING` 中再出现坏扫描则回到 `LOST`。新增受控局部重建：连续 `LOST` 默认 `20` 帧后，停止 ikd-Tree 后台重建线程，保留当前有界 IMU 预测位姿以维持遥控运动时的 odom 连续性，用当前雷达帧安全重建局部 ikd-Tree，速度清零并进入 `RECOVERING`；连续健康帧达标后才恢复 `NORMAL`，重试冷却时间默认 `5 s`。Open3D 新增 transient-local/reliable `/fastlio/localization_valid` 订阅；无效时清空待配准扫描、忽略 `/Odometry_loc`、暂停 ICP/子地图更新/动态 TF 和 `/Odometry_open3d` 输出，并发布 `TRACKING_LOST: fastlio_invalid`；FAST-LIO 恢复有效后重新积累扫描，且只有首次高置信 ICP 接受并重新确立 `map→odom` 后才恢复 TF 和 `/Odometry_open3d`。不发送停车命令，不影响遥控运动。A2、B2、local、Go2、Go2-W 和 FAST-LIO 自带的全部相关 YAML 已同步 `lost_reinit_enable/frames/cooldown`。
+- 验证：`fast_lio` 与 `open3d_loc` 在 `BUILD_TESTING=OFF` 下编译通过；首次默认编译仅因本机缺少 `ament_lint_auto` 测试依赖中断，不是代码错误。新增契约覆盖 LOST 单向转移、ikd-Tree 受控重建、Open3D 有效性门控和全部新参数，该专项测试通过；完整配置契约为 `14/16` 通过，仍有的 `2` 项失败是仓库现有配置与旧期望不一致（全局重定位开关、coordinator z offset/附加参数），本次未改动这些用户配置。12 份 FAST-LIO YAML 解析与 `git diff --check` 通过。
+- 遗留事项：需实机遥控再次复现，确认日志依次出现 `LOST -> RECOVERING reason=local_map_reinitialized`、`[FASTLIO_RECOVERY]` 和 `RECOVERING -> NORMAL`，且无效期间 `/Odometry_open3d` 停止刷新。若重建后仍立即回到 `LOST`，需根据新日志调整重建触发帧数、恢复健康帧数，或在重建前加入静态/低角速度条件。
+
 #### FAST-LIO 持续运动退化恢复与地图保护第二版
 
 - 问题：第一版能够拒绝坏激光更新并冻结增量地图，但回滚目标仍是本轮已经完成 IMU 预测的状态；进入 `DEGRADED` 后纯 IMU 状态继续传播，预测位姿离开局部 KD-tree，最终有效点归零、速度增长到数百米每秒且无法进入恢复状态。
