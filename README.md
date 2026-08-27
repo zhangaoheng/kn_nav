@@ -109,6 +109,15 @@ ros2 service call /pct_scan_navigation/cancel std_srvs/srv/Trigger '{}'
 
 ### 2026-08-27
 
+#### FAST-LIO 恢复迟滞与 Open3D 渐进全局恢复第五版
+
+- 问题：第四版实机下楼第一次失锁后成功完成 FAST-LIO 和 Open3D 全局恢复，但上楼阶段第二次恢复失败。直接原因之一是 `RECOVERING` 状态遇到任何软退化帧都会立即进入 `LOST`：日志中的 `171/293` 有效点、比例 `0.584`、残差 `0.0253`、位移修正 `0.047 m` 帧仅因旋转修正 `2.86 deg` 超过软门限 `2 deg` 就触发再次重建。另一个原因是 Open3D 全局 Top-4 粗筛可能全部被 stationary 种子族占用，relative 种子没有精配准机会；第二次恢复中最高 fitness `0.772108` 的接近结果也被完全丢弃，下一帧无法沿该结果继续逼近。
+- FAST-LIO 修改：新增恢复期迟滞参数 `recovery_bad_lost_frames=3` 和 `max_recovery_duration=5.0 s`。`RECOVERING` 中单帧软退化只清空健康连续计数、冻结地图并保持恢复状态；连续 `3` 帧软退化、有效比例/残差/有限性或更新修正达到临界门限，或者恢复持续超过 `5 s` 才重新进入 `LOST`。临界更新修正现在与临界点云质量合并传入健康状态机，确保超过 `0.35 m/5 deg/1.5 m/s` 的硬异常仍立即触发保护。新增 `[FASTLIO_HEALTH] keep RECOVERING on soft bad scan` 日志，记录软异常连续次数和恢复耗时。
+- Open3D 修改：恢复候选增加 `family` 标识，默认 `recovery_candidate_count=4` 时 relative 和 stationary 各保留 `2` 个最佳粗筛候选，禁止单一种子族占满全部精配准名额。新增 `recovery_provisional_fitness_threshold=0.65`：恢复候选 fitness 达到 `0.65`，且 RMSE 不超过 `0.15`、单次修正不超过 `2.0 m/15 deg` 时，只在内部更新 `mat_odom2map_` 和 relative 恢复种子，状态保持 `recovery_refining`、连续正式成功次数清零，TF 和 `/Odometry_open3d` 继续关闭；后续帧从该近似结果继续搜索。最终恢复规则不放宽，仍要求 fitness 超过地图配置正式门限（B2 为 `0.8`）并连续通过 `2` 次才恢复对外输出。stationary 锚点始终保留，防止 provisional 路径走偏后失去保守候选。
+- 配置：FAST-LIO 自带 Avia、Horizon、MID360、Ouster64、Velodyne，以及 A2、B2、local、Go2、Go2-W 的全部相关 YAML 已同步恢复坏帧数和恢复超时。Open3D 的 A2、B2、local、Go2、Go2-W 拆分配置、A2/B2 统一配置及两份 G1 旧式配置已同步 provisional fitness 门限。未修改 IMU 数据链路、正式全局定位门限、导航控制或人工遥控输入。
+- 验证：全部 `66` 份 YAML 解析和 `git diff --check` 通过；A2/B2 的统一配置与拆分 `fast_lio.yaml/open3d_loc.yaml` 完全一致。`fast_lio` 和 `open3d_loc` 在 `BUILD_TESTING=OFF` 下编译通过；Open3D 新代码无新增编译警告，FAST-LIO 仅保留依赖中的既存 Boost Bind 弃用提示。第五版专项契约测试 `1/1` 通过，完整契约为既有的 `14/16`，两项失败仍是全局重定位开关和 coordinator 参数的旧测试期望，与本版无关。
+- 实机测试重点：观察第四版中 `RECOVERING -> LOST reason=recovery_scan_bad` 是否消失，软异常应改为输出 `keep RECOVERING`，只有连续坏帧、临界异常或超时才失锁；确认每轮 `[OPEN3D_RECOVERY]` 同时出现 relative 和 stationary 候选。第二次全局恢复若先出现 `provisional ... output_enabled=0`，后续 fitness 应逐步提高并最终出现严格的 `streak=1/2`、`streak=2/2 output_enabled=1`。若 provisional 长期停留或走向错误楼层，下一轮根据候选轨迹收紧 `0.65` 门限或增加跨帧位姿连续性约束。
+
 #### FAST-LIO 与 Open3D 第四版实机上下楼验证
 
 - 结果：人工遥控完成一次上下楼测试。结合现场 RViz 观察和日志时间轴，下楼过程中曾出现第一次短暂失锁，但第四版成功恢复了 FAST-LIO 局部定位和 Open3D 全局定位，因此机器人能够完整到达下面台阶；随后上楼阶段发生第二次失锁，FAST-LIO 经过局部地图重建最终恢复并保持 `NORMAL`，但 Open3D 全局定位直到测试结束仍未恢复。本轮属于“第一次完整恢复成功、第二次只恢复局部定位”，不是下楼只成功一半。
