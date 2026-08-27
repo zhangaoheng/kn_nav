@@ -1281,17 +1281,20 @@ public:
         this->declare_parameter<double>("robustness.imu_saturation_ratio_warn", 0.05);
         this->declare_parameter<int>("robustness.imu_saturation_streak_warn", 3);
         this->declare_parameter<double>("robustness.min_effective_ratio", 0.30);
-        this->declare_parameter<int>("robustness.min_effective_points", 80);
+        this->declare_parameter<int>("robustness.min_effective_points", 50);
         this->declare_parameter<double>("robustness.max_mean_residual", 0.05);
         this->declare_parameter<double>("robustness.critical_effective_ratio", 0.15);
         this->declare_parameter<double>("robustness.critical_mean_residual", 0.08);
         this->declare_parameter<double>("robustness.max_update_translation", 0.15);
         this->declare_parameter<double>("robustness.max_update_rotation_deg", 2.0);
         this->declare_parameter<double>("robustness.max_update_velocity", 1.0);
+        this->declare_parameter<double>("robustness.critical_update_translation", 0.35);
+        this->declare_parameter<double>("robustness.critical_update_rotation_deg", 5.0);
+        this->declare_parameter<double>("robustness.critical_update_velocity", 1.5);
         this->declare_parameter<int>("robustness.degraded_enter_frames", 3);
         this->declare_parameter<int>("robustness.recover_enter_frames", 10);
         this->declare_parameter<int>("robustness.recover_normal_frames", 10);
-        this->declare_parameter<double>("robustness.max_degraded_duration", 1.5);
+        this->declare_parameter<double>("robustness.max_degraded_duration", 3.0);
         this->declare_parameter<int>("robustness.zero_effective_lost_frames", 5);
         this->declare_parameter<double>("robustness.max_imu_dt", 0.02);
         this->declare_parameter<double>("robustness.imu_gap_noise_scale", 100.0);
@@ -1300,6 +1303,7 @@ public:
         this->declare_parameter<bool>("robustness.lost_reinit_enable", true);
         this->declare_parameter<int>("robustness.lost_reinit_frames", 20);
         this->declare_parameter<double>("robustness.lost_reinit_cooldown", 5.0);
+        this->declare_parameter<int>("robustness.recovery_bootstrap_frames", 3);
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
 
@@ -1350,17 +1354,20 @@ public:
         this->get_parameter_or<double>("robustness.imu_saturation_ratio_warn", imu_saturation_ratio_warn_, 0.05);
         this->get_parameter_or<int>("robustness.imu_saturation_streak_warn", imu_saturation_streak_warn_, 3);
         this->get_parameter_or<double>("robustness.min_effective_ratio", min_effective_ratio_, 0.30);
-        this->get_parameter_or<int>("robustness.min_effective_points", min_effective_points_, 80);
+        this->get_parameter_or<int>("robustness.min_effective_points", min_effective_points_, 50);
         this->get_parameter_or<double>("robustness.max_mean_residual", max_mean_residual_, 0.05);
         this->get_parameter_or<double>("robustness.critical_effective_ratio", critical_effective_ratio_, 0.15);
         this->get_parameter_or<double>("robustness.critical_mean_residual", critical_mean_residual_, 0.08);
         this->get_parameter_or<double>("robustness.max_update_translation", max_update_translation_, 0.15);
         this->get_parameter_or<double>("robustness.max_update_rotation_deg", max_update_rotation_deg_, 2.0);
         this->get_parameter_or<double>("robustness.max_update_velocity", max_update_velocity_, 1.0);
+        this->get_parameter_or<double>("robustness.critical_update_translation", critical_update_translation_, 0.35);
+        this->get_parameter_or<double>("robustness.critical_update_rotation_deg", critical_update_rotation_deg_, 5.0);
+        this->get_parameter_or<double>("robustness.critical_update_velocity", critical_update_velocity_, 1.5);
         this->get_parameter_or<int>("robustness.degraded_enter_frames", degraded_enter_frames_, 3);
         this->get_parameter_or<int>("robustness.recover_enter_frames", recover_enter_frames_, 10);
         this->get_parameter_or<int>("robustness.recover_normal_frames", recover_normal_frames_, 10);
-        this->get_parameter_or<double>("robustness.max_degraded_duration", max_degraded_duration_, 1.5);
+        this->get_parameter_or<double>("robustness.max_degraded_duration", max_degraded_duration_, 3.0);
         this->get_parameter_or<int>("robustness.zero_effective_lost_frames", zero_effective_lost_frames_, 5);
         this->get_parameter_or<double>("robustness.max_imu_dt", max_imu_dt_, 0.02);
         this->get_parameter_or<double>("robustness.imu_gap_noise_scale", imu_gap_noise_scale_, 100.0);
@@ -1369,8 +1376,10 @@ public:
         this->get_parameter_or<bool>("robustness.lost_reinit_enable", lost_reinit_enable_, true);
         this->get_parameter_or<int>("robustness.lost_reinit_frames", lost_reinit_frames_, 20);
         this->get_parameter_or<double>("robustness.lost_reinit_cooldown", lost_reinit_cooldown_, 5.0);
+        this->get_parameter_or<int>("robustness.recovery_bootstrap_frames", recovery_bootstrap_frames_, 3);
         lost_reinit_frames_ = std::max(1, lost_reinit_frames_);
         lost_reinit_cooldown_ = std::max(0.0, lost_reinit_cooldown_);
+        recovery_bootstrap_frames_ = std::max(0, recovery_bootstrap_frames_);
         double diagnostics_report_period_s = 1.0;
         this->get_parameter_or<double>("diagnostics.report_period_s", diagnostics_report_period_s, 1.0);
         diagnostics_report_period_s = std::max(0.2, diagnostics_report_period_s);
@@ -1557,14 +1566,6 @@ private:
         if (!robustness_enable_)
             return;
 
-        if (localization_health_ == LocalizationHealth::DEGRADED &&
-            degraded_start_time_ >= 0.0 &&
-            lidar_end_time - degraded_start_time_ >= max_degraded_duration_)
-        {
-            set_health(LocalizationHealth::LOST, "degraded_timeout");
-            return;
-        }
-
         if (scan_bad)
         {
             healthy_scan_count_ = 0;
@@ -1594,6 +1595,15 @@ private:
             {
                 set_health(LocalizationHealth::DEGRADED,
                            scan_critical ? "critical_scan" : "scan_quality");
+            }
+            // Evaluate the current scan before applying the timeout.  A scan
+            // that has recovered must be allowed to clear degradation even
+            // when the previous bad interval was close to the time limit.
+            if (localization_health_ == LocalizationHealth::DEGRADED &&
+                degraded_start_time_ >= 0.0 &&
+                lidar_end_time - degraded_start_time_ >= max_degraded_duration_)
+            {
+                set_health(LocalizationHealth::LOST, "degraded_timeout");
             }
             return;
         }
@@ -1659,6 +1669,7 @@ private:
         healthy_scan_count_ = 0;
         zero_effective_count_ = 0;
         lost_scan_count_ = 0;
+        recovery_bootstrap_remaining_ = recovery_bootstrap_frames_;
         set_health(LocalizationHealth::RECOVERING,
                    "local_map_reinitialized");
         RCLCPP_WARN(
@@ -1804,9 +1815,10 @@ private:
                  effective_ratio < critical_effective_ratio_ ||
                  res_mean_last > critical_mean_residual_);
             const bool correction_critical = robustness_enable_ && flg_EKF_inited &&
-                (update_translation > max_update_translation_ ||
-                 update_rotation_deg > max_update_rotation_deg_ ||
-                 update_velocity > max_update_velocity_);
+                (!finite_update ||
+                 update_translation > critical_update_translation_ ||
+                 update_rotation_deg > critical_update_rotation_deg_ ||
+                 update_velocity > critical_update_velocity_);
             const bool imu_stressed =
                 p_imu->last_scan_saturation_ratio() >=
                     imu_saturation_ratio_warn_ ||
@@ -1904,12 +1916,18 @@ private:
 
             /*** add the feature points to map kdtree ***/
             t3 = omp_get_wtime();
+            const bool recovery_bootstrap = robustness_enable_ &&
+                localization_health_ == LocalizationHealth::RECOVERING &&
+                recovery_bootstrap_remaining_ > 0;
             const bool allow_map_increment = accept_lidar_update && !scan_bad &&
                 (!robustness_enable_ ||
-                 localization_health_ == LocalizationHealth::NORMAL);
+                 localization_health_ == LocalizationHealth::NORMAL ||
+                 recovery_bootstrap);
             if (allow_map_increment)
             {
                 map_incremental();
+                if (recovery_bootstrap)
+                    --recovery_bootstrap_remaining_;
             }
             else
             {
@@ -2195,17 +2213,20 @@ private:
     double imu_saturation_ratio_warn_ = 0.05;
     int imu_saturation_streak_warn_ = 3;
     double min_effective_ratio_ = 0.30;
-    int min_effective_points_ = 80;
+    int min_effective_points_ = 50;
     double max_mean_residual_ = 0.05;
     double critical_effective_ratio_ = 0.15;
     double critical_mean_residual_ = 0.08;
     double max_update_translation_ = 0.15;
     double max_update_rotation_deg_ = 2.0;
     double max_update_velocity_ = 1.0;
+    double critical_update_translation_ = 0.35;
+    double critical_update_rotation_deg_ = 5.0;
+    double critical_update_velocity_ = 1.5;
     int degraded_enter_frames_ = 3;
     int recover_enter_frames_ = 10;
     int recover_normal_frames_ = 10;
-    double max_degraded_duration_ = 1.5;
+    double max_degraded_duration_ = 3.0;
     int zero_effective_lost_frames_ = 5;
     double max_imu_dt_ = 0.02;
     double imu_gap_noise_scale_ = 100.0;
@@ -2214,6 +2235,8 @@ private:
     bool lost_reinit_enable_ = true;
     int lost_reinit_frames_ = 20;
     double lost_reinit_cooldown_ = 5.0;
+    int recovery_bootstrap_frames_ = 3;
+    int recovery_bootstrap_remaining_ = 0;
     LocalizationHealth localization_health_ = LocalizationHealth::NORMAL;
     int bad_scan_count_ = 0;
     int healthy_scan_count_ = 0;

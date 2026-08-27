@@ -13,8 +13,10 @@
 
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 
+#include <algorithm>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
@@ -355,6 +357,15 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
     this->declare_parameter<double>("max_init_icp_translation", 2.0);
     this->declare_parameter<double>("max_init_icp_yaw_deg", 15.0);
     this->declare_parameter<double>("min_init_fitness_improvement", 0.02);
+    this->declare_parameter<double>("recovery_icp_distance_threshold", 0.5);
+    this->declare_parameter<double>("recovery_max_translation", 2.0);
+    this->declare_parameter<double>("recovery_max_yaw_deg", 15.0);
+    this->declare_parameter<double>("recovery_max_inlier_rmse", 0.15);
+    this->declare_parameter<double>("recovery_xy_search_range", 1.0);
+    this->declare_parameter<double>("recovery_z_search_range", 0.5);
+    this->declare_parameter<double>("recovery_yaw_search_deg", 15.0);
+    this->declare_parameter<int>("recovery_candidate_count", 4);
+    this->declare_parameter<int>("recovery_success_required", 2);
     this->declare_parameter<double>("scan_map_filter_radius", 0.0);
     this->declare_parameter<int>("localization_lost_fail_count", 3);
     this->declare_parameter<int>("min_source_points", 2500);
@@ -384,6 +395,17 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
     this->get_parameter("max_init_icp_translation", max_init_icp_translation_);
     this->get_parameter("max_init_icp_yaw_deg", max_init_icp_yaw_deg_);
     this->get_parameter("min_init_fitness_improvement", min_init_fitness_improvement_);
+    this->get_parameter("recovery_icp_distance_threshold", recovery_icp_distance_threshold_);
+    this->get_parameter("recovery_max_translation", recovery_max_translation_);
+    this->get_parameter("recovery_max_yaw_deg", recovery_max_yaw_deg_);
+    this->get_parameter("recovery_max_inlier_rmse", recovery_max_inlier_rmse_);
+    this->get_parameter("recovery_xy_search_range", recovery_xy_search_range_);
+    this->get_parameter("recovery_z_search_range", recovery_z_search_range_);
+    this->get_parameter("recovery_yaw_search_deg", recovery_yaw_search_deg_);
+    this->get_parameter("recovery_candidate_count", recovery_candidate_count_);
+    this->get_parameter("recovery_success_required", recovery_success_required_);
+    recovery_candidate_count_ = std::max(1, recovery_candidate_count_);
+    recovery_success_required_ = std::max(1, recovery_success_required_);
     this->get_parameter("scan_map_filter_radius", scan_map_filter_radius_);
     this->get_parameter("localization_lost_fail_count", localization_lost_fail_count_);
     this->get_parameter("min_source_points", min_source_points_);
@@ -404,11 +426,17 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
                 "normal_search_radius=%.3f, threshold_fitness=%.3f, threshold_fitness_init=%.3f, "
                 "max_icp_translation=%.3f, max_icp_yaw_deg=%.3f, max_init_icp_translation=%.3f, "
                 "max_init_icp_yaw_deg=%.3f, min_init_fitness_improvement=%.3f, scan_map_filter_radius=%.3f, "
-                "min_source_points=%d, min_target_points=%d",
+                "min_source_points=%d, min_target_points=%d, recovery_icp=%.3f, "
+                "recovery_max_translation=%.3f, recovery_max_yaw=%.3f, "
+                "recovery_max_rmse=%.3f, recovery_search=(xy=%.2f,z=%.2f,yaw=%.1f), "
+                "recovery_candidates=%d, recovery_success_required=%d",
                 voxelsize_coarse_, voxel_downsample_size_, icp_distance_threshold_,
                 fitness_eval_threshold_, normal_search_radius_, threshold_fitness_, threshold_fitness_init_,
                 max_icp_translation_, max_icp_yaw_deg_, max_init_icp_translation_, max_init_icp_yaw_deg_,
-                min_init_fitness_improvement_, scan_map_filter_radius_, min_source_points_, min_target_points_);
+                min_init_fitness_improvement_, scan_map_filter_radius_, min_source_points_, min_target_points_,
+                recovery_icp_distance_threshold_, recovery_max_translation_, recovery_max_yaw_deg_,
+                recovery_max_inlier_rmse_, recovery_xy_search_range_, recovery_z_search_range_,
+                recovery_yaw_search_deg_, recovery_candidate_count_, recovery_success_required_);
 
     if (initialpose_.size() != 6)
     {
@@ -673,13 +701,50 @@ void GloabalLocalization::CallbackImulink2Odom(const nav_msgs::msg::Odometry::Sh
     Eigen::Matrix4d mat_odom2map_snapshot = Eigen::Matrix4d::Identity();
     Eigen::Matrix4d mat_baselink2odom_snapshot = Eigen::Matrix4d::Identity();
     Eigen::Matrix4d mat_baselink2map_snapshot = Eigen::Matrix4d::Identity();
+    Eigen::Matrix4d recovery_relative_snapshot = Eigen::Matrix4d::Identity();
+    Eigen::Matrix4d recovery_stationary_snapshot = Eigen::Matrix4d::Identity();
+    bool recovery_trusted_snapshot = false;
+    bool recovery_seed_initialized = false;
     {
         std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
         mat_baselink2odom_ = mat_imulink2odom * mat_imulink2baselink_.inverse();
+        if (loc_initialized_.load() && fastlio_recovery_pending_icp_.load() &&
+            recovery_seed_pending_.exchange(false))
+        {
+            // Keep both hypotheses: the old map->odom preserves FAST-LIO's
+            // relative motion, while the stationary seed anchors the recovered
+            // odom at the last globally trusted base pose.
+            recovery_relative_odom2map_ = mat_odom2map_;
+            recovery_stationary_odom2map_ = last_trusted_pose_valid_
+                ? last_trusted_baselink2map_ * mat_baselink2odom_.inverse()
+                : mat_odom2map_;
+            recovery_relative_snapshot = recovery_relative_odom2map_;
+            recovery_stationary_snapshot = recovery_stationary_odom2map_;
+            recovery_trusted_snapshot = last_trusted_pose_valid_;
+            recovery_seed_initialized = true;
+        }
         mat_baselink2map_ = mat_odom2map_ * mat_baselink2odom_;
         mat_odom2map_snapshot = mat_odom2map_;
         mat_baselink2odom_snapshot = mat_baselink2odom_;
         mat_baselink2map_snapshot = mat_baselink2map_;
+        if (loc_initialized_.load() && !fastlio_recovery_pending_icp_.load())
+        {
+            last_trusted_baselink2map_ = mat_baselink2map_;
+            last_trusted_baselink2odom_ = mat_baselink2odom_;
+            last_trusted_pose_valid_ = true;
+        }
+    }
+
+    if (recovery_seed_initialized)
+    {
+        RCLCPP_WARN(
+            this->get_logger(),
+            "[OPEN3D_RECOVERY] initialized dual seeds: relative_xyz=(%.3f, %.3f, %.3f), "
+            "stationary_xyz=(%.3f, %.3f, %.3f), trusted=%d",
+            recovery_relative_snapshot(0, 3), recovery_relative_snapshot(1, 3),
+            recovery_relative_snapshot(2, 3), recovery_stationary_snapshot(0, 3),
+            recovery_stationary_snapshot(1, 3), recovery_stationary_snapshot(2, 3),
+            recovery_trusted_snapshot ? 1 : 0);
     }
 
     // After FAST-LIO recovery, retain the new local odom internally for ICP,
@@ -793,6 +858,13 @@ void GloabalLocalization::CallbackFastlioValid(
     const bool changed = fastlio_valid_.exchange(valid) != valid;
     if (!valid)
     {
+        if (loc_initialized_.load() && changed)
+        {
+            std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
+            last_trusted_baselink2map_ = mat_baselink2map_;
+            last_trusted_baselink2odom_ = mat_baselink2odom_;
+            last_trusted_pose_valid_ = true;
+        }
         {
             std::lock_guard<std::mutex> scan_lock(lock_scan_);
             que_pcd_scan_.clear();
@@ -802,6 +874,8 @@ void GloabalLocalization::CallbackFastlioValid(
         tracking_fail_count_ = 0;
         last_open3d_odom_valid_ = false;
         fastlio_recovery_pending_icp_.store(true);
+        recovery_seed_pending_.store(true);
+        recovery_success_streak_.store(0);
         SetLocalizationStatus(
             loc_initialized_.load() ? LocalizationStatus::TRACKING_LOST
                                     : LocalizationStatus::UNINITIALIZED,
@@ -813,7 +887,11 @@ void GloabalLocalization::CallbackFastlioValid(
     }
 
     if (loc_initialized_.load())
+    {
         fastlio_recovery_pending_icp_.store(true);
+        recovery_seed_pending_.store(true);
+        recovery_success_streak_.store(0);
+    }
     SetLocalizationStatus(
         loc_initialized_.load() ? LocalizationStatus::TRACKING_WARN
                                 : LocalizationStatus::UNINITIALIZED,
@@ -1226,6 +1304,14 @@ void GloabalLocalization::Localization()
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
         }
+        if (loc_initialized_.load() && fastlio_recovery_pending_icp_.load() &&
+            recovery_seed_pending_.load())
+        {
+            SetLocalizationStatus(LocalizationStatus::TRACKING_WARN,
+                                  "waiting_recovery_odom_seed");
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+        }
         if (relocalization_requested_.exchange(false))
         {
             SetLocalizationStatus(LocalizationStatus::INITIALIZING, "initialpose");
@@ -1302,18 +1388,23 @@ void GloabalLocalization::Localization()
             Eigen::Matrix4d mat_baselink2odom_cur = Eigen::Matrix4d::Identity();
             Eigen::Matrix4d mat_baselink2map_cur = Eigen::Matrix4d::Identity();
             Eigen::Matrix4d reg_matrix = Eigen::Matrix4d::Identity();
+            Eigen::Matrix4d recovery_relative_seed = Eigen::Matrix4d::Identity();
+            Eigen::Matrix4d recovery_stationary_seed = Eigen::Matrix4d::Identity();
+            const bool recovery_pending = fastlio_recovery_pending_icp_.load();
 
             {
                 std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
                 mat_baselink2odom_cur = mat_baselink2odom_;
                 reg_matrix = mat_odom2map_;
+                recovery_relative_seed = recovery_relative_odom2map_;
+                recovery_stationary_seed = recovery_stationary_odom2map_;
             }
             *pcd_scan = *scan_snapshot;
             mat_baselink2map_cur = reg_matrix * mat_baselink2odom_cur;
 
             Eigen::Vector3d cur_loc(mat_baselink2map_cur(0, 3), mat_baselink2map_cur(1, 3), mat_baselink2map_cur(2, 3));
             auto dis_motion = ComputeMotionDis(last_loc_, cur_loc);
-            if (dis_motion > dis_updatemap_)
+            if (recovery_pending || dis_motion > dis_updatemap_)
             {
                 auto submap_s = std::chrono::high_resolution_clock::now();
 
@@ -1370,56 +1461,196 @@ void GloabalLocalization::Localization()
                 continue;
             }
 
-            auto eva_before_icp = open3d::pipelines::registration::EvaluateRegistration(*source, *target, fitness_eval_threshold_, reg_matrix);
-            RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                                  "tracking before icp: eva_fitness=%f, inlier_rmse=%f, eval_threshold=%.3f, source=%zu, target=%zu",
-                                  eva_before_icp.fitness_, eva_before_icp.inlier_rmse_, fitness_eval_threshold_,
-                                  source->points_.size(), target->points_.size());
+            const double icp_threshold = recovery_pending
+                ? recovery_icp_distance_threshold_ : icp_distance_threshold_;
+            const double max_delta_translation = recovery_pending
+                ? recovery_max_translation_ : max_icp_translation_;
+            const double max_delta_yaw = recovery_pending
+                ? recovery_max_yaw_deg_ : max_icp_yaw_deg_;
 
-            auto reg_result2 = pcd_tools::RegistrationIcp(source, target, icp_distance_threshold_, reg_matrix, 1);
-            reg_matrix = reg_result2.transformation_ * reg_matrix;
-            auto eva_result2 = open3d::pipelines::registration::EvaluateRegistration(*source, *target, fitness_eval_threshold_, reg_matrix);
-            /// 给发布的置信度赋值
-            loc_fitness_.store(eva_result2.fitness_);
-            double delta_trans = reg_result2.transformation_.block<3, 1>(0, 3).norm();
-            double delta_yaw = std::atan2(reg_result2.transformation_(1, 0), reg_result2.transformation_(0, 0)) * 180.0 / M_PI;
-            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                                 "tracking icp result: reg_fitness=%f, eva_before=%f, eva_after=%f, inlier_rmse=%f, delta_trans=%.3f, delta_yaw_deg=%.3f, icp_threshold=%.3f, eval_threshold=%.3f",
-                                 reg_result2.fitness_, eva_before_icp.fitness_, eva_result2.fitness_, reg_result2.inlier_rmse_,
-                                 delta_trans, delta_yaw, icp_distance_threshold_, fitness_eval_threshold_);
-            /// 超过阈值才更新,防止因配准结果有问题而导致定位出问题
-            const double loc_fitness = loc_fitness_.load();
-            bool accept_tracking = loc_fitness > threshold_fitness_ &&
-                                   delta_trans <= max_icp_translation_ &&
-                                   std::abs(delta_yaw) <= max_icp_yaw_deg_;
-            if (accept_tracking && fastlio_valid_.load())
+            struct IcpSeed
             {
-                std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
-                mat_odom2map_ = reg_matrix;
-                fastlio_recovery_pending_icp_.store(false);
-                tracking_fail_count_ = 0;
-                SetLocalizationStatus(LocalizationStatus::TRACKING, "ok");
+                std::string name;
+                Eigen::Matrix4d matrix;
+                double coarse_fitness = 0.0;
+            };
+            std::vector<IcpSeed> seeds;
+            if (recovery_pending)
+            {
+                auto add_seed_group = [&](const std::string &name,
+                                          const Eigen::Matrix4d &base)
+                {
+                    seeds.push_back({name, base, 0.0});
+                    auto add_offset = [&](const std::string &suffix,
+                                          const Eigen::Matrix4d &offset)
+                    {
+                        seeds.push_back({name + suffix, offset * base, 0.0});
+                    };
+                    for (double sign : {-1.0, 1.0})
+                    {
+                        Eigen::Matrix4d offset = Eigen::Matrix4d::Identity();
+                        offset(0, 3) = sign * recovery_xy_search_range_;
+                        add_offset(sign < 0.0 ? "_x-" : "_x+", offset);
+                        offset = Eigen::Matrix4d::Identity();
+                        offset(1, 3) = sign * recovery_xy_search_range_;
+                        add_offset(sign < 0.0 ? "_y-" : "_y+", offset);
+                        offset = Eigen::Matrix4d::Identity();
+                        offset(2, 3) = sign * recovery_z_search_range_;
+                        add_offset(sign < 0.0 ? "_z-" : "_z+", offset);
+                        offset = Eigen::Matrix4d::Identity();
+                        offset.block<3, 3>(0, 0) = Eigen::AngleAxisd(
+                            sign * recovery_yaw_search_deg_ * M_PI / 180.0,
+                            Eigen::Vector3d::UnitZ()).toRotationMatrix();
+                        add_offset(sign < 0.0 ? "_yaw-" : "_yaw+", offset);
+                    }
+                };
+                add_seed_group("relative", recovery_relative_seed);
+                add_seed_group("stationary", recovery_stationary_seed);
+                for (auto &seed : seeds)
+                {
+                    seed.coarse_fitness =
+                        open3d::pipelines::registration::EvaluateRegistration(
+                            *source, *target, recovery_icp_distance_threshold_,
+                            seed.matrix).fitness_;
+                }
+                std::sort(seeds.begin(), seeds.end(),
+                          [](const IcpSeed &lhs, const IcpSeed &rhs)
+                          {
+                              return lhs.coarse_fitness > rhs.coarse_fitness;
+                          });
+                if (seeds.size() > static_cast<size_t>(recovery_candidate_count_))
+                    seeds.resize(static_cast<size_t>(recovery_candidate_count_));
             }
             else
             {
-                std::string reject_reason = fastlio_valid_.load()
-                    ? "fitness_low" : "fastlio_invalid";
+                seeds.push_back({"tracking", reg_matrix, 0.0});
+            }
+
+            std::string best_seed = "none";
+            Eigen::Matrix4d best_matrix = reg_matrix;
+            double best_fitness = -1.0;
+            double best_rmse = std::numeric_limits<double>::infinity();
+            double best_before_fitness = 0.0;
+            double best_delta_trans = std::numeric_limits<double>::infinity();
+            double best_delta_yaw = std::numeric_limits<double>::infinity();
+
+            for (const auto &seed : seeds)
+            {
+                const auto eva_before =
+                    open3d::pipelines::registration::EvaluateRegistration(
+                        *source, *target, fitness_eval_threshold_, seed.matrix);
+                const auto icp_result = pcd_tools::RegistrationIcp(
+                    source, target, icp_threshold, seed.matrix, 1);
+                const Eigen::Matrix4d candidate =
+                    icp_result.transformation_ * seed.matrix;
+                const auto eva_after =
+                    open3d::pipelines::registration::EvaluateRegistration(
+                        *source, *target, fitness_eval_threshold_, candidate);
+                const double delta_trans =
+                    icp_result.transformation_.block<3, 1>(0, 3).norm();
+                const double delta_yaw = std::abs(
+                    std::atan2(icp_result.transformation_(1, 0),
+                               icp_result.transformation_(0, 0)) *
+                    180.0 / M_PI);
+
+                RCLCPP_INFO(
+                    this->get_logger(),
+                    "[OPEN3D_RECOVERY] mode=%s seed=%s coarse=%.6f before=%.6f after=%.6f "
+                    "rmse=%.6f dpos=%.3f dyaw=%.3f icp_threshold=%.3f",
+                    recovery_pending ? "recovery" : "tracking",
+                    seed.name.c_str(), seed.coarse_fitness, eva_before.fitness_, eva_after.fitness_,
+                    eva_after.inlier_rmse_, delta_trans, delta_yaw, icp_threshold);
+
+                if (eva_after.fitness_ > best_fitness ||
+                    (std::abs(eva_after.fitness_ - best_fitness) < 1e-9 &&
+                     eva_after.inlier_rmse_ < best_rmse))
+                {
+                    best_seed = seed.name;
+                    best_matrix = candidate;
+                    best_fitness = eva_after.fitness_;
+                    best_rmse = eva_after.inlier_rmse_;
+                    best_before_fitness = eva_before.fitness_;
+                    best_delta_trans = delta_trans;
+                    best_delta_yaw = delta_yaw;
+                }
+            }
+
+            reg_matrix = best_matrix;
+            loc_fitness_.store(std::max(0.0, best_fitness));
+            const bool rmse_ok = !recovery_pending ||
+                (std::isfinite(best_rmse) &&
+                 best_rmse <= recovery_max_inlier_rmse_);
+            const bool accept_tracking = best_fitness > threshold_fitness_ &&
+                best_delta_trans <= max_delta_translation &&
+                best_delta_yaw <= max_delta_yaw && rmse_ok;
+
+            if (accept_tracking && fastlio_valid_.load())
+            {
+                int recovery_streak = recovery_success_required_;
+                {
+                    std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
+                    mat_odom2map_ = reg_matrix;
+                    recovery_relative_odom2map_ = reg_matrix;
+                }
+                tracking_fail_count_ = 0;
+                if (recovery_pending)
+                {
+                    recovery_streak = recovery_success_streak_.fetch_add(1) + 1;
+                    if (recovery_streak >= recovery_success_required_)
+                    {
+                        fastlio_recovery_pending_icp_.store(false);
+                        recovery_success_streak_.store(0);
+                        SetLocalizationStatus(LocalizationStatus::TRACKING,
+                                              "recovery_confirmed");
+                    }
+                    else
+                    {
+                        SetLocalizationStatus(LocalizationStatus::TRACKING_WARN,
+                                              "recovery_confirming");
+                    }
+                }
+                else
+                {
+                    SetLocalizationStatus(LocalizationStatus::TRACKING, "ok");
+                }
+                RCLCPP_INFO(
+                    this->get_logger(),
+                    "[OPEN3D_RECOVERY] accepted seed=%s fitness=%.6f rmse=%.6f "
+                    "streak=%d/%d output_enabled=%d",
+                    best_seed.c_str(), best_fitness, best_rmse,
+                    recovery_pending ? recovery_streak : recovery_success_required_,
+                    recovery_success_required_,
+                    fastlio_recovery_pending_icp_.load() ? 0 : 1);
+            }
+            else
+            {
+                if (recovery_pending)
+                    recovery_success_streak_.store(0);
+                std::string reject_reason = "fitness_low";
                 if (!fastlio_valid_.load())
                     reject_reason = "fastlio_invalid";
-                else if (delta_trans > max_icp_translation_)
+                else if (best_delta_trans > max_delta_translation)
                     reject_reason = "delta_too_large";
-                else if (std::abs(delta_yaw) > max_icp_yaw_deg_)
+                else if (best_delta_yaw > max_delta_yaw)
                     reject_reason = "yaw_delta_too_large";
+                else if (!rmse_ok)
+                    reject_reason = "rmse_high";
                 tracking_fail_count_++;
                 SetLocalizationStatus(
                     tracking_fail_count_ >= localization_lost_fail_count_
                         ? LocalizationStatus::TRACKING_LOST
                         : LocalizationStatus::TRACKING_WARN,
                     reject_reason);
-                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                                     "reject tracking icp: eva_fitness=%f, threshold=%.3f, delta_trans=%.3f, max_delta=%.3f, delta_yaw_deg=%.3f, max_yaw_deg=%.3f, source=%zu, target=%zu",
-                                     loc_fitness, threshold_fitness_, delta_trans, max_icp_translation_, delta_yaw, max_icp_yaw_deg_,
-                                     source->points_.size(), target->points_.size());
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "[OPEN3D_RECOVERY] rejected seed=%s before=%.6f after=%.6f "
+                    "threshold=%.3f rmse=%.6f max_rmse=%.3f dpos=%.3f/%.3f "
+                    "dyaw=%.3f/%.3f source=%zu target=%zu reason=%s",
+                    best_seed.c_str(), best_before_fitness, best_fitness,
+                    threshold_fitness_, best_rmse, recovery_max_inlier_rmse_,
+                    best_delta_trans, max_delta_translation, best_delta_yaw,
+                    max_delta_yaw, source->points_.size(), target->points_.size(),
+                    reject_reason.c_str());
             }
 
             auto loc_e = std::chrono::high_resolution_clock::now(); /// 结束定位计时

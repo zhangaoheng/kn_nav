@@ -397,12 +397,22 @@ def test_fastlio_degraded_state_preserves_bounded_motion_without_map_pollution()
     assert 'pause odom, TF and Open3D ICP' in open3d
     assert 'if (!fastlio_valid_.load())' in open3d
     assert 'fastlio_recovery_pending_icp_' in open3d
+    assert 'critical_update_translation_' in mapping
+    assert 'recovery_bootstrap_remaining_' in mapping
+    assert 'recovery_relative_odom2map_' in open3d
+    assert 'recovery_stationary_odom2map_' in open3d
+    assert 'recovery_success_streak_' in open3d
+    assert '[OPEN3D_RECOVERY]' in open3d
     assert 'publish_odom_imu_tf_en && localization_valid' in mapping
 
     for profile in ('A2', 'B2'):
         nodes = load(profile, 'navigation.yaml')['nodes']
         robust = nodes['fastlio_mapping']['robustness']
-        assert robust['max_degraded_duration'] > 1.0
+        assert robust['min_effective_points'] == 50
+        assert robust['max_degraded_duration'] == 3.0
+        assert robust['critical_update_translation'] == 0.35
+        assert robust['critical_update_rotation_deg'] == 5.0
+        assert robust['critical_update_velocity'] == 1.5
         assert robust['zero_effective_lost_frames'] > 0
         assert robust['max_imu_dt'] == 0.02
         assert robust['max_propagation_translation'] == 0.20
@@ -410,6 +420,17 @@ def test_fastlio_degraded_state_preserves_bounded_motion_without_map_pollution()
         assert robust['lost_reinit_enable'] is True
         assert robust['lost_reinit_frames'] == 20
         assert robust['lost_reinit_cooldown'] == 5.0
+        assert robust['recovery_bootstrap_frames'] == 3
+        open3d_params = nodes['global_localization_node']
+        assert open3d_params['recovery_icp_distance_threshold'] == 0.5
+        assert open3d_params['recovery_max_translation'] == 2.0
+        assert open3d_params['recovery_max_yaw_deg'] == 15.0
+        assert open3d_params['recovery_max_inlier_rmse'] == 0.15
+        assert open3d_params['recovery_xy_search_range'] == 1.0
+        assert open3d_params['recovery_z_search_range'] == 0.5
+        assert open3d_params['recovery_yaw_search_deg'] == 15.0
+        assert open3d_params['recovery_candidate_count'] == 4
+        assert open3d_params['recovery_success_required'] == 2
 
 
 # 约束纯全局跟踪测试链路（coordinator 可执行 + pure_pursuit 启动）保留。

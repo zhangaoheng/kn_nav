@@ -43,17 +43,20 @@
       imu_saturation_ratio_warn: 0.05
       imu_saturation_streak_warn: 3
       min_effective_ratio: 0.30
-      min_effective_points: 80
+      min_effective_points: 50
       max_mean_residual: 0.05
       critical_effective_ratio: 0.15
       critical_mean_residual: 0.08
       max_update_translation: 0.15
       max_update_rotation_deg: 2.0
       max_update_velocity: 1.0
+      critical_update_translation: 0.35
+      critical_update_rotation_deg: 5.0
+      critical_update_velocity: 1.5
       degraded_enter_frames: 3
       recover_enter_frames: 10
       recover_normal_frames: 10
-      max_degraded_duration: 1.5
+      max_degraded_duration: 3.0
       zero_effective_lost_frames: 5
       max_imu_dt: 0.02
       imu_gap_noise_scale: 100.0
@@ -62,6 +65,7 @@
       lost_reinit_enable: true
       lost_reinit_frames: 20
       lost_reinit_cooldown: 5.0
+      recovery_bootstrap_frames: 3
 
     publish:
       path_en: true # true: publish Path

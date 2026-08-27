@@ -138,6 +138,15 @@ private:
     double max_init_icp_translation_ = 2.0;
     double max_init_icp_yaw_deg_ = 15.0;
     double min_init_fitness_improvement_ = 0.02;
+    double recovery_icp_distance_threshold_ = 0.5;
+    double recovery_max_translation_ = 2.0;
+    double recovery_max_yaw_deg_ = 15.0;
+    double recovery_max_inlier_rmse_ = 0.15;
+    double recovery_xy_search_range_ = 1.0;
+    double recovery_z_search_range_ = 0.5;
+    double recovery_yaw_search_deg_ = 15.0;
+    int recovery_candidate_count_ = 4;
+    int recovery_success_required_ = 2;
     double scan_map_filter_radius_ = 0.0;
     int localization_lost_fail_count_ = 3;
     std::atomic<int> tracking_fail_count_{0};
@@ -155,6 +164,13 @@ private:
     std::atomic_bool fastlio_valid_{false};
     std::atomic_bool fastlio_valid_received_{false};
     std::atomic_bool fastlio_recovery_pending_icp_{true};
+    std::atomic_bool recovery_seed_pending_{false};
+    std::atomic<int> recovery_success_streak_{0};
+    Eigen::Matrix4d last_trusted_baselink2map_ = Eigen::Matrix4d::Identity();
+    Eigen::Matrix4d last_trusted_baselink2odom_ = Eigen::Matrix4d::Identity();
+    Eigen::Matrix4d recovery_relative_odom2map_ = Eigen::Matrix4d::Identity();
+    Eigen::Matrix4d recovery_stationary_odom2map_ = Eigen::Matrix4d::Identity();
+    bool last_trusted_pose_valid_ = false;
 
     rclcpp::Time timestamp_odom_;
     std::mutex lock_timestamp_;

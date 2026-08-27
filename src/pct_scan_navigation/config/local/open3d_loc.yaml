@@ -32,6 +32,15 @@ global_localization_node:
     max_init_icp_translation: 2.0
     max_init_icp_yaw_deg: 20.0
     min_init_fitness_improvement: 0.02
+    recovery_icp_distance_threshold: 0.5
+    recovery_max_translation: 2.0
+    recovery_max_yaw_deg: 15.0
+    recovery_max_inlier_rmse: 0.15
+    recovery_xy_search_range: 1.0
+    recovery_z_search_range: 0.5
+    recovery_yaw_search_deg: 15.0
+    recovery_candidate_count: 4
+    recovery_success_required: 2
     min_source_points: 500
     min_target_points: 500
 
