@@ -28,6 +28,7 @@
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <std_msgs/msg/float32.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <pct_scan_navigation/msg/localization_status.hpp>
 #include <pct_scan_navigation/srv/load_localization_map.hpp>
 #include <tf2_eigen/tf2_eigen.hpp>
@@ -54,6 +55,8 @@ public:
     void CallbackImulink2Odom(const nav_msgs::msg::Odometry::SharedPtr imulink2odom);
     /// @brief 订阅FAST-LIO发布的imu_link点云，先转换成base_link，再转换成odom用于定位匹配
     void CallbackScanBody(const sensor_msgs::msg::PointCloud2::SharedPtr scan_in_imu_link);
+    /// @brief FAST-LIO 定位有效性门控，无效时停止传播 odom/ICP。
+    void CallbackFastlioValid(const std_msgs::msg::Bool::SharedPtr valid_msg);
 
     /// @brief 订阅在初始位姿
     void CallbackInitialPose(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr initialpose);
@@ -92,6 +95,7 @@ private:
 
     /// @brief 订阅当前帧imu_link点云
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_scan_cur_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr sub_fastlio_valid_;
 
     /// @brief 订阅初始位姿
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr sub_initialpose_;
@@ -136,7 +140,7 @@ private:
     double min_init_fitness_improvement_ = 0.02;
     double scan_map_filter_radius_ = 0.0;
     int localization_lost_fail_count_ = 3;
-    int tracking_fail_count_ = 0;
+    std::atomic<int> tracking_fail_count_{0};
     int min_source_points_ = 2500;
     int min_target_points_ = 50000;
 
@@ -148,6 +152,9 @@ private:
     std::thread thread_loc_;
     std::mutex lock_scan_;
     std::atomic_bool flag_exit_{false};
+    std::atomic_bool fastlio_valid_{false};
+    std::atomic_bool fastlio_valid_received_{false};
+    std::atomic_bool fastlio_recovery_pending_icp_{true};
 
     rclcpp::Time timestamp_odom_;
     std::mutex lock_timestamp_;

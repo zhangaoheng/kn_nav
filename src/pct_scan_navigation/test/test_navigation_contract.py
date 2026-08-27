@@ -367,11 +367,12 @@ def test_soft_reset_clears_coordinator_route_and_is_idempotent():
     assert 'if (was_active && have_odom_)' in fsm
 
 
-# 约束 FAST-LIO 退化保护：手动遥控持续运动时软退化激光仍可约束状态，
-# 但不能写入地图；临界退化回到有界 IMU 预测，不冻结在旧位姿。
+# 约束 FAST-LIO 退化保护：软退化保留有界运动且不写地图；
+# LOST 不能被坏扫描推回 DEGRADED，持续失锁后受控重建局部地图。
 def test_fastlio_degraded_state_preserves_bounded_motion_without_map_pollution():
     mapping = (FAST_LIO / 'src/laserMapping.cpp').read_text()
     imu = (FAST_LIO / 'src/IMU_Processing.hpp').read_text()
+    open3d = (OPEN3D_LOC / 'src/global_localization.cpp').read_text()
     manager = (ROOT / 'scripts/nav_manager_node.py').read_text()
 
     assert 'last_good_state_' in mapping
@@ -380,13 +381,23 @@ def test_fastlio_degraded_state_preserves_bounded_motion_without_map_pollution()
     assert 'zero_effective_lost_frames_' in mapping
     assert 'bounded_prediction' in mapping
     assert 'max_propagation_translation_' in mapping
-    assert 'accept_lidar_update =\n                !scan_critical' in mapping
+    assert 'localization_health_ != LocalizationHealth::LOST' in mapping
     assert 'accept_lidar_update && !scan_bad' in mapping
+    assert 'if (localization_health_ == LocalizationHealth::LOST)\n                return;' in mapping
+    assert 'reinitialize_local_map(predicted_state)' in mapping
+    assert 'ikdtree.Reset(seed_points)' in mapping
+    assert 'local_map_reinitialized' in mapping
     assert 'predict_interval(dt)' in imu
     assert 'last_scan_time_gap_count_' in imu
     assert 'last_valid_acc_raw_' in imu
     assert 'self._fastlio_valid_cb' not in manager
     assert "self._soft_reset(reason='fastlio_invalid')" not in manager
+    assert '"/fastlio/localization_valid"' in open3d
+    assert 'ignore /Odometry_loc while FAST-LIO is invalid' in open3d
+    assert 'pause odom, TF and Open3D ICP' in open3d
+    assert 'if (!fastlio_valid_.load())' in open3d
+    assert 'fastlio_recovery_pending_icp_' in open3d
+    assert 'publish_odom_imu_tf_en && localization_valid' in mapping
 
     for profile in ('A2', 'B2'):
         nodes = load(profile, 'navigation.yaml')['nodes']
@@ -396,6 +407,9 @@ def test_fastlio_degraded_state_preserves_bounded_motion_without_map_pollution()
         assert robust['max_imu_dt'] == 0.02
         assert robust['max_propagation_translation'] == 0.20
         assert robust['max_propagation_velocity'] == 2.0
+        assert robust['lost_reinit_enable'] is True
+        assert robust['lost_reinit_frames'] == 20
+        assert robust['lost_reinit_cooldown'] == 5.0
 
 
 # 约束纯全局跟踪测试链路（coordinator 可执行 + pure_pursuit 启动）保留。

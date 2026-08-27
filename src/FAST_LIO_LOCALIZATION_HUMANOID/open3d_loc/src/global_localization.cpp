@@ -329,6 +329,14 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
         "/initialpose", 50,
         std::bind(&GloabalLocalization::CallbackInitialPose, this, std::placeholders::_1),
         state_subscription_options);
+    rclcpp::QoS fastlio_valid_qos(rclcpp::KeepLast(1));
+    fastlio_valid_qos.reliable();
+    fastlio_valid_qos.transient_local();
+    sub_fastlio_valid_ = this->create_subscription<std_msgs::msg::Bool>(
+        "/fastlio/localization_valid", fastlio_valid_qos,
+        std::bind(&GloabalLocalization::CallbackFastlioValid, this,
+                  std::placeholders::_1),
+        state_subscription_options);
 
     // 队列最大数量
     this->declare_parameter<int>("pcd_queue_maxsize", 5);
@@ -646,6 +654,13 @@ Eigen::Matrix3d GloabalLocalization::Euler2Matrix3d(const Eigen::Vector3d euler)
 // （map 系里程计，含差分速度）与 /localization_3d 运动中心位姿。
 void GloabalLocalization::CallbackImulink2Odom(const nav_msgs::msg::Odometry::SharedPtr imulink2odom)
 {
+    if (!fastlio_valid_.load())
+    {
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(), *this->get_clock(), 2000,
+            "ignore /Odometry_loc while FAST-LIO is invalid");
+        return;
+    }
     const rclcpp::Time output_stamp(imulink2odom->header.stamp);
     {
         std::lock_guard<std::mutex> timestamp_lock(lock_timestamp_);
@@ -666,6 +681,12 @@ void GloabalLocalization::CallbackImulink2Odom(const nav_msgs::msg::Odometry::Sh
         mat_baselink2odom_snapshot = mat_baselink2odom_;
         mat_baselink2map_snapshot = mat_baselink2map_;
     }
+
+    // After FAST-LIO recovery, retain the new local odom internally for ICP,
+    // but do not expose it through map TF or /Odometry_open3d until one
+    // tracking ICP has re-established map->odom.
+    if (loc_initialized_.load() && fastlio_recovery_pending_icp_.load())
+        return;
 
     /// 发布tf关系
     geometry_msgs::msg::TransformStamped transform_odom2map;
@@ -763,6 +784,45 @@ void GloabalLocalization::CallbackImulink2Odom(const nav_msgs::msg::Odometry::Sh
         pub_localization_3d_->publish(localization_3d_);
     }
 }
+
+void GloabalLocalization::CallbackFastlioValid(
+    const std_msgs::msg::Bool::SharedPtr valid_msg)
+{
+    const bool valid = valid_msg->data;
+    const bool received_before = fastlio_valid_received_.exchange(true);
+    const bool changed = fastlio_valid_.exchange(valid) != valid;
+    if (!valid)
+    {
+        {
+            std::lock_guard<std::mutex> scan_lock(lock_scan_);
+            que_pcd_scan_.clear();
+            pcd_scan_cur_.reset(new open3d::geometry::PointCloud);
+        }
+        loc_fitness_.store(0.0);
+        tracking_fail_count_ = 0;
+        last_open3d_odom_valid_ = false;
+        fastlio_recovery_pending_icp_.store(true);
+        SetLocalizationStatus(
+            loc_initialized_.load() ? LocalizationStatus::TRACKING_LOST
+                                    : LocalizationStatus::UNINITIALIZED,
+            "fastlio_invalid");
+        if (changed || !received_before)
+            RCLCPP_WARN(this->get_logger(),
+                        "FAST-LIO invalid: pause odom, TF and Open3D ICP");
+        return;
+    }
+
+    if (loc_initialized_.load())
+        fastlio_recovery_pending_icp_.store(true);
+    SetLocalizationStatus(
+        loc_initialized_.load() ? LocalizationStatus::TRACKING_WARN
+                                : LocalizationStatus::UNINITIALIZED,
+        loc_initialized_.load() ? "fastlio_recovered_waiting_icp"
+                                : "fastlio_ready");
+    if (changed || !received_before)
+        RCLCPP_INFO(this->get_logger(),
+                    "FAST-LIO valid: resume odom and Open3D localization");
+}
 // 点云回调（/cloud_registered_body_1，imu_link 系）：转 base_link 系后
 // 维护滑动窗口队列，合并成当前感知子图 pcd_scan_cur_ 供定位线程取用；
 // 有订阅者时同时发布 /scan_base_link 与 /scan_map 供调试。
@@ -791,6 +851,13 @@ void GloabalLocalization::CallbackScanBody(
         open3d_conversions::open3dToRos(*pcd_base_link, scan_base_link_msg, "base_link");
         scan_base_link_msg.header.stamp = has_odom ? latest_odom_stamp : this->now();
         pub_scan_base_link_->publish(scan_base_link_msg);
+    }
+    if (!fastlio_valid_.load())
+    {
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(), *this->get_clock(), 2000,
+            "ignore localization scan while FAST-LIO is invalid");
+        return;
     }
     if (!has_odom)
     {
@@ -1054,6 +1121,7 @@ bool GloabalLocalization::LocalizationInitialize()
     RCLCPP_INFO(this->get_logger(), "---------------------------------------------------------\n");
 
     tracking_fail_count_ = 0;
+    fastlio_recovery_pending_icp_.store(false);
     SetLocalizationStatus(LocalizationStatus::INIT_SUCCESS, "ok");
     return true;
 }
@@ -1149,6 +1217,15 @@ void GloabalLocalization::Localization()
     double loc_cost = 0;                                          /// 定位耗时(ms)
     while (rclcpp::ok() && !flag_exit_.load())
     {
+        if (!fastlio_valid_.load())
+        {
+            SetLocalizationStatus(
+                loc_initialized_.load() ? LocalizationStatus::TRACKING_LOST
+                                        : LocalizationStatus::UNINITIALIZED,
+                "fastlio_invalid");
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
         if (relocalization_requested_.exchange(false))
         {
             SetLocalizationStatus(LocalizationStatus::INITIALIZING, "initialpose");
@@ -1315,17 +1392,21 @@ void GloabalLocalization::Localization()
             bool accept_tracking = loc_fitness > threshold_fitness_ &&
                                    delta_trans <= max_icp_translation_ &&
                                    std::abs(delta_yaw) <= max_icp_yaw_deg_;
-            if (accept_tracking)
+            if (accept_tracking && fastlio_valid_.load())
             {
                 std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
                 mat_odom2map_ = reg_matrix;
+                fastlio_recovery_pending_icp_.store(false);
                 tracking_fail_count_ = 0;
                 SetLocalizationStatus(LocalizationStatus::TRACKING, "ok");
             }
             else
             {
-                std::string reject_reason = "fitness_low";
-                if (delta_trans > max_icp_translation_)
+                std::string reject_reason = fastlio_valid_.load()
+                    ? "fitness_low" : "fastlio_invalid";
+                if (!fastlio_valid_.load())
+                    reject_reason = "fastlio_invalid";
+                else if (delta_trans > max_icp_translation_)
                     reject_reason = "delta_too_large";
                 else if (std::abs(delta_yaw) > max_icp_yaw_deg_)
                     reject_reason = "yaw_delta_too_large";

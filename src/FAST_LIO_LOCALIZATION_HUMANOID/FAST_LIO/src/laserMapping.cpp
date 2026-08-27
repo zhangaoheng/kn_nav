@@ -1078,7 +1078,7 @@ void publish_odometry(
     trans.transform.rotation.x = odomAftMapped.pose.pose.orientation.x;
     trans.transform.rotation.y = odomAftMapped.pose.pose.orientation.y;
     trans.transform.rotation.z = odomAftMapped.pose.pose.orientation.z;
-    if (publish_odom_imu_tf_en)
+    if (publish_odom_imu_tf_en && localization_valid)
     {
         tf_br->sendTransform(trans);
     }
@@ -1297,6 +1297,9 @@ public:
         this->declare_parameter<double>("robustness.imu_gap_noise_scale", 100.0);
         this->declare_parameter<double>("robustness.max_propagation_translation", 0.20);
         this->declare_parameter<double>("robustness.max_propagation_velocity", 2.0);
+        this->declare_parameter<bool>("robustness.lost_reinit_enable", true);
+        this->declare_parameter<int>("robustness.lost_reinit_frames", 20);
+        this->declare_parameter<double>("robustness.lost_reinit_cooldown", 5.0);
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
 
@@ -1363,6 +1366,11 @@ public:
         this->get_parameter_or<double>("robustness.imu_gap_noise_scale", imu_gap_noise_scale_, 100.0);
         this->get_parameter_or<double>("robustness.max_propagation_translation", max_propagation_translation_, 0.20);
         this->get_parameter_or<double>("robustness.max_propagation_velocity", max_propagation_velocity_, 2.0);
+        this->get_parameter_or<bool>("robustness.lost_reinit_enable", lost_reinit_enable_, true);
+        this->get_parameter_or<int>("robustness.lost_reinit_frames", lost_reinit_frames_, 20);
+        this->get_parameter_or<double>("robustness.lost_reinit_cooldown", lost_reinit_cooldown_, 5.0);
+        lost_reinit_frames_ = std::max(1, lost_reinit_frames_);
+        lost_reinit_cooldown_ = std::max(0.0, lost_reinit_cooldown_);
         double diagnostics_report_period_s = 1.0;
         this->get_parameter_or<double>("diagnostics.report_period_s", diagnostics_report_period_s, 1.0);
         diagnostics_report_period_s = std::max(0.2, diagnostics_report_period_s);
@@ -1534,6 +1542,8 @@ private:
             degraded_start_time_ = lidar_end_time;
         else if (next == LocalizationHealth::NORMAL)
             degraded_start_time_ = -1.0;
+        if (next == LocalizationHealth::LOST)
+            lost_scan_count_ = 0;
         publish_localization_valid(next == LocalizationHealth::NORMAL &&
                                    last_good_valid_);
         RCLCPP_WARN(
@@ -1564,6 +1574,16 @@ private:
             if (zero_effective_count_ >= zero_effective_lost_frames_)
             {
                 set_health(LocalizationHealth::LOST, "no_effective_points");
+                return;
+            }
+            // LOST is terminal for bad scans.  A bad/critical scan must never
+            // promote it back to DEGRADED; only healthy scans may start
+            // recovery.
+            if (localization_health_ == LocalizationHealth::LOST)
+                return;
+            if (localization_health_ == LocalizationHealth::RECOVERING)
+            {
+                set_health(LocalizationHealth::LOST, "recovery_scan_bad");
                 return;
             }
             if (localization_health_ == LocalizationHealth::RECOVERING ||
@@ -1597,6 +1617,58 @@ private:
             healthy_scan_count_ = 0;
             set_health(LocalizationHealth::NORMAL, "recovered");
         }
+    }
+
+    bool reinitialize_local_map(const state_ikfom &predicted_state)
+    {
+        if (!robustness_enable_ || !lost_reinit_enable_ ||
+            localization_health_ != LocalizationHealth::LOST ||
+            !last_good_valid_ || lost_scan_count_ < lost_reinit_frames_ ||
+            feats_down_size < 5)
+            return false;
+        if (last_reinit_time_ >= 0.0 &&
+            lidar_end_time - last_reinit_time_ < lost_reinit_cooldown_)
+            return false;
+
+        // Preserve the bounded IMU-propagated pose, bias and gravity so a
+        // manually moving robot keeps odom continuity.  Rebuild the local map
+        // around the current scan and reset velocity to prevent the previous
+        // inertial runaway from continuing.
+        state_ikfom recovery_state = predicted_state;
+        recovery_state.vel.setZero();
+        kf.change_x(recovery_state);
+        kf.change_P(last_good_covariance_);
+        state_point = recovery_state;
+        pos_lid = state_point.pos +
+            state_point.rot * state_point.offset_T_L_I;
+
+        PointVector seed_points;
+        seed_points.resize(feats_down_size);
+        for (int i = 0; i < feats_down_size; ++i)
+            pointBodyToWorld(&feats_down_body->points[i], &seed_points[i]);
+        ikdtree.set_downsample_param(filter_size_map_min);
+        ikdtree.Reset(seed_points);
+        Localmap_Initialized = false;
+        cub_needrm.clear();
+        Nearest_Points.clear();
+        pointSearchInd_surf.clear();
+
+        last_reinit_time_ = lidar_end_time;
+        ++local_map_reinit_count_;
+        bad_scan_count_ = 0;
+        healthy_scan_count_ = 0;
+        zero_effective_count_ = 0;
+        lost_scan_count_ = 0;
+        set_health(LocalizationHealth::RECOVERING,
+                   "local_map_reinitialized");
+        RCLCPP_WARN(
+            get_logger(),
+            "[FASTLIO_RECOVERY] rebuilt local map with %zu points at "
+            "anchor=(%.3f, %.3f, %.3f), attempt=%llu",
+            seed_points.size(), recovery_state.pos.x(), recovery_state.pos.y(),
+            recovery_state.pos.z(),
+            static_cast<unsigned long long>(local_map_reinit_count_));
+        return true;
     }
 
     // 主循环（定时触发，FAST-LIO 每帧主流程）：
@@ -1746,11 +1818,19 @@ private:
 
             update_health(scan_bad, scan_critical, imu_stressed,
                           effct_feat_num == 0);
+            if (localization_health_ == LocalizationHealth::LOST)
+                ++lost_scan_count_;
+            else
+                lost_scan_count_ = 0;
+            const bool local_map_reinitialized =
+                reinitialize_local_map(predicted_state);
             // 软退化只冻结地图，仍接受幅度合理的激光校正来约束持续运动；
             // 只有匹配临界退化或校正量异常时才拒绝本次激光更新。
             const bool accept_lidar_update =
+                !local_map_reinitialized &&
+                localization_health_ != LocalizationHealth::LOST &&
                 !scan_critical && !correction_critical;
-            if (!accept_lidar_update)
+            if (!accept_lidar_update && !local_map_reinitialized)
             {
                 state_ikfom bounded_prediction = predicted_state;
                 if (!bounded_prediction.pos.allFinite() ||
@@ -2055,10 +2135,13 @@ private:
             get_logger(),
             "[FASTLIO_HEALTH_DIAG] state=%s bad_streak=%d healthy_streak=%d "
             "zero_effective_streak=%d valid=%d last_good=%d "
-            "saturated_scans=%lu rejected_updates=%lu skipped_map_updates=%lu",
+            "lost_frames=%d reinit_count=%lu saturated_scans=%lu "
+            "rejected_updates=%lu skipped_map_updates=%lu",
             health_name(localization_health_), bad_scan_count_,
             healthy_scan_count_, zero_effective_count_,
             last_localization_valid_ ? 1 : 0, last_good_valid_ ? 1 : 0,
+            lost_scan_count_,
+            static_cast<unsigned long>(local_map_reinit_count_),
             static_cast<unsigned long>(saturated_scan_count_window_),
             static_cast<unsigned long>(rejected_update_count_window_),
             static_cast<unsigned long>(skipped_map_count_window_));
@@ -2128,10 +2211,16 @@ private:
     double imu_gap_noise_scale_ = 100.0;
     double max_propagation_translation_ = 0.20;
     double max_propagation_velocity_ = 2.0;
+    bool lost_reinit_enable_ = true;
+    int lost_reinit_frames_ = 20;
+    double lost_reinit_cooldown_ = 5.0;
     LocalizationHealth localization_health_ = LocalizationHealth::NORMAL;
     int bad_scan_count_ = 0;
     int healthy_scan_count_ = 0;
     int zero_effective_count_ = 0;
+    int lost_scan_count_ = 0;
+    double last_reinit_time_ = -1.0;
+    uint64_t local_map_reinit_count_ = 0;
     double degraded_start_time_ = -1.0;
     using StateCovariance =
         esekfom::esekf<state_ikfom, 12, input_ikfom>::cov;

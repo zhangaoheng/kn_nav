@@ -69,6 +69,9 @@
       imu_gap_noise_scale: 100.0
       max_propagation_translation: 0.20
       max_propagation_velocity: 2.0
+      lost_reinit_enable: true
+      lost_reinit_frames: 20
+      lost_reinit_cooldown: 5.0
 
     publish:
       path_en: true
