@@ -361,6 +361,7 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
     this->declare_parameter<double>("recovery_max_translation", 2.0);
     this->declare_parameter<double>("recovery_max_yaw_deg", 15.0);
     this->declare_parameter<double>("recovery_max_inlier_rmse", 0.15);
+    this->declare_parameter<double>("recovery_provisional_fitness_threshold", 0.65);
     this->declare_parameter<double>("recovery_xy_search_range", 1.0);
     this->declare_parameter<double>("recovery_z_search_range", 0.5);
     this->declare_parameter<double>("recovery_yaw_search_deg", 15.0);
@@ -399,12 +400,13 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
     this->get_parameter("recovery_max_translation", recovery_max_translation_);
     this->get_parameter("recovery_max_yaw_deg", recovery_max_yaw_deg_);
     this->get_parameter("recovery_max_inlier_rmse", recovery_max_inlier_rmse_);
+    this->get_parameter("recovery_provisional_fitness_threshold", recovery_provisional_fitness_threshold_);
     this->get_parameter("recovery_xy_search_range", recovery_xy_search_range_);
     this->get_parameter("recovery_z_search_range", recovery_z_search_range_);
     this->get_parameter("recovery_yaw_search_deg", recovery_yaw_search_deg_);
     this->get_parameter("recovery_candidate_count", recovery_candidate_count_);
     this->get_parameter("recovery_success_required", recovery_success_required_);
-    recovery_candidate_count_ = std::max(1, recovery_candidate_count_);
+    recovery_candidate_count_ = std::max(2, recovery_candidate_count_);
     recovery_success_required_ = std::max(1, recovery_success_required_);
     this->get_parameter("scan_map_filter_radius", scan_map_filter_radius_);
     this->get_parameter("localization_lost_fail_count", localization_lost_fail_count_);
@@ -428,14 +430,16 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
                 "max_init_icp_yaw_deg=%.3f, min_init_fitness_improvement=%.3f, scan_map_filter_radius=%.3f, "
                 "min_source_points=%d, min_target_points=%d, recovery_icp=%.3f, "
                 "recovery_max_translation=%.3f, recovery_max_yaw=%.3f, "
-                "recovery_max_rmse=%.3f, recovery_search=(xy=%.2f,z=%.2f,yaw=%.1f), "
+                "recovery_max_rmse=%.3f, recovery_provisional_fitness=%.3f, "
+                "recovery_search=(xy=%.2f,z=%.2f,yaw=%.1f), "
                 "recovery_candidates=%d, recovery_success_required=%d",
                 voxelsize_coarse_, voxel_downsample_size_, icp_distance_threshold_,
                 fitness_eval_threshold_, normal_search_radius_, threshold_fitness_, threshold_fitness_init_,
                 max_icp_translation_, max_icp_yaw_deg_, max_init_icp_translation_, max_init_icp_yaw_deg_,
                 min_init_fitness_improvement_, scan_map_filter_radius_, min_source_points_, min_target_points_,
                 recovery_icp_distance_threshold_, recovery_max_translation_, recovery_max_yaw_deg_,
-                recovery_max_inlier_rmse_, recovery_xy_search_range_, recovery_z_search_range_,
+                recovery_max_inlier_rmse_, recovery_provisional_fitness_threshold_,
+                recovery_xy_search_range_, recovery_z_search_range_,
                 recovery_yaw_search_deg_, recovery_candidate_count_, recovery_success_required_);
 
     if (initialpose_.size() != 6)
@@ -1470,6 +1474,7 @@ void GloabalLocalization::Localization()
 
             struct IcpSeed
             {
+                std::string family;
                 std::string name;
                 Eigen::Matrix4d matrix;
                 double coarse_fitness = 0.0;
@@ -1480,11 +1485,12 @@ void GloabalLocalization::Localization()
                 auto add_seed_group = [&](const std::string &name,
                                           const Eigen::Matrix4d &base)
                 {
-                    seeds.push_back({name, base, 0.0});
+                    seeds.push_back({name, name, base, 0.0});
                     auto add_offset = [&](const std::string &suffix,
                                           const Eigen::Matrix4d &offset)
                     {
-                        seeds.push_back({name + suffix, offset * base, 0.0});
+                        seeds.push_back(
+                            {name, name + suffix, offset * base, 0.0});
                     };
                     for (double sign : {-1.0, 1.0})
                     {
@@ -1518,12 +1524,44 @@ void GloabalLocalization::Localization()
                           {
                               return lhs.coarse_fitness > rhs.coarse_fitness;
                           });
-                if (seeds.size() > static_cast<size_t>(recovery_candidate_count_))
-                    seeds.resize(static_cast<size_t>(recovery_candidate_count_));
+                // Reserve an equal minimum quota for both seed families.  A
+                // globally ranked Top-K previously allowed stationary seeds
+                // to occupy every ICP slot and starve the relative-motion
+                // hypothesis during the failed fourth-version recovery.
+                const int family_quota = std::max(
+                    1, recovery_candidate_count_ / 2);
+                std::vector<IcpSeed> selected_seeds;
+                for (const std::string family : {"relative", "stationary"})
+                {
+                    int selected_in_family = 0;
+                    for (const auto &seed : seeds)
+                    {
+                        if (seed.family != family ||
+                            selected_in_family >= family_quota)
+                            continue;
+                        selected_seeds.push_back(seed);
+                        ++selected_in_family;
+                    }
+                }
+                for (const auto &seed : seeds)
+                {
+                    if (selected_seeds.size() >=
+                        static_cast<size_t>(recovery_candidate_count_))
+                        break;
+                    const bool already_selected = std::any_of(
+                        selected_seeds.begin(), selected_seeds.end(),
+                        [&](const IcpSeed &selected)
+                        {
+                            return selected.name == seed.name;
+                        });
+                    if (!already_selected)
+                        selected_seeds.push_back(seed);
+                }
+                seeds = std::move(selected_seeds);
             }
             else
             {
-                seeds.push_back({"tracking", reg_matrix, 0.0});
+                seeds.push_back({"tracking", "tracking", reg_matrix, 0.0});
             }
 
             std::string best_seed = "none";
@@ -1583,6 +1621,11 @@ void GloabalLocalization::Localization()
             const bool accept_tracking = best_fitness > threshold_fitness_ &&
                 best_delta_trans <= max_delta_translation &&
                 best_delta_yaw <= max_delta_yaw && rmse_ok;
+            const bool accept_provisional = recovery_pending &&
+                best_fitness >= recovery_provisional_fitness_threshold_ &&
+                best_delta_trans <= max_delta_translation &&
+                best_delta_yaw <= max_delta_yaw && rmse_ok &&
+                fastlio_valid_.load();
 
             if (accept_tracking && fastlio_valid_.load())
             {
@@ -1621,6 +1664,28 @@ void GloabalLocalization::Localization()
                     recovery_pending ? recovery_streak : recovery_success_required_,
                     recovery_success_required_,
                     fastlio_recovery_pending_icp_.load() ? 0 : 1);
+            }
+            else if (accept_provisional)
+            {
+                // A geometrically plausible near match advances only the
+                // internal recovery seed.  map TF and /Odometry_open3d remain
+                // gated until two strict (> threshold_fitness_) matches pass.
+                {
+                    std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
+                    mat_odom2map_ = reg_matrix;
+                    recovery_relative_odom2map_ = reg_matrix;
+                }
+                recovery_success_streak_.store(0);
+                tracking_fail_count_ = 0;
+                SetLocalizationStatus(LocalizationStatus::TRACKING_WARN,
+                                      "recovery_refining");
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "[OPEN3D_RECOVERY] provisional seed=%s fitness=%.6f/%.3f "
+                    "rmse=%.6f dpos=%.3f dyaw=%.3f output_enabled=0",
+                    best_seed.c_str(), best_fitness,
+                    recovery_provisional_fitness_threshold_, best_rmse,
+                    best_delta_trans, best_delta_yaw);
             }
             else
             {

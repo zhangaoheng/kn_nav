@@ -1294,6 +1294,8 @@ public:
         this->declare_parameter<int>("robustness.degraded_enter_frames", 3);
         this->declare_parameter<int>("robustness.recover_enter_frames", 10);
         this->declare_parameter<int>("robustness.recover_normal_frames", 10);
+        this->declare_parameter<int>("robustness.recovery_bad_lost_frames", 3);
+        this->declare_parameter<double>("robustness.max_recovery_duration", 5.0);
         this->declare_parameter<double>("robustness.max_degraded_duration", 3.0);
         this->declare_parameter<int>("robustness.zero_effective_lost_frames", 5);
         this->declare_parameter<double>("robustness.max_imu_dt", 0.02);
@@ -1367,6 +1369,8 @@ public:
         this->get_parameter_or<int>("robustness.degraded_enter_frames", degraded_enter_frames_, 3);
         this->get_parameter_or<int>("robustness.recover_enter_frames", recover_enter_frames_, 10);
         this->get_parameter_or<int>("robustness.recover_normal_frames", recover_normal_frames_, 10);
+        this->get_parameter_or<int>("robustness.recovery_bad_lost_frames", recovery_bad_lost_frames_, 3);
+        this->get_parameter_or<double>("robustness.max_recovery_duration", max_recovery_duration_, 5.0);
         this->get_parameter_or<double>("robustness.max_degraded_duration", max_degraded_duration_, 3.0);
         this->get_parameter_or<int>("robustness.zero_effective_lost_frames", zero_effective_lost_frames_, 5);
         this->get_parameter_or<double>("robustness.max_imu_dt", max_imu_dt_, 0.02);
@@ -1380,6 +1384,8 @@ public:
         lost_reinit_frames_ = std::max(1, lost_reinit_frames_);
         lost_reinit_cooldown_ = std::max(0.0, lost_reinit_cooldown_);
         recovery_bootstrap_frames_ = std::max(0, recovery_bootstrap_frames_);
+        recovery_bad_lost_frames_ = std::max(1, recovery_bad_lost_frames_);
+        max_recovery_duration_ = std::max(0.1, max_recovery_duration_);
         double diagnostics_report_period_s = 1.0;
         this->get_parameter_or<double>("diagnostics.report_period_s", diagnostics_report_period_s, 1.0);
         diagnostics_report_period_s = std::max(0.2, diagnostics_report_period_s);
@@ -1551,6 +1557,11 @@ private:
             degraded_start_time_ = lidar_end_time;
         else if (next == LocalizationHealth::NORMAL)
             degraded_start_time_ = -1.0;
+        if (next == LocalizationHealth::RECOVERING)
+            recovery_start_time_ = lidar_end_time;
+        else if (next == LocalizationHealth::NORMAL ||
+                 next == LocalizationHealth::LOST)
+            recovery_start_time_ = -1.0;
         if (next == LocalizationHealth::LOST)
             lost_scan_count_ = 0;
         publish_localization_valid(next == LocalizationHealth::NORMAL &&
@@ -1584,11 +1595,38 @@ private:
                 return;
             if (localization_health_ == LocalizationHealth::RECOVERING)
             {
-                set_health(LocalizationHealth::LOST, "recovery_scan_bad");
+                const bool recovery_timed_out = recovery_start_time_ >= 0.0 &&
+                    lidar_end_time - recovery_start_time_ >=
+                        max_recovery_duration_;
+                if (scan_critical)
+                {
+                    set_health(LocalizationHealth::LOST,
+                               "recovery_scan_critical");
+                }
+                else if (bad_scan_count_ >= recovery_bad_lost_frames_)
+                {
+                    set_health(LocalizationHealth::LOST,
+                               "recovery_bad_streak");
+                }
+                else if (recovery_timed_out)
+                {
+                    set_health(LocalizationHealth::LOST,
+                               "recovery_timeout");
+                }
+                else
+                {
+                    RCLCPP_WARN_THROTTLE(
+                        get_logger(), *get_clock(), 500,
+                        "[FASTLIO_HEALTH] keep RECOVERING on soft bad scan: "
+                        "bad_streak=%d/%d elapsed=%.2f/%.2fs",
+                        bad_scan_count_, recovery_bad_lost_frames_,
+                        recovery_start_time_ >= 0.0
+                            ? lidar_end_time - recovery_start_time_ : 0.0,
+                        max_recovery_duration_);
+                }
                 return;
             }
-            if (localization_health_ == LocalizationHealth::RECOVERING ||
-                scan_critical ||
+            if (scan_critical ||
                 bad_scan_count_ >= (imu_stressed
                     ? std::max(1, degraded_enter_frames_ - 1)
                     : degraded_enter_frames_))
@@ -1626,6 +1664,13 @@ private:
         {
             healthy_scan_count_ = 0;
             set_health(LocalizationHealth::NORMAL, "recovered");
+        }
+        else if (localization_health_ == LocalizationHealth::RECOVERING &&
+                 recovery_start_time_ >= 0.0 &&
+                 lidar_end_time - recovery_start_time_ >=
+                     max_recovery_duration_)
+        {
+            set_health(LocalizationHealth::LOST, "recovery_timeout");
         }
     }
 
@@ -1828,7 +1873,8 @@ private:
             if (p_imu->last_scan_saturated_samples() > 0)
                 ++saturated_scan_count_window_;
 
-            update_health(scan_bad, scan_critical, imu_stressed,
+            update_health(scan_bad,
+                          scan_critical || correction_critical, imu_stressed,
                           effct_feat_num == 0);
             if (localization_health_ == LocalizationHealth::LOST)
                 ++lost_scan_count_;
@@ -2226,6 +2272,8 @@ private:
     int degraded_enter_frames_ = 3;
     int recover_enter_frames_ = 10;
     int recover_normal_frames_ = 10;
+    int recovery_bad_lost_frames_ = 3;
+    double max_recovery_duration_ = 5.0;
     double max_degraded_duration_ = 3.0;
     int zero_effective_lost_frames_ = 5;
     double max_imu_dt_ = 0.02;
@@ -2245,6 +2293,7 @@ private:
     double last_reinit_time_ = -1.0;
     uint64_t local_map_reinit_count_ = 0;
     double degraded_start_time_ = -1.0;
+    double recovery_start_time_ = -1.0;
     using StateCovariance =
         esekfom::esekf<state_ikfom, 12, input_ikfom>::cov;
     state_ikfom last_good_state_;

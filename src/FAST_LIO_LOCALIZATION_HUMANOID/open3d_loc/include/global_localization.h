@@ -142,6 +142,7 @@ private:
     double recovery_max_translation_ = 2.0;
     double recovery_max_yaw_deg_ = 15.0;
     double recovery_max_inlier_rmse_ = 0.15;
+    double recovery_provisional_fitness_threshold_ = 0.65;
     double recovery_xy_search_range_ = 1.0;
     double recovery_z_search_range_ = 0.5;
     double recovery_yaw_search_deg_ = 15.0;
