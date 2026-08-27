@@ -109,6 +109,15 @@ ros2 service call /pct_scan_navigation/cancel std_srvs/srv/Trigger '{}'
 
 ### 2026-08-27
 
+#### FAST-LIO 软硬退化分级与 Open3D 全局恢复第四版
+
+- 问题：第三版实机验证已能阻止 FAST-LIO 无限发散，并通过局部 ikd-Tree 重建多次恢复到 `NORMAL`，但存在当前扫描已经基本健康仍被历史 `1.5 s` 超时强制切入 `LOST`、软退化门限直接用于拒绝激光校正、单帧重建地图较稀疏，以及 Open3D 在重建后继续使用旧 `map→odom` 导致恢复 ICP 全部失败的问题。
+- 修改：FAST-LIO 将当前帧质量判断提前到退化超时之前，只有当前帧仍然异常且连续退化达到 `3.0 s` 才进入 `LOST`；绝对有效点门限由 `80` 调整为 `50`，有效比例仍保持 `0.30`。保留 `0.15 m/2 deg/1 m/s` 作为软退化门限，新增 `0.35 m/5 deg/1.5 m/s` 临界更新门限：软退化帧接受有限激光校正但冻结地图，只有临界异常才回滚到有界 IMU 预测。局部地图重建进入 `RECOVERING` 后，最多允许 `3` 帧严格健康扫描扩充恢复地图，降低只依靠单帧稀疏点云再次失锁的概率。
+- 修改：Open3D 持续保存最后可信的 `T_map_base` 和 `T_odom_base`；FAST-LIO 恢复后同时生成保留相对运动的旧 `map→odom` 种子，以及将当前 odom 锚定到最后可信全局位姿的保守种子。恢复模式在两个种子附近生成 `±1.0 m` XY、`±0.5 m` Z 和 `±15 deg` yaw 候选，先用扩大到 `0.5 m` 的对应距离评价粗重叠，只对最佳 `4` 个候选执行 ICP；最终仍使用原严格 fitness 门限，并增加 `RMSE <= 0.15`、单次修正不超过 `2.0 m/15 deg` 的验收。第一次高置信结果只在内部更新恢复种子，不发布全局 TF；连续 `2` 次通过后才恢复 `map→odom`、TF 和 `/Odometry_open3d` 输出。新增 `[OPEN3D_RECOVERY]` 日志记录候选、粗重叠、精匹配 fitness/RMSE、修正量、连续通过次数及拒绝原因。
+- 配置：FAST-LIO 自带 Avia、Horizon、MID360、Ouster64、Velodyne，以及 A2、B2、local、Go2、Go2-W 的全部相关 YAML 已同步软硬门限、`3.0 s` 超时和 `recovery_bootstrap_frames=3`。Open3D 的 A2、B2、local、Go2、Go2-W 拆分配置、A2/B2 统一配置及两份 G1 旧式配置已同步恢复搜索和连续确认参数。
+- 验证：全部 `66` 份 YAML 解析和 `git diff --check` 通过；A2/B2 的 `navigation.yaml` 与拆分 `fast_lio.yaml/open3d_loc.yaml` 参数完全一致。`fast_lio`、`open3d_loc` 在 `BUILD_TESTING=OFF` 下编译通过，FAST-LIO 仅输出依赖中的既存 Boost Bind 弃用提示。第四版专项契约测试 `1/1` 通过；完整配置契约仍为 `14/16`，失败的两项仍是仓库既有的全局重定位开关旧期望和 coordinator 参数旧期望，与第四版代码无关。
+- 实机测试重点：继续人工遥控上下楼，统计误进入 `LOST` 和局部重建次数是否明显下降；若发生重建，确认 `[OPEN3D_RECOVERY]` 能从候选粗筛进入连续 `1/2、2/2` 高置信确认，并在 `2/2` 后恢复 `/Odometry_open3d`。同时观察恢复结果是否落在正确楼层、恢复瞬间全局位姿是否跳变，以及候选搜索期间 CPU 占用和单次定位耗时。
+
 #### FAST-LIO 第三版实机恢复测试结果
 
 - 问题：部署“失锁隔离、局部 ikd-Tree 重建和 Open3D 有效性门控”后人工遥控上下楼，FAST-LIO 局部地图整体不再像旧版一样持续发散，但运行中发生多次失锁和局部重建；全局定位在首次失锁后未能恢复，实际效果仍不理想。
