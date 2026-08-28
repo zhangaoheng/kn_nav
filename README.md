@@ -107,6 +107,19 @@ ros2 service call /pct_scan_navigation/cancel std_srvs/srv/Trigger '{}'
 - 遗留事项：
 ```
 
+### 2026-08-28
+
+#### Open3D 动态范围约束与可信恢复第六版
+
+- 问题：第五版已使 FAST-LIO 在实机上下楼测试中完成受控局部重建并长期保持 `NORMAL`，但第三轮 Open3D 恢复在重复楼梯结构中由 provisional fitness `0.718365、0.763189、0.787409` 逐步细化，并以仅略高于普通 tracking 门限的 `0.845144/0.855609` 连续 `2/2` 开放输出；现场确认该轮自动恢复后全局定位落到一楼错误位置。现有 provisional 每帧直接改写下一帧搜索中心，只限制单次 `2 m/15 deg` 修正而没有累计边界；恢复地图仍使用 `60×60×40 m` 子图，可能同时包含多个楼层；普通 tracking 与失锁恢复共用 `0.8` fitness 门限，相邻两帧又从上一帧结果继续匹配，不能形成独立验证。
+- 可信锚点修改：删除 odom 回调和 FAST-LIO 失效回调中无条件更新 `last_trusted_baselink2map_` 的逻辑。最后可信全局位姿和对应 FAST-LIO odom 现在只在初始化成功、普通 tracking ICP 正式通过或恢复完成全部确认时更新；provisional、rejected、`TRACKING_WARN/LOST` 和 FAST-LIO invalid 均不会污染可信锚点。动态换图会同步清空可信锚点与待确认状态。
+- 动态范围修改：FAST-LIO 恢复后固定保存由最后可信 `map→base` 与当时 `odom→base` 计算出的 `recovery_prediction_odom2map_`。每帧使用该固定变换乘当前 FAST-LIO odom，得到随机器人真实运动更新的预测全局位姿；所有 ICP 候选均相对该预测位姿检查，默认要求 map 系平面误差不超过 `2.0 m`、楼层高度误差不超过 `0.6 m`、航向误差不超过 `15 deg`。provisional 仍可更新内部 relative 细化种子，但不能移动动态预测中心，因此无法通过多帧小修正累计逃逸到其他楼层。新增候选日志 `prediction_error=(xy,z,yaw) in_range`，全部候选越界时以 `reason=prediction_range` 拒绝。
+- 地图裁剪修改：恢复阶段不再使用覆盖多层的 `60×60×40 m` 地图子图，而是以动态预测位置为中心，使用 map 轴对齐的 `20×20×2.4 m` 子图，默认平面半径 `10 m`、预测高度上下各 `1.2 m`；真实上下楼高度由 FAST-LIO 相对运动推动裁剪中心，Z 窗口只限制候选相对预测高度的误差。恢复完成后强制清空恢复子图，下一轮普通 tracking 重新构建原来的完整子图，避免复用受限地图。
+- 确认门控修改：新增独立 `recovery_final_fitness_threshold=0.90`，普通 tracking 继续使用 `threshold_fitness=0.8`；正式恢复由 `2` 帧提高到固定基准的 `3` 帧确认。第一帧超过 `0.90` 后只保存到 `recovery_confirm_odom2map_`，不改写正式 `map→odom` 和后续确认基准；第二、三帧必须分别与第一帧保持平移不超过 `0.30 m`、map 系高度不超过 `0.20 m`、航向不超过 `3 deg`。不一致时以当前候选重建 `1/3` 基准，只有 `3/3` 后才一次性开放 TF 和 `/Odometry_open3d`，同时更新可信锚点。第五版错误轮的 `0.845144/0.855609` 在新规则下不会进入确认阶段。
+- 配置：A2、B2 的统一 `navigation.yaml` 与拆分 `open3d_loc.yaml`，local、Go2、Go2-W 拆分配置及两份 G1 旧式配置均同步新增恢复正式门限、动态误差范围、恢复地图范围和确认一致性参数，并将 `recovery_success_required` 改为 `3`。未修改 FAST-LIO、IMU处理、人工 `/initialpose`、导航规划和遥控输入。
+- 验证：全部 `66` 份 YAML 解析和 `git diff --check` 通过；`open3d_loc` 在 `BUILD_TESTING=OFF` 下编译通过且无新增编译错误。第六版相关配置与代码契约测试通过；完整 `test_navigation_contract.py` 为既有的 `14/16`，两项失败仍是全局重定位开关和 coordinator 参数的旧测试期望，与第六版无关。
+- 实机测试重点：继续人工遥控完成相同上下楼路线。正确恢复应输出候选 `in_range=1`、fitness 超过 `0.90`，并依次出现固定基准 `streak=1/3、2/3、3/3 output_enabled=1`；低于 `0.90`、高度误差超过 `0.6 m` 或累计走出预测范围的候选必须保持 `output_enabled=0`。重点确认恢复子图点数仍高于 `min_target_points=500`，若因地图稀疏频繁出现 `invalid_cloud`，只逐步放宽恢复子图 XY/Z 尺寸，不先放宽 `0.6 m` 楼层误差和 `0.90` 正式门限。
+
 ### 2026-08-27
 
 #### FAST-LIO 恢复迟滞与 Open3D 渐进全局恢复第五版
