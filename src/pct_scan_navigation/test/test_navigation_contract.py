@@ -405,6 +405,12 @@ def test_fastlio_degraded_state_preserves_bounded_motion_without_map_pollution()
     assert 'recovery_stationary_odom2map_' in open3d
     assert 'recovery_success_streak_' in open3d
     assert 'recovery_provisional_fitness_threshold_' in open3d
+    assert 'recovery_final_fitness_threshold_' in open3d
+    assert 'recovery_prediction_odom2map_' in open3d
+    assert 'recovery_confirm_odom2map_' in open3d
+    assert 'prediction_range' in open3d
+    assert 'recovery_confirm_valid_' in open3d
+    assert 'last_trusted_baselink2map_ =\n                            reg_matrix * mat_baselink2odom_cur' in open3d
     assert 'recovery_refining' in open3d
     assert 'selected_in_family' in open3d
     assert '[OPEN3D_RECOVERY]' in open3d
@@ -434,11 +440,21 @@ def test_fastlio_degraded_state_preserves_bounded_motion_without_map_pollution()
         assert open3d_params['recovery_max_yaw_deg'] == 15.0
         assert open3d_params['recovery_max_inlier_rmse'] == 0.15
         assert open3d_params['recovery_provisional_fitness_threshold'] == 0.65
+        assert open3d_params['recovery_final_fitness_threshold'] == 0.90
         assert open3d_params['recovery_xy_search_range'] == 1.0
         assert open3d_params['recovery_z_search_range'] == 0.5
         assert open3d_params['recovery_yaw_search_deg'] == 15.0
+        assert open3d_params['recovery_max_xy_error'] == 2.0
+        assert open3d_params['recovery_max_z_error'] == 0.6
+        assert open3d_params['recovery_max_yaw_error_deg'] == 15.0
+        assert open3d_params['recovery_submap_xy_range'] == 10.0
+        assert open3d_params['recovery_submap_z_below'] == 1.2
+        assert open3d_params['recovery_submap_z_above'] == 1.2
+        assert open3d_params['recovery_confirm_max_translation'] == 0.30
+        assert open3d_params['recovery_confirm_max_z'] == 0.20
+        assert open3d_params['recovery_confirm_max_yaw_deg'] == 3.0
         assert open3d_params['recovery_candidate_count'] == 4
-        assert open3d_params['recovery_success_required'] == 2
+        assert open3d_params['recovery_success_required'] == 3
 
 
 # 约束纯全局跟踪测试链路（coordinator 可执行 + pure_pursuit 启动）保留。

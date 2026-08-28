@@ -104,6 +104,20 @@ void FilterNearOrigin(sensor_msgs::msg::PointCloud2 &cloud, double filter_radius
     cloud.data = std::move(filtered);
     cloud.is_dense = false;
 }
+
+double MatrixYawDeg(const Eigen::Matrix4d &matrix)
+{
+    return std::atan2(matrix(1, 0), matrix(0, 0)) * 180.0 / M_PI;
+}
+
+double WrappedYawErrorDeg(const Eigen::Matrix4d &reference,
+                          const Eigen::Matrix4d &candidate)
+{
+    double error = MatrixYawDeg(reference.inverse() * candidate);
+    while (error > 180.0) error -= 360.0;
+    while (error < -180.0) error += 360.0;
+    return std::abs(error);
+}
 } // namespace
 
 // 加载离线 PCD 全局地图：同时生成粗地图（发布 /map_3d 用）与精地图
@@ -257,6 +271,9 @@ void GloabalLocalization::HandleLoadMap(
     {
         std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
         mat_odom2map_ = Eigen::Matrix4d::Identity();
+        last_trusted_pose_valid_ = false;
+        recovery_confirm_valid_ = false;
+        recovery_success_streak_.store(0);
     }
     response->success = true;
     response->message = message;
@@ -362,11 +379,21 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
     this->declare_parameter<double>("recovery_max_yaw_deg", 15.0);
     this->declare_parameter<double>("recovery_max_inlier_rmse", 0.15);
     this->declare_parameter<double>("recovery_provisional_fitness_threshold", 0.65);
+    this->declare_parameter<double>("recovery_final_fitness_threshold", 0.90);
     this->declare_parameter<double>("recovery_xy_search_range", 1.0);
     this->declare_parameter<double>("recovery_z_search_range", 0.5);
     this->declare_parameter<double>("recovery_yaw_search_deg", 15.0);
+    this->declare_parameter<double>("recovery_max_xy_error", 2.0);
+    this->declare_parameter<double>("recovery_max_z_error", 0.6);
+    this->declare_parameter<double>("recovery_max_yaw_error_deg", 15.0);
+    this->declare_parameter<double>("recovery_submap_xy_range", 10.0);
+    this->declare_parameter<double>("recovery_submap_z_below", 1.2);
+    this->declare_parameter<double>("recovery_submap_z_above", 1.2);
+    this->declare_parameter<double>("recovery_confirm_max_translation", 0.30);
+    this->declare_parameter<double>("recovery_confirm_max_z", 0.20);
+    this->declare_parameter<double>("recovery_confirm_max_yaw_deg", 3.0);
     this->declare_parameter<int>("recovery_candidate_count", 4);
-    this->declare_parameter<int>("recovery_success_required", 2);
+    this->declare_parameter<int>("recovery_success_required", 3);
     this->declare_parameter<double>("scan_map_filter_radius", 0.0);
     this->declare_parameter<int>("localization_lost_fail_count", 3);
     this->declare_parameter<int>("min_source_points", 2500);
@@ -401,19 +428,40 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
     this->get_parameter("recovery_max_yaw_deg", recovery_max_yaw_deg_);
     this->get_parameter("recovery_max_inlier_rmse", recovery_max_inlier_rmse_);
     this->get_parameter("recovery_provisional_fitness_threshold", recovery_provisional_fitness_threshold_);
+    this->get_parameter("recovery_final_fitness_threshold", recovery_final_fitness_threshold_);
     this->get_parameter("recovery_xy_search_range", recovery_xy_search_range_);
     this->get_parameter("recovery_z_search_range", recovery_z_search_range_);
     this->get_parameter("recovery_yaw_search_deg", recovery_yaw_search_deg_);
+    this->get_parameter("recovery_max_xy_error", recovery_max_xy_error_);
+    this->get_parameter("recovery_max_z_error", recovery_max_z_error_);
+    this->get_parameter("recovery_max_yaw_error_deg", recovery_max_yaw_error_deg_);
+    this->get_parameter("recovery_submap_xy_range", recovery_submap_xy_range_);
+    this->get_parameter("recovery_submap_z_below", recovery_submap_z_below_);
+    this->get_parameter("recovery_submap_z_above", recovery_submap_z_above_);
+    this->get_parameter("recovery_confirm_max_translation", recovery_confirm_max_translation_);
+    this->get_parameter("recovery_confirm_max_z", recovery_confirm_max_z_);
+    this->get_parameter("recovery_confirm_max_yaw_deg", recovery_confirm_max_yaw_deg_);
     this->get_parameter("recovery_candidate_count", recovery_candidate_count_);
     this->get_parameter("recovery_success_required", recovery_success_required_);
     recovery_candidate_count_ = std::max(2, recovery_candidate_count_);
     recovery_success_required_ = std::max(1, recovery_success_required_);
+    recovery_max_xy_error_ = std::max(0.0, recovery_max_xy_error_);
+    recovery_max_z_error_ = std::max(0.0, recovery_max_z_error_);
+    recovery_max_yaw_error_deg_ = std::max(0.0, recovery_max_yaw_error_deg_);
+    recovery_submap_xy_range_ = std::max(1.0, recovery_submap_xy_range_);
+    recovery_submap_z_below_ = std::max(0.1, recovery_submap_z_below_);
+    recovery_submap_z_above_ = std::max(0.1, recovery_submap_z_above_);
+    recovery_confirm_max_translation_ = std::max(0.0, recovery_confirm_max_translation_);
+    recovery_confirm_max_z_ = std::max(0.0, recovery_confirm_max_z_);
+    recovery_confirm_max_yaw_deg_ = std::max(0.0, recovery_confirm_max_yaw_deg_);
     this->get_parameter("scan_map_filter_radius", scan_map_filter_radius_);
     this->get_parameter("localization_lost_fail_count", localization_lost_fail_count_);
     this->get_parameter("min_source_points", min_source_points_);
     this->get_parameter("min_target_points", min_target_points_);
     this->get_parameter("threshold_fitness_init", threshold_fitness_init_);
     this->get_parameter("threshold_fitness", threshold_fitness_);
+    recovery_final_fitness_threshold_ = std::max(
+        threshold_fitness_, recovery_final_fitness_threshold_);
     this->get_parameter("initialpose", initialpose_);
     this->get_parameter("dis_updatemap", dis_updatemap_);
     std::string path_imu_to_base = "";
@@ -430,8 +478,11 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
                 "max_init_icp_yaw_deg=%.3f, min_init_fitness_improvement=%.3f, scan_map_filter_radius=%.3f, "
                 "min_source_points=%d, min_target_points=%d, recovery_icp=%.3f, "
                 "recovery_max_translation=%.3f, recovery_max_yaw=%.3f, "
-                "recovery_max_rmse=%.3f, recovery_provisional_fitness=%.3f, "
+                "recovery_max_rmse=%.3f, recovery_fitness=(provisional=%.3f,final=%.3f), "
                 "recovery_search=(xy=%.2f,z=%.2f,yaw=%.1f), "
+                "recovery_error=(xy=%.2f,z=%.2f,yaw=%.1f), "
+                "recovery_submap=(xy=%.1f,z-=%.1f,z+=%.1f), "
+                "recovery_confirm=(translation=%.2f,z=%.2f,yaw=%.1f), "
                 "recovery_candidates=%d, recovery_success_required=%d",
                 voxelsize_coarse_, voxel_downsample_size_, icp_distance_threshold_,
                 fitness_eval_threshold_, normal_search_radius_, threshold_fitness_, threshold_fitness_init_,
@@ -439,8 +490,14 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
                 min_init_fitness_improvement_, scan_map_filter_radius_, min_source_points_, min_target_points_,
                 recovery_icp_distance_threshold_, recovery_max_translation_, recovery_max_yaw_deg_,
                 recovery_max_inlier_rmse_, recovery_provisional_fitness_threshold_,
+                recovery_final_fitness_threshold_,
                 recovery_xy_search_range_, recovery_z_search_range_,
-                recovery_yaw_search_deg_, recovery_candidate_count_, recovery_success_required_);
+                recovery_yaw_search_deg_, recovery_max_xy_error_, recovery_max_z_error_,
+                recovery_max_yaw_error_deg_, recovery_submap_xy_range_,
+                recovery_submap_z_below_, recovery_submap_z_above_,
+                recovery_confirm_max_translation_, recovery_confirm_max_z_,
+                recovery_confirm_max_yaw_deg_, recovery_candidate_count_,
+                recovery_success_required_);
 
     if (initialpose_.size() != 6)
     {
@@ -722,6 +779,15 @@ void GloabalLocalization::CallbackImulink2Odom(const nav_msgs::msg::Odometry::Sh
             recovery_stationary_odom2map_ = last_trusted_pose_valid_
                 ? last_trusted_baselink2map_ * mat_baselink2odom_.inverse()
                 : mat_odom2map_;
+            // Keep a fixed map->odom prediction anchor for the whole recovery.
+            // The current FAST-LIO odom is multiplied below on every frame, so
+            // real robot motion is preserved while ICP corrections remain
+            // bounded around the predicted global pose.
+            recovery_prediction_odom2map_ = last_trusted_pose_valid_
+                ? last_trusted_baselink2map_ * last_trusted_baselink2odom_.inverse()
+                : recovery_relative_odom2map_;
+            recovery_confirm_valid_ = false;
+            recovery_success_streak_.store(0);
             recovery_relative_snapshot = recovery_relative_odom2map_;
             recovery_stationary_snapshot = recovery_stationary_odom2map_;
             recovery_trusted_snapshot = last_trusted_pose_valid_;
@@ -731,12 +797,6 @@ void GloabalLocalization::CallbackImulink2Odom(const nav_msgs::msg::Odometry::Sh
         mat_odom2map_snapshot = mat_odom2map_;
         mat_baselink2odom_snapshot = mat_baselink2odom_;
         mat_baselink2map_snapshot = mat_baselink2map_;
-        if (loc_initialized_.load() && !fastlio_recovery_pending_icp_.load())
-        {
-            last_trusted_baselink2map_ = mat_baselink2map_;
-            last_trusted_baselink2odom_ = mat_baselink2odom_;
-            last_trusted_pose_valid_ = true;
-        }
     }
 
     if (recovery_seed_initialized)
@@ -862,13 +922,6 @@ void GloabalLocalization::CallbackFastlioValid(
     const bool changed = fastlio_valid_.exchange(valid) != valid;
     if (!valid)
     {
-        if (loc_initialized_.load() && changed)
-        {
-            std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
-            last_trusted_baselink2map_ = mat_baselink2map_;
-            last_trusted_baselink2odom_ = mat_baselink2odom_;
-            last_trusted_pose_valid_ = true;
-        }
         {
             std::lock_guard<std::mutex> scan_lock(lock_scan_);
             que_pcd_scan_.clear();
@@ -880,6 +933,10 @@ void GloabalLocalization::CallbackFastlioValid(
         fastlio_recovery_pending_icp_.store(true);
         recovery_seed_pending_.store(true);
         recovery_success_streak_.store(0);
+        {
+            std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
+            recovery_confirm_valid_ = false;
+        }
         SetLocalizationStatus(
             loc_initialized_.load() ? LocalizationStatus::TRACKING_LOST
                                     : LocalizationStatus::UNINITIALIZED,
@@ -895,6 +952,8 @@ void GloabalLocalization::CallbackFastlioValid(
         fastlio_recovery_pending_icp_.store(true);
         recovery_seed_pending_.store(true);
         recovery_success_streak_.store(0);
+        std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
+        recovery_confirm_valid_ = false;
     }
     SetLocalizationStatus(
         loc_initialized_.load() ? LocalizationStatus::TRACKING_WARN
@@ -1204,6 +1263,14 @@ bool GloabalLocalization::LocalizationInitialize()
 
     tracking_fail_count_ = 0;
     fastlio_recovery_pending_icp_.store(false);
+    {
+        std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
+        last_trusted_baselink2odom_ = mat_baselink2odom_;
+        last_trusted_baselink2map_ = mat_odom2map_ * mat_baselink2odom_;
+        last_trusted_pose_valid_ = true;
+        recovery_confirm_valid_ = false;
+        recovery_success_streak_.store(0);
+    }
     SetLocalizationStatus(LocalizationStatus::INIT_SUCCESS, "ok");
     return true;
 }
@@ -1394,6 +1461,7 @@ void GloabalLocalization::Localization()
             Eigen::Matrix4d reg_matrix = Eigen::Matrix4d::Identity();
             Eigen::Matrix4d recovery_relative_seed = Eigen::Matrix4d::Identity();
             Eigen::Matrix4d recovery_stationary_seed = Eigen::Matrix4d::Identity();
+            Eigen::Matrix4d recovery_prediction_seed = Eigen::Matrix4d::Identity();
             const bool recovery_pending = fastlio_recovery_pending_icp_.load();
 
             {
@@ -1402,11 +1470,17 @@ void GloabalLocalization::Localization()
                 reg_matrix = mat_odom2map_;
                 recovery_relative_seed = recovery_relative_odom2map_;
                 recovery_stationary_seed = recovery_stationary_odom2map_;
+                recovery_prediction_seed = recovery_prediction_odom2map_;
             }
             *pcd_scan = *scan_snapshot;
             mat_baselink2map_cur = reg_matrix * mat_baselink2odom_cur;
+            const Eigen::Matrix4d predicted_baselink2map = recovery_pending
+                ? recovery_prediction_seed * mat_baselink2odom_cur
+                : mat_baselink2map_cur;
 
-            Eigen::Vector3d cur_loc(mat_baselink2map_cur(0, 3), mat_baselink2map_cur(1, 3), mat_baselink2map_cur(2, 3));
+            Eigen::Vector3d cur_loc(
+                predicted_baselink2map(0, 3), predicted_baselink2map(1, 3),
+                predicted_baselink2map(2, 3));
             auto dis_motion = ComputeMotionDis(last_loc_, cur_loc);
             if (recovery_pending || dis_motion > dis_updatemap_)
             {
@@ -1416,8 +1490,26 @@ void GloabalLocalization::Localization()
                             "update submap: last=(%.3f, %.3f, %.3f), current=(%.3f, %.3f, %.3f), distance=%.3f",
                             last_loc_.x(), last_loc_.y(), last_loc_.z(), cur_loc.x(), cur_loc.y(), cur_loc.z(), dis_motion);
                 last_loc_ = cur_loc;
-                OBB_map->center_ = mat_baselink2map_cur.block<3, 1>(0, 3);
-                OBB_map->R_ = mat_baselink2map_cur.block<3, 3>(0, 0);
+                if (recovery_pending)
+                {
+                    // Recovery uses an axis-aligned, floor-local target around
+                    // the trusted pose propagated by current FAST-LIO motion.
+                    // It must not follow provisional ICP corrections.
+                    OBB_map->extent_ = Eigen::Vector3d(
+                        2.0 * recovery_submap_xy_range_,
+                        2.0 * recovery_submap_xy_range_,
+                        recovery_submap_z_below_ + recovery_submap_z_above_);
+                    OBB_map->center_ = predicted_baselink2map.block<3, 1>(0, 3);
+                    OBB_map->center_.z() +=
+                        0.5 * (recovery_submap_z_above_ - recovery_submap_z_below_);
+                    OBB_map->R_ = Eigen::Matrix3d::Identity();
+                }
+                else
+                {
+                    OBB_map->extent_ = Eigen::Vector3d(60, 60, 40);
+                    OBB_map->center_ = mat_baselink2map_cur.block<3, 1>(0, 3);
+                    OBB_map->R_ = mat_baselink2map_cur.block<3, 3>(0, 0);
+                }
 
                 /// 粗地图和精地图
                 {
@@ -1571,6 +1663,10 @@ void GloabalLocalization::Localization()
             double best_before_fitness = 0.0;
             double best_delta_trans = std::numeric_limits<double>::infinity();
             double best_delta_yaw = std::numeric_limits<double>::infinity();
+            double best_prediction_xy_error = std::numeric_limits<double>::infinity();
+            double best_prediction_z_error = std::numeric_limits<double>::infinity();
+            double best_prediction_yaw_error = std::numeric_limits<double>::infinity();
+            int range_rejected_candidates = 0;
 
             for (const auto &seed : seeds)
             {
@@ -1590,18 +1686,49 @@ void GloabalLocalization::Localization()
                     std::atan2(icp_result.transformation_(1, 0),
                                icp_result.transformation_(0, 0)) *
                     180.0 / M_PI);
+                double prediction_xy_error = 0.0;
+                double prediction_z_error = 0.0;
+                double prediction_yaw_error = 0.0;
+                bool within_prediction_range = true;
+                if (recovery_pending)
+                {
+                    const Eigen::Matrix4d candidate_baselink2map =
+                        candidate * mat_baselink2odom_cur;
+                    const Eigen::Vector3d prediction_translation_error =
+                        candidate_baselink2map.block<3, 1>(0, 3) -
+                        predicted_baselink2map.block<3, 1>(0, 3);
+                    // Translation limits are expressed in map axes so Z is a
+                    // real floor-height error even while the robot is pitched
+                    // on stairs.
+                    prediction_xy_error =
+                        prediction_translation_error.head<2>().norm();
+                    prediction_z_error =
+                        std::abs(prediction_translation_error.z());
+                    prediction_yaw_error = WrappedYawErrorDeg(
+                        predicted_baselink2map, candidate_baselink2map);
+                    within_prediction_range =
+                        prediction_xy_error <= recovery_max_xy_error_ &&
+                        prediction_z_error <= recovery_max_z_error_ &&
+                        prediction_yaw_error <= recovery_max_yaw_error_deg_;
+                    if (!within_prediction_range)
+                        ++range_rejected_candidates;
+                }
 
                 RCLCPP_INFO(
                     this->get_logger(),
                     "[OPEN3D_RECOVERY] mode=%s seed=%s coarse=%.6f before=%.6f after=%.6f "
-                    "rmse=%.6f dpos=%.3f dyaw=%.3f icp_threshold=%.3f",
+                    "rmse=%.6f dpos=%.3f dyaw=%.3f prediction_error=(xy=%.3f,z=%.3f,yaw=%.3f) "
+                    "in_range=%d icp_threshold=%.3f",
                     recovery_pending ? "recovery" : "tracking",
                     seed.name.c_str(), seed.coarse_fitness, eva_before.fitness_, eva_after.fitness_,
-                    eva_after.inlier_rmse_, delta_trans, delta_yaw, icp_threshold);
+                    eva_after.inlier_rmse_, delta_trans, delta_yaw,
+                    prediction_xy_error, prediction_z_error, prediction_yaw_error,
+                    within_prediction_range ? 1 : 0, icp_threshold);
 
-                if (eva_after.fitness_ > best_fitness ||
+                if (within_prediction_range &&
+                    (eva_after.fitness_ > best_fitness ||
                     (std::abs(eva_after.fitness_ - best_fitness) < 1e-9 &&
-                     eva_after.inlier_rmse_ < best_rmse))
+                     eva_after.inlier_rmse_ < best_rmse)))
                 {
                     best_seed = seed.name;
                     best_matrix = candidate;
@@ -1610,6 +1737,9 @@ void GloabalLocalization::Localization()
                     best_before_fitness = eva_before.fitness_;
                     best_delta_trans = delta_trans;
                     best_delta_yaw = delta_yaw;
+                    best_prediction_xy_error = prediction_xy_error;
+                    best_prediction_z_error = prediction_z_error;
+                    best_prediction_yaw_error = prediction_yaw_error;
                 }
             }
 
@@ -1618,7 +1748,9 @@ void GloabalLocalization::Localization()
             const bool rmse_ok = !recovery_pending ||
                 (std::isfinite(best_rmse) &&
                  best_rmse <= recovery_max_inlier_rmse_);
-            const bool accept_tracking = best_fitness > threshold_fitness_ &&
+            const double required_fitness = recovery_pending
+                ? recovery_final_fitness_threshold_ : threshold_fitness_;
+            const bool accept_tracking = best_fitness > required_fitness &&
                 best_delta_trans <= max_delta_translation &&
                 best_delta_yaw <= max_delta_yaw && rmse_ok;
             const bool accept_provisional = recovery_pending &&
@@ -1630,19 +1762,74 @@ void GloabalLocalization::Localization()
             if (accept_tracking && fastlio_valid_.load())
             {
                 int recovery_streak = recovery_success_required_;
-                {
-                    std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
-                    mat_odom2map_ = reg_matrix;
-                    recovery_relative_odom2map_ = reg_matrix;
-                }
                 tracking_fail_count_ = 0;
                 if (recovery_pending)
                 {
-                    recovery_streak = recovery_success_streak_.fetch_add(1) + 1;
+                    bool confirmation_reset = false;
+                    double confirm_translation_error = 0.0;
+                    double confirm_z_error = 0.0;
+                    double confirm_yaw_error = 0.0;
+                    {
+                        std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
+                        if (!recovery_confirm_valid_)
+                        {
+                            recovery_confirm_odom2map_ = reg_matrix;
+                            recovery_confirm_valid_ = true;
+                            recovery_streak = 1;
+                        }
+                        else
+                        {
+                            const Eigen::Matrix4d confirm_baselink2map =
+                                recovery_confirm_odom2map_ * mat_baselink2odom_cur;
+                            const Eigen::Matrix4d candidate_baselink2map =
+                                reg_matrix * mat_baselink2odom_cur;
+                            const Eigen::Vector3d confirm_translation_error_vector =
+                                candidate_baselink2map.block<3, 1>(0, 3) -
+                                confirm_baselink2map.block<3, 1>(0, 3);
+                            confirm_translation_error =
+                                confirm_translation_error_vector.norm();
+                            confirm_z_error =
+                                std::abs(confirm_translation_error_vector.z());
+                            confirm_yaw_error = WrappedYawErrorDeg(
+                                confirm_baselink2map, candidate_baselink2map);
+                            const bool confirmation_consistent =
+                                confirm_translation_error <=
+                                    recovery_confirm_max_translation_ &&
+                                confirm_z_error <= recovery_confirm_max_z_ &&
+                                confirm_yaw_error <= recovery_confirm_max_yaw_deg_;
+                            if (confirmation_consistent)
+                            {
+                                recovery_streak =
+                                    recovery_success_streak_.load() + 1;
+                            }
+                            else
+                            {
+                                recovery_confirm_odom2map_ = reg_matrix;
+                                recovery_streak = 1;
+                                confirmation_reset = true;
+                            }
+                        }
+                        recovery_success_streak_.store(recovery_streak);
+                        if (recovery_streak >= recovery_success_required_)
+                        {
+                            mat_odom2map_ = reg_matrix;
+                            recovery_relative_odom2map_ = reg_matrix;
+                            last_trusted_baselink2odom_ = mat_baselink2odom_cur;
+                            last_trusted_baselink2map_ =
+                                reg_matrix * mat_baselink2odom_cur;
+                            last_trusted_pose_valid_ = true;
+                            recovery_confirm_valid_ = false;
+                        }
+                    }
                     if (recovery_streak >= recovery_success_required_)
                     {
                         fastlio_recovery_pending_icp_.store(false);
                         recovery_success_streak_.store(0);
+                        // Force the next normal tracking cycle to rebuild its
+                        // full-size target instead of reusing the constrained
+                        // recovery submap.
+                        last_loc_ = Eigen::Vector3d(0, 0, -5000);
+                        map_fine_crop->Clear();
                         SetLocalizationStatus(LocalizationStatus::TRACKING,
                                               "recovery_confirmed");
                     }
@@ -1651,9 +1838,26 @@ void GloabalLocalization::Localization()
                         SetLocalizationStatus(LocalizationStatus::TRACKING_WARN,
                                               "recovery_confirming");
                     }
+                    RCLCPP_INFO(
+                        this->get_logger(),
+                        "[OPEN3D_RECOVERY] confirmation seed=%s reset=%d "
+                        "error=(translation=%.3f,z=%.3f,yaw=%.3f) streak=%d/%d",
+                        best_seed.c_str(), confirmation_reset ? 1 : 0,
+                        confirm_translation_error, confirm_z_error,
+                        confirm_yaw_error, recovery_streak,
+                        recovery_success_required_);
                 }
                 else
                 {
+                    {
+                        std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
+                        mat_odom2map_ = reg_matrix;
+                        recovery_relative_odom2map_ = reg_matrix;
+                        last_trusted_baselink2odom_ = mat_baselink2odom_cur;
+                        last_trusted_baselink2map_ =
+                            reg_matrix * mat_baselink2odom_cur;
+                        last_trusted_pose_valid_ = true;
+                    }
                     SetLocalizationStatus(LocalizationStatus::TRACKING, "ok");
                 }
                 RCLCPP_INFO(
@@ -1669,11 +1873,12 @@ void GloabalLocalization::Localization()
             {
                 // A geometrically plausible near match advances only the
                 // internal recovery seed.  map TF and /Odometry_open3d remain
-                // gated until two strict (> threshold_fitness_) matches pass.
+                // gated until all strict recovery confirmations pass.
                 {
                     std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
                     mat_odom2map_ = reg_matrix;
                     recovery_relative_odom2map_ = reg_matrix;
+                    recovery_confirm_valid_ = false;
                 }
                 recovery_success_streak_.store(0);
                 tracking_fail_count_ = 0;
@@ -1690,10 +1895,17 @@ void GloabalLocalization::Localization()
             else
             {
                 if (recovery_pending)
+                {
                     recovery_success_streak_.store(0);
+                    std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
+                    recovery_confirm_valid_ = false;
+                }
                 std::string reject_reason = "fitness_low";
                 if (!fastlio_valid_.load())
                     reject_reason = "fastlio_invalid";
+                else if (recovery_pending && best_fitness < 0.0 &&
+                         range_rejected_candidates > 0)
+                    reject_reason = "prediction_range";
                 else if (best_delta_trans > max_delta_translation)
                     reject_reason = "delta_too_large";
                 else if (best_delta_yaw > max_delta_yaw)
@@ -1710,11 +1922,15 @@ void GloabalLocalization::Localization()
                     this->get_logger(),
                     "[OPEN3D_RECOVERY] rejected seed=%s before=%.6f after=%.6f "
                     "threshold=%.3f rmse=%.6f max_rmse=%.3f dpos=%.3f/%.3f "
-                    "dyaw=%.3f/%.3f source=%zu target=%zu reason=%s",
+                    "dyaw=%.3f/%.3f prediction_error=(xy=%.3f/%.3f,z=%.3f/%.3f,yaw=%.3f/%.3f) "
+                    "source=%zu target=%zu reason=%s",
                     best_seed.c_str(), best_before_fitness, best_fitness,
-                    threshold_fitness_, best_rmse, recovery_max_inlier_rmse_,
+                    required_fitness, best_rmse, recovery_max_inlier_rmse_,
                     best_delta_trans, max_delta_translation, best_delta_yaw,
-                    max_delta_yaw, source->points_.size(), target->points_.size(),
+                    max_delta_yaw, best_prediction_xy_error, recovery_max_xy_error_,
+                    best_prediction_z_error, recovery_max_z_error_,
+                    best_prediction_yaw_error, recovery_max_yaw_error_deg_,
+                    source->points_.size(), target->points_.size(),
                     reject_reason.c_str());
             }
 

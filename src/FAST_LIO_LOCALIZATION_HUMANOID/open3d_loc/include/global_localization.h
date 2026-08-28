@@ -143,11 +143,21 @@ private:
     double recovery_max_yaw_deg_ = 15.0;
     double recovery_max_inlier_rmse_ = 0.15;
     double recovery_provisional_fitness_threshold_ = 0.65;
+    double recovery_final_fitness_threshold_ = 0.90;
     double recovery_xy_search_range_ = 1.0;
     double recovery_z_search_range_ = 0.5;
     double recovery_yaw_search_deg_ = 15.0;
+    double recovery_max_xy_error_ = 2.0;
+    double recovery_max_z_error_ = 0.6;
+    double recovery_max_yaw_error_deg_ = 15.0;
+    double recovery_submap_xy_range_ = 10.0;
+    double recovery_submap_z_below_ = 1.2;
+    double recovery_submap_z_above_ = 1.2;
+    double recovery_confirm_max_translation_ = 0.30;
+    double recovery_confirm_max_z_ = 0.20;
+    double recovery_confirm_max_yaw_deg_ = 3.0;
     int recovery_candidate_count_ = 4;
-    int recovery_success_required_ = 2;
+    int recovery_success_required_ = 3;
     double scan_map_filter_radius_ = 0.0;
     int localization_lost_fail_count_ = 3;
     std::atomic<int> tracking_fail_count_{0};
@@ -171,7 +181,12 @@ private:
     Eigen::Matrix4d last_trusted_baselink2odom_ = Eigen::Matrix4d::Identity();
     Eigen::Matrix4d recovery_relative_odom2map_ = Eigen::Matrix4d::Identity();
     Eigen::Matrix4d recovery_stationary_odom2map_ = Eigen::Matrix4d::Identity();
+    /// @brief 恢复开始时固定的 T_map_odom，用 FAST-LIO 当前相对运动生成动态预测中心。
+    Eigen::Matrix4d recovery_prediction_odom2map_ = Eigen::Matrix4d::Identity();
+    /// @brief 第一次严格通过的固定确认基准；完成全部确认前不写入正式 map->odom。
+    Eigen::Matrix4d recovery_confirm_odom2map_ = Eigen::Matrix4d::Identity();
     bool last_trusted_pose_valid_ = false;
+    bool recovery_confirm_valid_ = false;
 
     rclcpp::Time timestamp_odom_;
     std::mutex lock_timestamp_;
