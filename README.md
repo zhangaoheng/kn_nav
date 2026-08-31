@@ -107,6 +107,15 @@ ros2 service call /pct_scan_navigation/cancel std_srvs/srv/Trigger '{}'
 - 遗留事项：
 ```
 
+### 2026-08-31
+
+#### Go2/Go2-W 启动入口按 A2/B2 标准统一
+
+- 问题：Go2 默认从 `/home/nav_map/config` 读取配置，Go2-W 默认从 ROS 安装树读取配置，二者均未声明和透传 `start_global_relocalization`；源码目录也缺少 Go2/Go2-W 的统一 `navigation.yaml`，与 A2/B2 的单一配置入口不一致。
+- 修改：Go2 和 Go2-W wrapper 均改为固定读取 `/home/code/work_space/kn_nav/src/pct_scan_navigation/config/<profile>/navigation.yaml`，补齐 `start_global_relocalization` 的声明与转发；由各自 legacy 分拆配置生成统一配置，保留机型专属雷达、定位、规划及控制参数，并按 A2/B2 标准补充默认启用的全局重定位开关和节点参数。
+- 验证：两个 launch 文件 Python 语法检查、统一 YAML schema/节点完整性、`git diff --check` 和 `pct_scan_navigation` 编译通过；两个入口的 `ros2 launch ... --show-args` 均可正确显示源码配置路径及全局重定位开关。四机型 wrapper 转发契约专项测试 `1/1` 通过。完整相关契约测试为 `16/20`，其余失败是仓库既有的全局重定位旧关闭期望、coordinator 旧参数期望及本机缺少 `rosbag2_py`，不是本次 Go2/Go2-W 启动器错误。
+- 遗留事项：同步到部署机后需确认实际工程根目录仍为 `/home/code/work_space/kn_nav`；若部署路径不同，应显式传入 `config_file:=<实际路径>`，或统一调整四个机型 wrapper 的绝对路径。
+
 ### 2026-08-28
 
 #### Open3D 动态范围约束与可信恢复第六版
