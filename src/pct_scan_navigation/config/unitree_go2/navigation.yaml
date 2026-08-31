@@ -9,7 +9,7 @@ launch:
   start_pct_planner: true
   start_go2_bridge: true
   network_interface: eth0
-  initial_map_name: outdoor
+  initial_map_name: floor
   full_restart_command: ''
 topics:
   body_pose: /Odometry_open3d
@@ -20,12 +20,19 @@ topics:
   initial_path: /initial_path
 maps:
   outdoor:
-    pcd_path: /home/nav_map/cross-floor-kn/global_map_downsize.pcd
-    tomo_path: /home/code/work_space/kn_nav/src/PCT_planner/rsc/tomogram/liuxing_ground_voxel005_radius015.pickle
+    pcd_path: /home/nav_map/outdoor/outdoor_global_voxel02.pcd
+    tomo_path: /home/nav_map/outdoor/outdoor_global_voxel002_ground.pickle
     localization:
-      fitness_eval_threshold: 0.15
-      threshold_fitness: 0.5
-      threshold_fitness_init: 0.7
+      fitness_eval_threshold: 0.2
+      threshold_fitness: 0.8
+      threshold_fitness_init: 0.9
+  floor:
+    pcd_path: /home/nav_map/cross-floor-kn/global_map_downsize.pcd
+    tomo_path: /home/nav_map/cross-floor-kn/liuxing_ground_voxel005_radius015.pickle
+    localization:
+      fitness_eval_threshold: 0.2
+      threshold_fitness: 0.8
+      threshold_fitness_init: 0.9
 nodes:
   fastlio_mapping:
     feature_extract_enable: false
@@ -113,25 +120,25 @@ nodes:
       pcd_save_en: false
       interval: -1
   global_localization_node:
-    map_name: outdoor
+    map_name: floor
     path_map: /home/nav_map/cross-floor-kn/global_map_downsize.pcd
     path_imu_to_base: /home/nav_map/cross-floor-kn/imu_to_base.txt
     pcd_queue_maxsize: 10
-    loc_frequence: 20.0
+    loc_frequence: 0.5
     map_publish_interval: 5.0
     voxelsize_coarse: 0.2
     voxel_downsample_size: 0.1
-    icp_distance_threshold: 0.15
-    fitness_eval_threshold: 0.15
+    icp_distance_threshold: 0.2
+    fitness_eval_threshold: 0.2
     normal_search_radius: 0.4
     scan_map_filter_radius: 1.0
-    localization_lost_fail_count: 3
-    threshold_fitness: 0.5
-    threshold_fitness_init: 0.7
-    max_icp_translation: 0.4
-    max_icp_yaw_deg: 2.0
-    max_init_icp_translation: 2.0
-    max_init_icp_yaw_deg: 20.0
+    localization_lost_fail_count: 10
+    threshold_fitness: 0.8
+    threshold_fitness_init: 0.9
+    max_icp_translation: 2.0
+    max_icp_yaw_deg: 5.0
+    max_init_icp_translation: 20.0
+    max_init_icp_yaw_deg: 180.0
     min_init_fitness_improvement: 0.02
     recovery_icp_distance_threshold: 0.5
     recovery_max_translation: 2.0
@@ -212,7 +219,7 @@ nodes:
     goal_topic: /goal_pose
     relocalize_timeout_sec: 20.0
   pct_global_planner:
-    tomo_path: /home/code/work_space/kn_nav/src/PCT_planner/rsc/tomogram/liuxing_ground_voxel005_radius015.pickle
+    tomo_path: /home/nav_map/cross-floor-kn/liuxing_ground_voxel005_radius015.pickle
     global_frame: map
     robot_frame: base_link
     goal_pose_topic: /goal_pose
@@ -231,20 +238,22 @@ nodes:
     goal_z_search_radius_cells: 2
     allow_new_goal_during_planning: true
   scan_planner_node:
-    map_name: outdoor
+    map_name: floor
     fsm.navi_mode: 2
-    fsm.thresh_replan: 1.0
+    fsm.thresh_replan: 4.0
     fsm.thresh_no_replan: 0.1
     fsm.planning_horizon: 3.5
     fsm.emergency_time: 1.0
     fsm.finish_dist: 0.15
     fsm.finish_yaw: 0.1
     fsm.fail_safe: true
-    fsm.max_replan_fail_count: 100
+    fsm.max_replan_fail_count: 1000
+    fsm.corridor_path_topic: /pct_path
+    fsm.corridor_z_offset: 0.0
     grid_map.sensor_type: lidar
     grid_map.cloud_is_world: true
     grid_map.need_extrinsic: false
-    grid_map.resolution: 0.2
+    grid_map.resolution: 0.1
     grid_map.frame_id: map
     grid_map.sliding_map_frame_id: scan_sliding_map
     grid_map.ground_height: 0.0
@@ -283,7 +292,7 @@ nodes:
     manager.max_jerk: 3.0
     manager.control_points_distance: 0.2
     manager.feasibility_tolerance: 0.5
-    manager.planning_horizon: 3.5
+    manager.planning_horizon: 4.5
     manager.corridor_max_deviation: 0.6
     manager.nominal_corridor_max_deviation: 0.15
     optimization.lambda_smooth: 1.0
