@@ -183,17 +183,26 @@ def test_launch_synchronizes_modes_and_current_scan_topics():
     assert "on_exit=Shutdown" in text
 
 
-# 约束机器人 wrapper launch 的参数转发契约。
+# 约束四种机器人 wrapper launch 使用同一组参数转发契约；机型间只允许
+# config_profile 与默认配置路径不同。
 def test_robot_launches_forward_navigation_mode():
-    for robot in ('unitree_go2', 'unitree_go2w'):
-        text = (ROOT / 'launch' / f'{robot}_pct_scan_navigation.launch.py').read_text()
+    wrappers = {
+        'A2': 'unitree_A2_pct_scan_navigation.launch.py',
+        'B2': 'unitree_B2_pct_scan_navigation.launch.py',
+        'unitree_go2': 'unitree_go2_pct_scan_navigation.launch.py',
+        'unitree_go2w': 'unitree_go2w_pct_scan_navigation.launch.py',
+    }
+    for profile, filename in wrappers.items():
+        text = (ROOT / 'launch' / filename).read_text()
         assert "DeclareLaunchArgument('config_file', default_value=default_config)" in text
         assert "DeclareLaunchArgument('navigation_mode', default_value='')" in text
+        assert "DeclareLaunchArgument('start_global_relocalization', default_value='')" in text
         assert "DeclareLaunchArgument('start_go2_bridge', default_value='')" in text
         assert "'config_file': LaunchConfiguration('config_file')" in text
         assert "'navigation_mode': LaunchConfiguration('navigation_mode')" in text
+        assert "'start_global_relocalization': LaunchConfiguration('start_global_relocalization')" in text
         assert "'start_go2_bridge': LaunchConfiguration('start_go2_bridge')" in text
-        assert f"'config_profile': '{robot}'" in text
+        assert f"'config_profile': '{profile}'" in text
 
 
 # 约束 open3d 定位服务的 .srv 接口与 CMake 安装项。
