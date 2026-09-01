@@ -162,6 +162,29 @@ def test_scan_profiles_select_dynamic_waypoint_mode():
         assert controller['finish_yaw'] == 0.10
 
 
+# Go2-W 实车配置必须保留近场点云并启用独立停车兜底，避免动态障碍在
+# 接近机器人后被大半径自滤波删除，或 A* 连续失败时继续执行旧轨迹。
+def test_go2w_near_field_obstacle_safety_contract():
+    unified = load_unified('unitree_go2w')['nodes']
+    localization = unified['global_localization_node']
+    planner = unified['scan_planner_node']
+    controller = unified['closed_loop_controller']
+
+    assert 0.0 < localization['scan_map_filter_radius'] <= 0.4
+    assert planner['fsm.near_field_stop_enabled'] is True
+    assert planner['fsm.near_field_stop_distance'] > 0.0
+    assert planner['fsm.max_replan_fail_count'] <= 5
+    assert planner['grid_map.double_cylinder_radius'] >= 0.35
+    assert planner['grid_map.p_occ'] <= 0.7
+    assert planner['manager.max_vel'] <= 0.4
+    assert planner['optimization.max_vel'] <= 0.4
+    assert controller['max_vx'] <= 0.4
+
+    fsm = (SCAN_MANAGE / 'src/scan_replan_fsm.cpp').read_text()
+    assert 'nearFieldObstacleDetected' in fsm
+    assert 'NEAR_FIELD_SAFETY' in fsm
+
+
 # 约束统一 launch：必须从单一 navigation.yaml 加载参数，禁止旧的
 # 分文件 launch 参数，Mode 与话题重映射要同步注入。
 def test_launch_synchronizes_modes_and_current_scan_topics():

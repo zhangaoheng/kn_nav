@@ -20,7 +20,8 @@ global_localization_node:
     icp_distance_threshold: 0.15
     fitness_eval_threshold: 0.15
     normal_search_radius: 0.4
-    scan_map_filter_radius: 1.0
+    # 保留近场真实障碍；只过滤紧贴机体原点的自反射点。
+    scan_map_filter_radius: 0.35
     localization_lost_fail_count: 3
 
     threshold_fitness: 0.7

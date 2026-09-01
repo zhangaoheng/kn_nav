@@ -59,6 +59,10 @@ namespace scan_planner
     no_replan_thresh_ = load_parameter<double>(node_, "fsm.thresh_no_replan", -1.0);
     planning_horizon_ = load_parameter<double>(node_, "fsm.planning_horizon", -1.0);
     emergency_time_ = load_parameter<double>(node_, "fsm.emergency_time", 1.0);
+    near_field_stop_enabled_ =
+        load_parameter<bool>(node_, "fsm.near_field_stop_enabled", false);
+    near_field_stop_distance_ =
+        load_parameter<double>(node_, "fsm.near_field_stop_distance", 0.35);
     finish_dist_ = load_parameter<double>(node_, "fsm.finish_dist", 0.15);
     finish_yaw_ = load_parameter<double>(node_, "fsm.finish_yaw", 0.10);
     enable_fail_safe_ = load_parameter<bool>(node_, "fsm.fail_safe", true);
@@ -1058,6 +1062,28 @@ namespace scan_planner
 
   // 安全定时器回调（50ms）：沿当前局部轨迹前视采样做膨胀占据检查；发现碰撞时
   // 先尝试重规划；距碰撞点 < emergency_time_ 则直接急停，否则进入 REPLAN_TRAJ。
+  bool SCANReplanFSM::nearFieldObstacleDetected(double &distance) const
+  {
+    distance = 0.0;
+    if (!near_field_stop_enabled_ || !have_odom_ || near_field_stop_distance_ <= 0.0 ||
+        !planner_manager_ || !planner_manager_->grid_map_)
+      return false;
+
+    const double yaw = getOdomYaw();
+    const Eigen::Vector3d heading(std::cos(yaw), std::sin(yaw), 0.0);
+    const double step = std::max(0.02, planner_manager_->grid_map_->getResolution() * 0.5);
+    for (double ahead = 0.0; ahead <= near_field_stop_distance_ + 1e-6; ahead += step)
+    {
+      const Eigen::Vector3d probe = odom_pos_ + ahead * heading;
+      if (planner_manager_->grid_map_->getInflateOccupancy(probe, yaw) > 0)
+      {
+        distance = ahead;
+        return true;
+      }
+    }
+    return false;
+  }
+
   void SCANReplanFSM::checkCollisionCallback()
   {
     updateLocalTrajTimeFreeze();
@@ -1065,8 +1091,21 @@ namespace scan_planner
     LocalTrajData *info = &planner_manager_->local_data_;
     auto map = planner_manager_->grid_map_;
 
-    if (exec_state_ == WAIT_TARGET || info->start_time_.seconds() < 1e-5)
+    if (exec_state_ == WAIT_TARGET || exec_state_ == INIT || exec_state_ == EMERGENCY_STOP ||
+        info->start_time_.seconds() < 1e-5)
       return;
+
+    double near_field_distance = 0.0;
+    if (nearFieldObstacleDetected(near_field_distance))
+    {
+      RCLCPP_ERROR(node_->get_logger(),
+                   "Near-field obstacle at %.2fm; emergency stop independent of replanning",
+                   near_field_distance);
+      navigation_status_reason_ = "near_field_obstacle";
+      flag_escape_emergency_ = true;
+      changeFSMExecState(EMERGENCY_STOP, "NEAR_FIELD_SAFETY");
+      return;
+    }
 
     /* ---------- check trajectory ---------- */
     constexpr double time_step = 0.01;

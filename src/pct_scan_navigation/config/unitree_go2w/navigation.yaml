@@ -131,7 +131,8 @@ nodes:
     icp_distance_threshold: 0.2
     fitness_eval_threshold: 0.2
     normal_search_radius: 0.4
-    scan_map_filter_radius: 1.0
+    # 仅滤除紧贴机体原点的自反射点；1.0 m 会把近场真实障碍一起删除。
+    scan_map_filter_radius: 0.35
     localization_lost_fail_count: 10
     threshold_fitness: 0.8
     threshold_fitness_init: 0.9
@@ -244,10 +245,12 @@ nodes:
     fsm.thresh_no_replan: 0.1
     fsm.planning_horizon: 5.5
     fsm.emergency_time: 1.0
+    fsm.near_field_stop_enabled: true
+    fsm.near_field_stop_distance: 0.35
     fsm.finish_dist: 0.15
     fsm.finish_yaw: 0.1
     fsm.fail_safe: true
-    fsm.max_replan_fail_count: 1000
+    fsm.max_replan_fail_count: 5
     fsm.corridor_path_topic: /pct_path
     fsm.corridor_z_offset: 0.0
     grid_map.sensor_type: lidar
@@ -265,7 +268,7 @@ nodes:
     grid_map.local_update_range_z: 3.0
     grid_map.map_sliding_en: true
     grid_map.map_sliding_thresh: 0.2
-    grid_map.double_cylinder_radius: 0.28
+    grid_map.double_cylinder_radius: 0.35
     grid_map.double_cylinder_offset: 0.23
     grid_map.body_height: 0.4
     grid_map.obstacles_inflation_z_up: 0.1
@@ -283,11 +286,11 @@ nodes:
     grid_map.p_miss: 0.3
     grid_map.p_min: 0.12
     grid_map.p_max: 0.98
-    grid_map.p_occ: 0.8
+    grid_map.p_occ: 0.7
     grid_map.max_ray_length: 5.0
     grid_map.vis_height: 0.3
     grid_map.show_occ_time: false
-    manager.max_vel: 0.75
+    manager.max_vel: 0.4
     manager.max_acc: 0.5
     manager.max_jerk: 4.0
     manager.control_points_distance: 0.2
@@ -302,7 +305,7 @@ nodes:
     optimization.lambda_corridor: 5.0
     optimization.corridor_preferred_deviation: 0.05
     optimization.dist0: 0.25
-    optimization.max_vel: 0.75
+    optimization.max_vel: 0.4
     optimization.vel_tolerance: 1.0
     optimization.max_acc: 0.3
     optimization.acc_tolerance: 1.0
@@ -312,7 +315,7 @@ nodes:
     heading_error_threshold: 0.8
     kp_pos: 0.8
     kp_yaw: 1.5
-    max_vx: 0.75
+    max_vx: 0.4
     max_vy: 0.35
     max_vyaw: 1.0
     finish_dist: 0.15

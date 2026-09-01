@@ -84,6 +84,8 @@ namespace scan_planner
     double no_replan_thresh_, replan_thresh_;
     double planning_horizon_;
     double emergency_time_;
+    bool near_field_stop_enabled_;
+    double near_field_stop_distance_;
     double finish_dist_, finish_yaw_;
     double rviz_goal_height_;
     double self_inflation_z_up_, self_inflation_z_down_;
@@ -212,6 +214,8 @@ namespace scan_planner
     void execFSMCallback();
     // 安全定时器回调：周期性做碰撞检查，发现即将碰撞则触发重规划或急停。
     void checkCollisionCallback();
+    // 独立近场保护：沿机器人当前航向检查一段短距离，命中占据立即急停。
+    bool nearFieldObstacleDetected(double &distance) const;
     // rviz 目标点回调：接收手动给定的 2D 目标并切换到 MANUAL_TARGET 模式。
     void rvizGoalCallback(const geometry_msgs::msg::PoseStamped::ConstSharedPtr &msg);
     // waypoint 路径回调：接收航点序列并触发 WAYPOINT_PATH 模式导航。
