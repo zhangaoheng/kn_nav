@@ -65,6 +65,7 @@ scan_planner_node:
     manager.planning_horizon: 7.5
     manager.corridor_max_deviation: 0.6
     manager.nominal_corridor_max_deviation: 0.15
+    manager.recovery_corridor_distance: 1.5
 
     optimization.lambda_smooth: 1.0
     optimization.lambda_collision: 1.0
@@ -83,6 +84,9 @@ closed_loop_controller:
   ros__parameters:
     time_forward: 0.60
     heading_error_threshold: 0.80
+    turn_slowdown_angle: 0.10
+    min_turn_speed_scale: 0.20
+    trajectory_end_timeout: 0.50
     kp_pos: 0.8
     kp_yaw: 1.5
     max_vx: 0.75

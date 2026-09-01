@@ -59,6 +59,7 @@ scan_planner_node:
     manager.planning_horizon: 3.5
     manager.corridor_max_deviation: 0.6
     manager.nominal_corridor_max_deviation: 0.15
+    manager.recovery_corridor_distance: 1.5
 
     optimization.lambda_smooth: 1.0
     optimization.lambda_collision: 1.0

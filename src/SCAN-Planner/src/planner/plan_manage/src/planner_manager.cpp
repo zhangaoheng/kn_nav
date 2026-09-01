@@ -254,12 +254,20 @@ namespace scan_planner
     corridor_max_deviation_ = get_double("manager.corridor_max_deviation", 0.6);
     nominal_corridor_max_deviation_ =
         get_double("manager.nominal_corridor_max_deviation", 0.15);
+    recovery_corridor_distance_ =
+        get_double("manager.recovery_corridor_distance", 1.5);
     corridor_preferred_deviation_ =
         get_double("optimization.corridor_preferred_deviation", 0.05);
     nominal_corridor_max_deviation_ = std::clamp(
         nominal_corridor_max_deviation_, 0.01, corridor_max_deviation_);
+    recovery_corridor_distance_ = std::max(0.1, recovery_corridor_distance_);
     corridor_preferred_deviation_ = std::clamp(
         corridor_preferred_deviation_, 0.0, nominal_corridor_max_deviation_);
+    RCLCPP_INFO(
+        node_->get_logger(),
+        "Corridor policy: tracking=%.2f avoidance=%.2f recovery_distance=%.2f preferred=%.2f",
+        nominal_corridor_max_deviation_, corridor_max_deviation_,
+        recovery_corridor_distance_, corridor_preferred_deviation_);
 
     local_data_.traj_id_ = 0;
     grid_map_.reset(new GridMap);
@@ -316,20 +324,28 @@ namespace scan_planner
         local_corridor.size() >= 2
             ? std::sqrt((start_pt - nearestPointOnPath(start_pt, local_corridor)).squaredNorm())
             : 0.0;
-    const double tracking_deviation = std::min(
-        corridor_max_deviation_,
-        std::max(nominal_corridor_max_deviation_,
-                 start_deviation + (grid_map_ ? grid_map_->getResolution() : 0.0)));
-    const double allowed_deviation =
-        avoidance_mode ? corridor_max_deviation_ : tracking_deviation;
+    const double target_deviation = avoidance_mode
+                                        ? corridor_max_deviation_
+                                        : nominal_corridor_max_deviation_;
+    const bool recovery_mode = start_deviation > target_deviation;
+    const double recovery_margin = grid_map_ ? grid_map_->getResolution() : 0.1;
+    const double initial_deviation = recovery_mode
+                                         ? start_deviation + recovery_margin
+                                         : target_deviation;
+    // 优化器暂时使用起点许可宽度，最终安全检查再沿轨迹逐步收紧。
+    // 这样机器人在走廊外仍可生成回归轨迹，同时不会把整条路线永久放宽。
+    const double allowed_deviation = std::max(initial_deviation, target_deviation);
     const double preferred_deviation =
-        avoidance_mode ? allowed_deviation : corridor_preferred_deviation_;
+        avoidance_mode ? target_deviation : corridor_preferred_deviation_;
+    const char *planning_mode = avoidance_mode
+                                    ? "LOCAL_AVOIDANCE"
+                                    : (recovery_mode ? "RECOVER_GLOBAL" : "TRACK_GLOBAL");
     RCLCPP_INFO_THROTTLE(
         node_->get_logger(), *node_->get_clock(), 1000,
-        "Local planning mode=%s, corridor_limit=%.2f, preferred_deviation=%.2f, "
-        "start_deviation=%.2f",
-        avoidance_mode ? "LOCAL_AVOIDANCE" : "TRACK_GLOBAL",
-        allowed_deviation, preferred_deviation, start_deviation);
+        "Local planning mode=%s, corridor_start=%.2f, corridor_target=%.2f, "
+        "preferred_deviation=%.2f, start_deviation=%.2f",
+        planning_mode, initial_deviation, target_deviation,
+        preferred_deviation, start_deviation);
 
     /*** STEP 1: INIT ***/
     double ts = (start_pt - local_target_pt).norm() > 0.1 ? pp_.ctrl_pt_dist / pp_.max_vel_ * 1.2 : pp_.ctrl_pt_dist / pp_.max_vel_ * 5; // pp_.ctrl_pt_dist / pp_.max_vel_ is too tense, and will surely exceed the acc/vel limits
@@ -532,7 +548,8 @@ namespace scan_planner
     }
 
     if (!flag_step_2_success || !checkDynamicFeasibility(pos) ||
-        !checkFullTrajectorySafety(pos, local_corridor, allowed_deviation))
+        !checkFullTrajectorySafety(
+            pos, local_corridor, initial_deviation, target_deviation))
     {
       printf("\033[34mThis refined trajectory is unsafe or dynamically infeasible. Skip publishing it.\n\033[0m");
       continuous_failures_count_++;
@@ -796,7 +813,8 @@ namespace scan_planner
   bool SCANPlannerManager::checkFullTrajectorySafety(
       UniformBspline position_traj,
       const std::vector<Eigen::Vector3d> &corridor_path,
-      double max_corridor_deviation)
+      double initial_corridor_deviation,
+      double target_corridor_deviation)
   {
     if (!grid_map_)
       return false;
@@ -805,12 +823,17 @@ namespace scan_planner
     const double sample_dt = std::clamp(
         grid_map_->getResolution() / std::max(2.0 * pp_.max_vel_, 1e-3), 0.01, 0.05);
     const int sample_count = std::max(1, static_cast<int>(std::ceil(duration / sample_dt)));
+    double travelled_distance = 0.0;
+    Eigen::Vector3d last_point = position_traj.evaluateDeBoorT(0.0);
     for (int sample = 0; sample <= sample_count; ++sample)
     {
       const double t = std::min(sample * sample_dt, duration);
       const double previous_t = std::max(t - sample_dt, 0.0);
       const double next_t = std::min(t + sample_dt, duration);
       const Eigen::Vector3d point = position_traj.evaluateDeBoorT(t);
+      if (sample > 0)
+        travelled_distance += (point - last_point).norm();
+      last_point = point;
       const Eigen::Vector3d previous = position_traj.evaluateDeBoorT(previous_t);
       const Eigen::Vector3d next = position_traj.evaluateDeBoorT(next_t);
       const Eigen::Vector2d direction = (next - previous).head<2>();
@@ -825,14 +848,20 @@ namespace scan_planner
         return false;
       }
 
-      if (corridor_path.size() >= 2 && max_corridor_deviation > 0.0)
+      if (corridor_path.size() >= 2 && target_corridor_deviation > 0.0)
       {
+        const double recovery_ratio = std::clamp(
+            travelled_distance / recovery_corridor_distance_, 0.0, 1.0);
+        const double allowed_deviation =
+            initial_corridor_deviation +
+            recovery_ratio * (target_corridor_deviation - initial_corridor_deviation);
         const double deviation = (point - nearestPointOnPath(point, corridor_path)).norm();
-        if (deviation > max_corridor_deviation)
+        if (deviation > allowed_deviation)
         {
           RCLCPP_WARN(node_->get_logger(),
-                      "Reject full trajectory: corridor deviation at t=%.3f is %.3f > %.3f",
-                      t, deviation, max_corridor_deviation);
+                      "Reject full trajectory: corridor deviation at t=%.3f, arc=%.3f "
+                      "is %.3f > %.3f",
+                      t, travelled_distance, deviation, allowed_deviation);
           return false;
         }
       }
