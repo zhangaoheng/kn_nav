@@ -68,10 +68,13 @@ bool TransformFloat3Fields(sensor_msgs::msg::PointCloud2 &cloud,
     return true;
 }
 
-// 工具：剔除距原点小于 filter_radius 的点（如机体附近的噪声/自遮挡点）。
-void FilterNearOrigin(sensor_msgs::msg::PointCloud2 &cloud, double filter_radius)
+// 在 base_link 坐标系中剔除雷达近点及机器人自身定向盒体内的点。
+// 盒体比单纯扩大球形半径更贴合车体，可保留紧邻车体外侧的真实障碍。
+void FilterRobotBody(sensor_msgs::msg::PointCloud2 &cloud, double filter_radius,
+                     const std::vector<double> &self_filter_box)
 {
-    if (filter_radius <= 0.0)
+    const bool use_box = self_filter_box.size() == 6;
+    if (filter_radius <= 0.0 && !use_box)
     {
         return;
     }
@@ -89,7 +92,13 @@ void FilterNearOrigin(sensor_msgs::msg::PointCloud2 &cloud, double filter_radius
             static_cast<double>(*x) * static_cast<double>(*x) +
             static_cast<double>(*y) * static_cast<double>(*y) +
             static_cast<double>(*z) * static_cast<double>(*z);
-        if (std::isfinite(distance2) && distance2 < radius2)
+        const bool near_origin = filter_radius > 0.0 &&
+            std::isfinite(distance2) && distance2 < radius2;
+        const bool inside_body = use_box &&
+            *x >= self_filter_box[0] && *x <= self_filter_box[1] &&
+            *y >= self_filter_box[2] && *y <= self_filter_box[3] &&
+            *z >= self_filter_box[4] && *z <= self_filter_box[5];
+        if (near_origin || inside_body)
         {
             continue;
         }
@@ -395,6 +404,8 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
     this->declare_parameter<int>("recovery_candidate_count", 4);
     this->declare_parameter<int>("recovery_success_required", 3);
     this->declare_parameter<double>("scan_map_filter_radius", 0.0);
+    this->declare_parameter<std::vector<double>>(
+        "scan_map_self_filter_box", std::vector<double>());
     this->declare_parameter<int>("localization_lost_fail_count", 3);
     this->declare_parameter<int>("min_source_points", 2500);
     this->declare_parameter<int>("min_target_points", 50000);
@@ -455,6 +466,17 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
     recovery_confirm_max_z_ = std::max(0.0, recovery_confirm_max_z_);
     recovery_confirm_max_yaw_deg_ = std::max(0.0, recovery_confirm_max_yaw_deg_);
     this->get_parameter("scan_map_filter_radius", scan_map_filter_radius_);
+    this->get_parameter("scan_map_self_filter_box", scan_map_self_filter_box_);
+    if (!scan_map_self_filter_box_.empty() &&
+        (scan_map_self_filter_box_.size() != 6 ||
+         scan_map_self_filter_box_[0] > scan_map_self_filter_box_[1] ||
+         scan_map_self_filter_box_[2] > scan_map_self_filter_box_[3] ||
+         scan_map_self_filter_box_[4] > scan_map_self_filter_box_[5]))
+    {
+        RCLCPP_WARN(this->get_logger(),
+                    "invalid scan_map_self_filter_box; disable body box filter");
+        scan_map_self_filter_box_.clear();
+    }
     this->get_parameter("localization_lost_fail_count", localization_lost_fail_count_);
     this->get_parameter("min_source_points", min_source_points_);
     this->get_parameter("min_target_points", min_target_points_);
@@ -1037,7 +1059,17 @@ void GloabalLocalization::CallbackScanBody(
             {
                 TransformFloat3Fields(scan_map, imu_to_base_rotation, Eigen::Vector3d::Zero(),
                                       "normal_x", "normal_y", "normal_z", false);
-                FilterNearOrigin(scan_map, scan_map_filter_radius_);
+                const size_t points_before_filter =
+                    static_cast<size_t>(scan_map.width) * scan_map.height;
+                FilterRobotBody(
+                    scan_map, scan_map_filter_radius_, scan_map_self_filter_box_);
+                const size_t points_after_filter =
+                    static_cast<size_t>(scan_map.width) * scan_map.height;
+                RCLCPP_INFO_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 2000,
+                    "scan_map self-filter: removed=%zu kept=%zu radius=%.2f box=%d",
+                    points_before_filter - points_after_filter, points_after_filter,
+                    scan_map_filter_radius_, scan_map_self_filter_box_.size() == 6);
                 TransformFloat3Fields(scan_map, base_to_map_rotation, base_to_map_translation, "x", "y", "z", true);
                 TransformFloat3Fields(scan_map, base_to_map_rotation, Eigen::Vector3d::Zero(),
                                       "normal_x", "normal_y", "normal_z", false);

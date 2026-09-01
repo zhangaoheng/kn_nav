@@ -63,6 +63,8 @@ namespace scan_planner
         load_parameter<bool>(node_, "fsm.near_field_stop_enabled", false);
     near_field_stop_distance_ =
         load_parameter<double>(node_, "fsm.near_field_stop_distance", 0.35);
+    near_field_stop_confirm_count_ = std::max(
+        1, load_parameter<int>(node_, "fsm.near_field_stop_confirm_count", 3));
     finish_dist_ = load_parameter<double>(node_, "fsm.finish_dist", 0.15);
     finish_yaw_ = load_parameter<double>(node_, "fsm.finish_yaw", 0.10);
     enable_fail_safe_ = load_parameter<bool>(node_, "fsm.fail_safe", true);
@@ -1098,14 +1100,27 @@ namespace scan_planner
     double near_field_distance = 0.0;
     if (nearFieldObstacleDetected(near_field_distance))
     {
+      near_field_obstacle_hit_count_++;
+      if (near_field_obstacle_hit_count_ < near_field_stop_confirm_count_)
+      {
+        RCLCPP_WARN_THROTTLE(
+            node_->get_logger(), *node_->get_clock(), 500,
+            "Near-field obstacle candidate at %.2fm (%d/%d)",
+            near_field_distance, near_field_obstacle_hit_count_,
+            near_field_stop_confirm_count_);
+        return;
+      }
       RCLCPP_ERROR(node_->get_logger(),
-                   "Near-field obstacle at %.2fm; emergency stop independent of replanning",
-                   near_field_distance);
+                   "Near-field obstacle confirmed at %.2fm (%d/%d); emergency stop",
+                   near_field_distance, near_field_obstacle_hit_count_,
+                   near_field_stop_confirm_count_);
+      near_field_obstacle_hit_count_ = 0;
       navigation_status_reason_ = "near_field_obstacle";
       flag_escape_emergency_ = true;
       changeFSMExecState(EMERGENCY_STOP, "NEAR_FIELD_SAFETY");
       return;
     }
+    near_field_obstacle_hit_count_ = 0;
 
     /* ---------- check trajectory ---------- */
     constexpr double time_step = 0.01;

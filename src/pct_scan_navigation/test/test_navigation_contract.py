@@ -171,10 +171,16 @@ def test_go2w_near_field_obstacle_safety_contract():
     controller = unified['closed_loop_controller']
 
     assert 0.0 < localization['scan_map_filter_radius'] <= 0.4
+    assert len(localization['scan_map_self_filter_box']) == 6
     assert planner['fsm.near_field_stop_enabled'] is True
     assert planner['fsm.near_field_stop_distance'] > 0.0
+    assert planner['fsm.near_field_stop_confirm_count'] >= 2
     assert planner['fsm.max_replan_fail_count'] <= 5
     assert planner['grid_map.double_cylinder_radius'] >= 0.35
+    assert planner['grid_map.self_clear_enabled'] is True
+    assert planner['grid_map.self_clear_x_min'] < planner['grid_map.self_clear_x_max']
+    assert planner['grid_map.self_clear_y_min'] < planner['grid_map.self_clear_y_max']
+    assert planner['grid_map.self_clear_z_min'] < planner['grid_map.self_clear_z_max']
     assert planner['grid_map.p_occ'] <= 0.7
     assert planner['manager.max_vel'] <= 0.4
     assert planner['optimization.max_vel'] <= 0.4
@@ -187,10 +193,15 @@ def test_go2w_near_field_obstacle_safety_contract():
     assert controller['trajectory_end_timeout'] > 0.0
 
     fsm = (SCAN_MANAGE / 'src/scan_replan_fsm.cpp').read_text()
+    grid_map = (SCAN_MANAGE.parent / 'plan_env/src/grid_map.cpp').read_text()
     planner_manager = (SCAN_MANAGE / 'src/planner_manager.cpp').read_text()
     closed_loop = (SCAN_MANAGE / 'src/closed_loop_controller.cpp').read_text()
+    localization_source = (OPEN3D_LOC / 'src/global_localization.cpp').read_text()
     assert 'nearFieldObstacleDetected' in fsm
     assert 'NEAR_FIELD_SAFETY' in fsm
+    assert 'near_field_stop_confirm_count_' in fsm
+    assert 'clearRobotFootprint' in grid_map
+    assert 'FilterRobotBody' in localization_source
     assert 'RECOVER_GLOBAL' in planner_manager
     assert 'recovery_corridor_distance_' in planner_manager
     assert 'travelled_distance / recovery_corridor_distance_' in planner_manager

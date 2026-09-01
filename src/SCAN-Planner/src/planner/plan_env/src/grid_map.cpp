@@ -79,6 +79,23 @@ void GridMap::initMap(rclcpp::Node *node)
   load_parameter(node_, "grid_map.sensor_type", mp_.sensor_type_, string("lidar"));
   load_parameter(node_, "grid_map.cloud_is_world", mp_.cloud_is_world_, true);
   load_parameter(node_, "grid_map.need_extrinsic", mp_.need_extrinsic_, true);
+  load_parameter(node_, "grid_map.self_clear_enabled", mp_.self_clear_enabled_, false);
+  load_parameter(node_, "grid_map.self_clear_x_min", mp_.self_clear_min_(0), -0.6);
+  load_parameter(node_, "grid_map.self_clear_x_max", mp_.self_clear_max_(0), 0.6);
+  load_parameter(node_, "grid_map.self_clear_y_min", mp_.self_clear_min_(1), -0.4);
+  load_parameter(node_, "grid_map.self_clear_y_max", mp_.self_clear_max_(1), 0.4);
+  load_parameter(node_, "grid_map.self_clear_z_min", mp_.self_clear_min_(2), -0.5);
+  load_parameter(node_, "grid_map.self_clear_z_max", mp_.self_clear_max_(2), 0.35);
+  if ((mp_.self_clear_min_.array() > mp_.self_clear_max_.array()).any())
+  {
+    RCLCPP_WARN(node_->get_logger(), "invalid grid_map self-clear box; disable self clearing");
+    mp_.self_clear_enabled_ = false;
+  }
+  RCLCPP_INFO(node_->get_logger(),
+              "[GridMap] self_clear=%d box=[%.2f %.2f]x[%.2f %.2f]x[%.2f %.2f]",
+              mp_.self_clear_enabled_, mp_.self_clear_min_(0), mp_.self_clear_max_(0),
+              mp_.self_clear_min_(1), mp_.self_clear_max_(1),
+              mp_.self_clear_min_(2), mp_.self_clear_max_(2));
 
   mp_.lidar_extrinsic_ <<
       1.0, 0.0, 0.0, -0.01100,
@@ -788,6 +805,7 @@ void GridMap::updateOccupancyCallback()
     projectDepthImage();
   // t2 = ros::Time::now();
   raycastProcess();
+  clearRobotFootprint();
   // t3 = ros::Time::now();
 
   // t4 = ros::Time::now();
@@ -804,6 +822,52 @@ void GridMap::updateOccupancyCallback()
 
   md_.occ_need_update_ = false;
   md_.use_cloud_update_ = false;
+}
+
+// 清除机器人实体盒体内部的占据源，并通过 applyOccupancyUpdate 同步撤销
+// 对应膨胀计数。盒体随 base_link 姿态旋转，只清实体内部，不清外部安全区。
+void GridMap::clearRobotFootprint()
+{
+  if (!mp_.self_clear_enabled_ || !md_.has_ray_pose_)
+    return;
+
+  const Eigen::Matrix3d rotation = md_.ray_q_.toRotationMatrix();
+  const Eigen::Vector3d local_center =
+      0.5 * (mp_.self_clear_min_ + mp_.self_clear_max_);
+  const Eigen::Vector3d local_half =
+      0.5 * (mp_.self_clear_max_ - mp_.self_clear_min_);
+  const Eigen::Vector3d world_center = md_.ray_pos_ + rotation * local_center;
+  const Eigen::Vector3d world_half = rotation.cwiseAbs() * local_half;
+
+  Eigen::Vector3i min_id, max_id;
+  posToIndex(world_center - world_half, min_id);
+  posToIndex(world_center + world_half, max_id);
+  boundIndex(min_id);
+  boundIndex(max_id);
+
+  int cleared_occupied_voxels = 0;
+  for (int x = min_id(0); x <= max_id(0); ++x)
+    for (int y = min_id(1); y <= max_id(1); ++y)
+      for (int z = min_id(2); z <= max_id(2); ++z)
+      {
+        const Eigen::Vector3i id(x, y, z);
+        Eigen::Vector3d world_point;
+        indexToPos(id, world_point);
+        const Eigen::Vector3d local_point =
+            rotation.transpose() * (world_point - md_.ray_pos_);
+        if ((local_point.array() >= mp_.self_clear_min_.array()).all() &&
+            (local_point.array() <= mp_.self_clear_max_.array()).all())
+        {
+          if (getOccupancy(id) > 0)
+            cleared_occupied_voxels++;
+          applyOccupancyUpdate(id, mp_.clamp_min_log_);
+        }
+      }
+  if (cleared_occupied_voxels > 0)
+    RCLCPP_WARN_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 2000,
+        "[GridMap] cleared %d occupied self-body voxels",
+        cleared_occupied_voxels);
 }
 
 // depthPoseCallback：深度传感器回调（深度图+位姿 时间同步）。

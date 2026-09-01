@@ -133,6 +133,7 @@ nodes:
     normal_search_radius: 0.4
     # 仅滤除紧贴机体原点的自反射点；1.0 m 会把近场真实障碍一起删除。
     scan_map_filter_radius: 0.35
+    scan_map_self_filter_box: [-0.40, 0.40, -0.28, 0.28, -0.45, 0.30]
     localization_lost_fail_count: 10
     threshold_fitness: 0.8
     threshold_fitness_init: 0.9
@@ -247,6 +248,7 @@ nodes:
     fsm.emergency_time: 1.0
     fsm.near_field_stop_enabled: true
     fsm.near_field_stop_distance: 0.35
+    fsm.near_field_stop_confirm_count: 3
     fsm.finish_dist: 0.15
     fsm.finish_yaw: 0.1
     fsm.fail_safe: true
@@ -270,6 +272,13 @@ nodes:
     grid_map.map_sliding_thresh: 0.2
     grid_map.double_cylinder_radius: 0.35
     grid_map.double_cylinder_offset: 0.23
+    grid_map.self_clear_enabled: true
+    grid_map.self_clear_x_min: -0.40
+    grid_map.self_clear_x_max: 0.40
+    grid_map.self_clear_y_min: -0.28
+    grid_map.self_clear_y_max: 0.28
+    grid_map.self_clear_z_min: -0.45
+    grid_map.self_clear_z_max: 0.30
     grid_map.body_height: 0.4
     grid_map.obstacles_inflation_z_up: 0.1
     grid_map.obstacles_inflation_z_down: 0.4

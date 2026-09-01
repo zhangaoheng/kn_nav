@@ -22,6 +22,7 @@ global_localization_node:
     normal_search_radius: 0.4
     # 保留近场真实障碍；只过滤紧贴机体原点的自反射点。
     scan_map_filter_radius: 0.35
+    scan_map_self_filter_box: [-0.40, 0.40, -0.28, 0.28, -0.45, 0.30]
     localization_lost_fail_count: 3
 
     threshold_fitness: 0.7

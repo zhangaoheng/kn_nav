@@ -159,6 +159,7 @@ private:
     int recovery_candidate_count_ = 4;
     int recovery_success_required_ = 3;
     double scan_map_filter_radius_ = 0.0;
+    std::vector<double> scan_map_self_filter_box_;
     int localization_lost_fail_count_ = 3;
     std::atomic<int> tracking_fail_count_{0};
     int min_source_points_ = 2500;

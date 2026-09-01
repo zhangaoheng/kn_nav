@@ -107,6 +107,8 @@ struct MappingParameters {
   string sensor_type_;
   bool cloud_is_world_;
   bool need_extrinsic_;
+  bool self_clear_enabled_;
+  Eigen::Vector3d self_clear_min_, self_clear_max_;
   Eigen::Matrix4d lidar_extrinsic_;
   Eigen::Matrix4d depth_extrinsic_;
 
@@ -247,6 +249,7 @@ private:
   // main update process
   void projectDepthImage();
   void raycastProcess();
+  void clearRobotFootprint();
 
   inline void inflatePoint(const Eigen::Vector3i& pt, int inf_step_xy, int inf_step_z_up, int inf_step_z_down, vector<Eigen::Vector3i>& pts);
   inline int getInflateOccupancyFromBuffer(Eigen::Vector3d pos, const std::vector<char>& buffer);

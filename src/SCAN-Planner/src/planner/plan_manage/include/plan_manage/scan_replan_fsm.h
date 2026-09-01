@@ -86,6 +86,8 @@ namespace scan_planner
     double emergency_time_;
     bool near_field_stop_enabled_;
     double near_field_stop_distance_;
+    int near_field_stop_confirm_count_{3};
+    int near_field_obstacle_hit_count_{0};
     double finish_dist_, finish_yaw_;
     double rviz_goal_height_;
     double self_inflation_z_up_, self_inflation_z_down_;
