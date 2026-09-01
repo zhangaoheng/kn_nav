@@ -109,6 +109,14 @@ ros2 service call /pct_scan_navigation/cancel std_srvs/srv/Trigger '{}'
 
 ### 2026-09-01
 
+#### Go2-W 自体点云误占用修复第二版
+
+- 问题：启用近场动态障碍保护后的实车测试中，机器人收到目标后完全不走；即使人工遥控到空旷区域，局部规划仍反复失败或急停。日志先出现 `First three control points are in obstacles`、`The robot is inside an obstacle`，连续失败 `5` 次后丢弃当前目标进入 `WAIT_TARGET`；后续新目标也不断以 `Near-field obstacle at 0.00～0.35m` 触发 `EMERGENCY_STOP`。
+- 分析：Go2-W 将 `/scan_map` 球形近点过滤由 `1.0 m` 缩到 `0.35 m` 后，机身、轮腿等位于球外的自身反射点进入在线占用地图；这些点再经过 `0.35 m` 车体膨胀覆盖机器人起点。近场检查又从当前位置开始查询完整双圆柱碰撞体，因此单帧自体残留即可急停。人工移动不能恢复有两层原因：自体反射会跟随机器人在新位置重复写入；规划连续失败后的状态机主动清除 `have_target_` 并等待新目标。该故障发生时全局路径和底盘 bridge 均已正常就绪，与 `RECOVER_GLOBAL` 和 `max_vy=0` 无关。
+- 修改：Open3D 在点云转换到 `base_link` 后，除保留 `0.35 m` 雷达近点过滤外，新增 Go2-W 定向实体盒体过滤 `x=[-0.40,0.40]、y=[-0.28,0.28]、z=[-0.45,0.30] m`，避免为保留近场障碍而重新扩大成 `1.0 m` 球。GridMap 每次 raycast 后使用同一随车姿态旋转的实体盒体清除内部占据源，并通过统一占据更新接口撤销对应膨胀计数；盒体外的安全膨胀区和真实障碍不清除。近场急停由单帧改为连续 `3` 帧确认，约 `0.15 s`，仍保留真实障碍的独立急停。新增节流诊断 `scan_map self-filter` 和 `cleared ... self-body voxels`。只修改 Go2-W 配置，其他机型参数保持不变。
+- 验证：Go2-W 统一/拆分 YAML 解析、配置同步专项契约 `2/2`、`git diff --check` 通过；`open3d_loc`、`scan_planner`、`pct_scan_navigation` 使用 `--symlink-install -DBUILD_TESTING=OFF` 编译通过。完整导航契约仍为 `16/18`，两项失败是仓库既有的全局重定位开关旧断言和 coordinator 参数旧期望。
+- 遗留事项：实机首先在完全空旷处静止启动并观察 `/grid_map/occupancy_inflate`，发送短距离目标后不应再出现 `robot is inside an obstacle` 或 `Near-field obstacle confirmed at 0.00m`。再分别把纸箱和细柱放到车体前方约 `0.5～0.8 m`，确认点云未被实体盒体删除，规划进入绕障；继续逼近时应依次出现候选 `1/3、2/3` 和确认 `3/3` 后急停。若空旷处仍持续清除大量自体体素，应根据 `/scan_base_link` 实测外形微调盒体，不能直接扩大到会吞掉前方真实障碍的尺寸。
+
 #### 局部路径切角与脱轨回归第二版
 
 - 问题：平面导航日志中，部分拐角的局部轨迹允许极限切角；一次避障后机器人逐渐脱离全局路径，继续运动一段后停住，必须人工移回原路线才能恢复规划。
