@@ -207,13 +207,15 @@ def test_go2w_near_field_obstacle_safety_contract():
     assert 'travelled_distance / recovery_corridor_distance_' in planner_manager
     assert 'Trajectory %lld expired' in closed_loop
     assert 'min_turn_speed_scale_' in closed_loop
+    assert 'position_tracking_frozen_' in closed_loop
+    assert 'avoidance_max_vel_' in planner_manager
 
 
 # 新版回归走廊、转弯降速和旧轨迹超时必须覆盖全部机器人配置；只要求
 # 新能力存在，不把各机型原有速度、横移能力和航向阈值强行统一。
 def test_all_robot_profiles_include_recovery_without_losing_motion_limits():
     expected_motion = {
-        'A2': (0.8, 0.25, 0.08, 0.35),
+        'A2': (0.35, 0.25, 0.08, 0.35),
         'B2': (0.8, 0.25, 0.08, 0.35),
         'unitree_go2': (0.8, 0.3, 0.3, 0.5),
         'unitree_go2w': (0.35, 0.4, 0.0, 1.0),
@@ -232,6 +234,12 @@ def test_all_robot_profiles_include_recovery_without_losing_motion_limits():
         assert 0.0 <= controller['turn_slowdown_angle'] < controller['heading_error_threshold']
         assert 0.0 <= controller['min_turn_speed_scale'] < 1.0
         assert controller['trajectory_end_timeout'] > 0.0
+        if profile == 'A2':
+            assert planner['manager.avoidance_max_vel'] == 0.15
+            assert controller['tracking_error_threshold'] == 0.20
+            assert controller['tracking_error_resume_threshold'] == 0.12
+            assert controller['time_forward'] == 0.4
+            assert controller['kp_pos'] == 1.2
 
         split = load(profile, 'scan_planner.yaml')
         split_planner = split['scan_planner_node']['ros__parameters']
@@ -240,6 +248,9 @@ def test_all_robot_profiles_include_recovery_without_losing_motion_limits():
         for key in ('turn_slowdown_angle', 'min_turn_speed_scale',
                     'trajectory_end_timeout'):
             assert key in split_controller
+        if profile == 'A2':
+            assert split_planner['manager.avoidance_max_vel'] == 0.15
+            assert split_controller['tracking_error_threshold'] == 0.20
 
     local = load('local', 'scan_planner.yaml')
     assert (local['scan_planner_node']['ros__parameters'][

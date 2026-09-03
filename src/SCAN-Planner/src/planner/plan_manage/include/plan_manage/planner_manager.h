@@ -87,6 +87,7 @@ namespace scan_planner
     double nominal_corridor_max_deviation_{0.15};
     double recovery_corridor_distance_{1.5};
     double corridor_preferred_deviation_{0.05};
+    double avoidance_max_vel_{0.15};
 
     // 用当前 B 样条轨迹刷新 local_data_ 中的轨迹信息（位置/速度/加速度/
     // 时间），供可视化与闭环控制回路读取。

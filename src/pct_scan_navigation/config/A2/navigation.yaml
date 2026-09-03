@@ -344,6 +344,7 @@ nodes:
     grid_map.vis_height: 0.3
     grid_map.show_occ_time: false
     manager.max_vel: 0.25
+    manager.avoidance_max_vel: 0.15
     manager.max_acc: 0.2
     manager.max_jerk: 4.0
     manager.control_points_distance: 0.2
@@ -365,12 +366,14 @@ nodes:
     optimization.acc_tolerance: 1.0
     optimization.order: 3
   closed_loop_controller:
-    time_forward: 0.6
-    heading_error_threshold: 0.8
+    time_forward: 0.4
+    heading_error_threshold: 0.35
+    tracking_error_threshold: 0.20
+    tracking_error_resume_threshold: 0.12
     turn_slowdown_angle: 0.10
     min_turn_speed_scale: 0.20
     trajectory_end_timeout: 0.50
-    kp_pos: 0.8
+    kp_pos: 1.2
     kp_yaw: 1.5
     max_vx: 0.25
     max_vy: 0.08

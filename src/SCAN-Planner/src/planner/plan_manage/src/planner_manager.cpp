@@ -258,16 +258,19 @@ namespace scan_planner
         get_double("manager.recovery_corridor_distance", 1.5);
     corridor_preferred_deviation_ =
         get_double("optimization.corridor_preferred_deviation", 0.05);
+    avoidance_max_vel_ = get_double("manager.avoidance_max_vel", 0.15);
     nominal_corridor_max_deviation_ = std::clamp(
         nominal_corridor_max_deviation_, 0.01, corridor_max_deviation_);
     recovery_corridor_distance_ = std::max(0.1, recovery_corridor_distance_);
     corridor_preferred_deviation_ = std::clamp(
         corridor_preferred_deviation_, 0.0, nominal_corridor_max_deviation_);
+    avoidance_max_vel_ = std::clamp(avoidance_max_vel_, 0.01, pp_.max_vel_);
     RCLCPP_INFO(
         node_->get_logger(),
-        "Corridor policy: tracking=%.2f avoidance=%.2f recovery_distance=%.2f preferred=%.2f",
+        "Corridor policy: tracking=%.2f avoidance=%.2f recovery_distance=%.2f "
+        "preferred=%.2f avoidance_max_vel=%.2f",
         nominal_corridor_max_deviation_, corridor_max_deviation_,
-        recovery_corridor_distance_, corridor_preferred_deviation_);
+        recovery_corridor_distance_, corridor_preferred_deviation_, avoidance_max_vel_);
 
     local_data_.traj_id_ = 0;
     grid_map_.reset(new GridMap);
@@ -335,8 +338,12 @@ namespace scan_planner
     // 优化器暂时使用起点许可宽度，最终安全检查再沿轨迹逐步收紧。
     // 这样机器人在走廊外仍可生成回归轨迹，同时不会把整条路线永久放宽。
     const double allowed_deviation = std::max(initial_deviation, target_deviation);
-    const double preferred_deviation =
-        avoidance_mode ? target_deviation : corridor_preferred_deviation_;
+    // 最大偏离量只用于给障碍物让路，不能同时作为优化器的“免惩罚区”。
+    // 即使进入避障模式，也应持续把轨迹拉回全局路线附近。
+    const double preferred_deviation = corridor_preferred_deviation_;
+    const double planning_max_vel = avoidance_mode ? avoidance_max_vel_ : pp_.max_vel_;
+    const double planning_feasibility_tolerance =
+        avoidance_mode ? 0.0 : pp_.feasibility_tolerance_;
     const char *planning_mode = avoidance_mode
                                     ? "LOCAL_AVOIDANCE"
                                     : (recovery_mode ? "RECOVER_GLOBAL" : "TRACK_GLOBAL");
@@ -348,7 +355,9 @@ namespace scan_planner
         preferred_deviation, start_deviation);
 
     /*** STEP 1: INIT ***/
-    double ts = (start_pt - local_target_pt).norm() > 0.1 ? pp_.ctrl_pt_dist / pp_.max_vel_ * 1.2 : pp_.ctrl_pt_dist / pp_.max_vel_ * 5; // pp_.ctrl_pt_dist / pp_.max_vel_ is too tense, and will surely exceed the acc/vel limits
+    double ts = (start_pt - local_target_pt).norm() > 0.1
+                    ? pp_.ctrl_pt_dist / planning_max_vel * 1.2
+                    : pp_.ctrl_pt_dist / planning_max_vel * 5;
     vector<Eigen::Vector3d> point_set, start_end_derivatives;
     static bool flag_first_call = true, flag_force_polynomial = false;
     bool flag_regenerate = false;
@@ -533,7 +542,8 @@ namespace scan_planner
 
     /*** STEP 3: REFINE(RE-ALLOCATE TIME) IF NECESSARY ***/
     UniformBspline pos = UniformBspline(ctrl_pts, 3, ts);
-    pos.setPhysicalLimits(pp_.max_vel_, pp_.max_acc_, pp_.feasibility_tolerance_);
+    pos.setPhysicalLimits(
+        planning_max_vel, pp_.max_acc_, planning_feasibility_tolerance);
 
     double ratio;
     bool flag_step_2_success = true;
@@ -544,10 +554,26 @@ namespace scan_planner
       Eigen::MatrixXd optimal_control_points;
       flag_step_2_success = refineTrajAlgo(pos, start_end_derivatives, ratio, ts, optimal_control_points);
       if (flag_step_2_success)
+      {
         pos = UniformBspline(optimal_control_points, 3, ts);
+        pos.setPhysicalLimits(
+            planning_max_vel, pp_.max_acc_, planning_feasibility_tolerance);
+      }
     }
 
-    if (!flag_step_2_success || !checkDynamicFeasibility(pos) ||
+    // 细化优化仍可能重新提高速度。发布前直接拉长时间，保证避障轨迹
+    // 真正满足较低速度上限，而不是只让初始猜测变慢。
+    double final_ratio = 1.0;
+    if (flag_step_2_success && !pos.checkFeasibility(final_ratio, false))
+    {
+      pos.lengthenTime(std::max(1.01, final_ratio * 1.01));
+      pos.setPhysicalLimits(
+          planning_max_vel, pp_.max_acc_, planning_feasibility_tolerance);
+    }
+    double verified_ratio = 1.0;
+    const bool speed_limit_satisfied = pos.checkFeasibility(verified_ratio, false);
+
+    if (!flag_step_2_success || !speed_limit_satisfied || !checkDynamicFeasibility(pos) ||
         !checkFullTrajectorySafety(
             pos, local_corridor, initial_deviation, target_deviation))
     {

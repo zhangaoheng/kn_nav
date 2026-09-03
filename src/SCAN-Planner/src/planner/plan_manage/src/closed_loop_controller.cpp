@@ -43,6 +43,9 @@ public:
   {
     time_forward_ = declare_parameter<double>("time_forward", 0.8);
     heading_error_threshold_ = declare_parameter<double>("heading_error_threshold", 0.8);
+    tracking_error_threshold_ = declare_parameter<double>("tracking_error_threshold", 0.20);
+    tracking_error_resume_threshold_ =
+        declare_parameter<double>("tracking_error_resume_threshold", 0.12);
     turn_slowdown_angle_ = declare_parameter<double>("turn_slowdown_angle", 0.10);
     min_turn_speed_scale_ = declare_parameter<double>("min_turn_speed_scale", 0.20);
     trajectory_end_timeout_ = declare_parameter<double>("trajectory_end_timeout", 0.50);
@@ -54,6 +57,9 @@ public:
     finish_dist_ = declare_parameter<double>("finish_dist", 0.15);
     finish_yaw_ = declare_parameter<double>("finish_yaw", 0.10);
     heading_error_threshold_ = std::max(0.05, heading_error_threshold_);
+    tracking_error_threshold_ = std::max(0.02, tracking_error_threshold_);
+    tracking_error_resume_threshold_ = std::clamp(
+        tracking_error_resume_threshold_, 0.0, tracking_error_threshold_);
     turn_slowdown_angle_ = std::clamp(
         turn_slowdown_angle_, 0.0, heading_error_threshold_);
     min_turn_speed_scale_ = std::clamp(min_turn_speed_scale_, 0.0, 1.0);
@@ -72,9 +78,10 @@ public:
     last_update_time_ = now();
     RCLCPP_INFO(
         get_logger(),
-        "Closed-loop controller ready: heading_stop=%.2f slowdown=%.2f "
-        "min_speed_scale=%.2f max_velocity=(%.2f,%.2f,%.2f) end_timeout=%.2f",
-        heading_error_threshold_, turn_slowdown_angle_, min_turn_speed_scale_,
+        "Closed-loop controller ready: heading_stop=%.2f tracking_freeze=(%.2f/%.2f) "
+        "slowdown=%.2f min_speed_scale=%.2f max_velocity=(%.2f,%.2f,%.2f) end_timeout=%.2f",
+        heading_error_threshold_, tracking_error_threshold_,
+        tracking_error_resume_threshold_, turn_slowdown_angle_, min_turn_speed_scale_,
         max_vx_, max_vy_, max_vyaw_, trajectory_end_timeout_);
   }
 
@@ -155,6 +162,7 @@ private:
     last_update_time_ = now();
     receive_traj_ = true;
     task_completed_ = false;
+    position_tracking_frozen_ = false;
     RCLCPP_INFO(get_logger(), "Received trajectory %lld, duration %.3fs",
                 static_cast<long long>(traj_id_), traj_duration_);
   }
@@ -210,9 +218,19 @@ private:
                   static_cast<long long>(traj_id_));
       return;
     }
+    const double tracking_error = final_pos_error.norm();
+    if (position_tracking_frozen_)
+      position_tracking_frozen_ = tracking_error > tracking_error_resume_threshold_;
+    else
+      position_tracking_frozen_ = tracking_error > tracking_error_threshold_;
+
     if (exec_time_ >= traj_duration_)
     {
-      end_wait_time_ += std::max(0.0, dt);
+      // 轨迹时间已经到终点、但机器人明显落后时，继续闭环追回终点，不能
+      // 让旧轨迹超时保护覆盖位置恢复动作。
+      end_wait_time_ = position_tracking_frozen_
+                           ? 0.0
+                           : end_wait_time_ + std::max(0.0, dt);
       if (end_wait_time_ >= trajectory_end_timeout_)
       {
         publishExecutionFrozen(false);
@@ -239,11 +257,19 @@ private:
       return;
     }
 
-    publishExecutionFrozen(false);
-    exec_time_ = std::min(traj_duration_, exec_time_ + dt);
+    publishExecutionFrozen(position_tracking_frozen_);
+    if (!position_tracking_frozen_)
+      exec_time_ = std::min(traj_duration_, exec_time_ + dt);
+    else
+      RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 1000,
+          "Trajectory %lld tracking error %.3fm exceeds limit %.3fm; freeze time and recover",
+          static_cast<long long>(traj_id_), tracking_error, tracking_error_threshold_);
     last_update_time_ = current_time;
     pos_des = traj_[0].evaluateDeBoorT(exec_time_);
-    const Eigen::Vector3d vel_des = traj_[1].evaluateDeBoorT(exec_time_);
+    const Eigen::Vector3d vel_des = position_tracking_frozen_
+                                        ? Eigen::Vector3d::Zero()
+                                        : traj_[1].evaluateDeBoorT(exec_time_);
     const Eigen::Vector2d pos_error(pos_des.x() - odom_pos_.x(), pos_des.y() - odom_pos_.y());
     const Eigen::Vector2d vel_world = clampNorm(
         Eigen::Vector2d(vel_des.x(), vel_des.y()) + kp_pos_ * pos_error,
@@ -280,6 +306,7 @@ private:
   bool have_odom_{false};
   bool have_final_yaw_{false};
   bool task_completed_{false};
+  bool position_tracking_frozen_{false};
   std::vector<UniformBspline> traj_;
   double traj_duration_{0.0};
   std::int64_t traj_id_{0};
@@ -290,6 +317,7 @@ private:
   double end_wait_time_{0.0};
   rclcpp::Time last_update_time_{0, 0, RCL_ROS_TIME};
   double time_forward_, heading_error_threshold_, turn_slowdown_angle_;
+  double tracking_error_threshold_, tracking_error_resume_threshold_;
   double min_turn_speed_scale_, trajectory_end_timeout_, kp_pos_, kp_yaw_;
   double max_vx_, max_vy_, max_vyaw_, finish_dist_, finish_yaw_;
 };
