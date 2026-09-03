@@ -1564,7 +1564,10 @@ private:
             recovery_start_time_ = -1.0;
         if (next == LocalizationHealth::LOST)
             lost_scan_count_ = 0;
-        publish_localization_valid(next == LocalizationHealth::NORMAL &&
+        // DEGRADED/RECOVERING still carry a bounded, continuous pose.  Only a
+        // confirmed LOST state should tear down the downstream localization
+        // chain; otherwise one critical scan unnecessarily freezes Open3D TF.
+        publish_localization_valid(next != LocalizationHealth::LOST &&
                                    last_good_valid_);
         RCLCPP_WARN(
             get_logger(), "[FASTLIO_HEALTH] %s -> %s reason=%s",
@@ -1955,7 +1958,7 @@ private:
 
             /******* Publish odometry *******/
             const bool localization_valid =
-                localization_health_ == LocalizationHealth::NORMAL &&
+                localization_health_ != LocalizationHealth::LOST &&
                 last_good_valid_;
             publish_odometry(pubOdomAftMapped_, tf_broadcaster_,
                              state_point, localization_valid);

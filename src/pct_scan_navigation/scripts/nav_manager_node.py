@@ -8,14 +8,14 @@
 #      切换前先软重置，成功后更新 /current_map 状态（latched 话题）。
 #   2. 软重置 / 重启：/restart_navigation 服务支持 SOFT_RESET（停机器 + 清
 #      空规划链路）与 FULL_RESTART（拉起外部重启命令，常用于整系统重启）。
-#   3. 定位丢失保护：订阅 /localization_status，一旦进入 TRACKING_LOST 立即
-#      软重置停止导航，避免在错误位姿下继续运动。
+#   3. 定位丢失保护：订阅 /localization_status，进入 TRACKING_LOST 后缓存
+#      路线并停车，可靠定位恢复后自动续航。
 #
 # 数据流：
 #   /switch_map -> LoadLocalizationMap(global_localization_node)
 #                -> LoadTomogram(pct_global_planner)
-#   /restart_navigation / 定位丢失 -> 零速 /cmd_vel + 清 coordinator 路线
-#   + 空 /scan_planner/waypoints + Trigger(scan_planner_node 重置)。
+#   /restart_navigation -> 零速 + 清路线；定位丢失 -> 零速 + 暂停 SCAN，
+#   定位恢复 -> 重新发布缓存的 /scan_planner/waypoints。
 # ============================================================================
 
 """Lightweight navigation runtime manager for PCT + SCAN navigation."""
@@ -24,6 +24,7 @@ import os
 import shlex
 import subprocess
 import threading
+from copy import deepcopy
 from typing import Any, Dict, Optional
 
 import rclpy
@@ -89,6 +90,9 @@ class NavManagerNode(Node):
         self.map_status_pub = self.create_publisher(MapStatus, '/current_map', latched)
         self.cmd_vel_pub = self.create_publisher(Twist, self.cmd_vel_topic, 10)
         self.waypoints_pub = self.create_publisher(Path, self.waypoints_topic, latched)
+        self.create_subscription(
+            Path, self.waypoints_topic, self._waypoints_cb, latched,
+            callback_group=self.callback_group)
 
         self.load_localization_cli = self.create_client(
             LoadLocalizationMap, self.load_localization_service,
@@ -114,6 +118,10 @@ class NavManagerNode(Node):
 
         self._profiles = self._load_profiles()
         self._last_localization_state: Optional[int] = None
+        self._saved_waypoints: Optional[Path] = None
+        self._localization_paused = False
+        self.create_timer(
+            0.1, self._publish_pause_stop, callback_group=self.callback_group)
 
         if self.current_map_name:
             self._publish_map_status(MapStatus.LOADED, self.current_map_name, 'startup')
@@ -259,6 +267,8 @@ class NavManagerNode(Node):
     # 清空路线；3) 发布空 waypoints 让 SCAN 丢弃当前跟踪；4) 触发 SCAN 重置。
     # 任一服务失败只告警不中断，保证后续步骤继续执行。
     def _soft_reset(self, reason: str):
+        self._localization_paused = False
+        self._saved_waypoints = None
         self.cmd_vel_pub.publish(Twist())
 
         req = Trigger.Request()
@@ -280,6 +290,54 @@ class NavManagerNode(Node):
         elif resp is not None and not resp.success:
             self.get_logger().warn(f'scan reset failed: {resp.message}')
 
+    # 缓存最近一条非空 SCAN 路线。定位暂停时发布的空路线不会覆盖缓存，
+    # 因而定位恢复后可以继续原任务，不依赖全局规划器重复发布 /pct_path。
+    def _waypoints_cb(self, msg: Path):
+        if msg.poses and not self._localization_paused:
+            self._saved_waypoints = deepcopy(msg)
+
+    # 定位丢失期间周期发布零速。下游 SCAN 已收到空路径并复位，这一层
+    # 额外确保其他短暂残留的速度指令不会让机器人继续运动。
+    def _publish_pause_stop(self):
+        if self._localization_paused:
+            self.cmd_vel_pub.publish(Twist())
+
+    def _pause_for_localization(self):
+        if self._localization_paused:
+            return
+        self._localization_paused = True
+        self.cmd_vel_pub.publish(Twist())
+
+        empty_path = Path()
+        empty_path.header.stamp = self.get_clock().now().to_msg()
+        empty_path.header.frame_id = 'map'
+        self.waypoints_pub.publish(empty_path)
+
+        req = Trigger.Request()
+        resp, error = self._call_service(self.scan_reset_cli, req)
+        if error:
+            self.get_logger().warn(f'scan pause reset skipped: {error}')
+        elif resp is not None and not resp.success:
+            self.get_logger().warn(f'scan pause reset failed: {resp.message}')
+
+    def _resume_after_localization(self):
+        if not self._localization_paused:
+            return
+        self._localization_paused = False
+        if self._saved_waypoints is None or not self._saved_waypoints.poses:
+            self.get_logger().info(
+                'Localization recovered; no cached route to resume')
+            return
+
+        resumed = deepcopy(self._saved_waypoints)
+        resumed.header.stamp = self.get_clock().now().to_msg()
+        resumed.header.frame_id = 'map'
+        for pose in resumed.poses:
+            pose.header = resumed.header
+        self.waypoints_pub.publish(resumed)
+        self.get_logger().info(
+            f'Localization recovered; resumed {len(resumed.poses)} cached waypoints')
+
     # 发布 /current_map（latched）状态消息，供 RViz/监控端显示地图状态。
     def _publish_map_status(self, state: int, map_name: str, reason: str):
         msg = MapStatus()
@@ -293,8 +351,8 @@ class NavManagerNode(Node):
     # 定位状态回调（定位丢失保护核心）：
     #   * 同步地图名：以 global_localization_node 上报的名称为准（定位 YAML
     #     是启动地图名的唯一数据源），避免维护两处默认值。
-    #   * 上升沿检测 TRACKING_LOST：仅在状态从非丢失变为丢失时触发一次
-    #     软重置（用 _last_localization_state 去抖），防止持续告警刷屏。
+    #   * 上升沿检测 TRACKING_LOST：暂停并缓存路线；恢复到可靠跟踪状态后
+    #     重新发布缓存路线。地图切换和人工软重置仍会彻底清空任务。
     def _localization_status_cb(self, msg: LocalizationStatus):
         # The localization YAML is the single source of truth for the startup
         # map name. Mirror the name reported by global_localization_node instead
@@ -312,8 +370,17 @@ class NavManagerNode(Node):
             msg.state == LocalizationStatus.TRACKING_LOST and
             self._last_localization_state != LocalizationStatus.TRACKING_LOST
         ):
-            self.get_logger().warn('Localization lost; soft-stopping navigation')
-            self._soft_reset(reason='localization_lost')
+            self.get_logger().warn(
+                'Localization lost; pausing navigation and retaining route')
+            self._pause_for_localization()
+        elif (
+            self._localization_paused and
+            msg.state in (
+                LocalizationStatus.INIT_SUCCESS,
+                LocalizationStatus.TRACKING,
+            )
+        ):
+            self._resume_after_localization()
         self._last_localization_state = msg.state
 
 

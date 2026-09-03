@@ -214,7 +214,7 @@ def test_go2w_near_field_obstacle_safety_contract():
 # 新能力存在，不把各机型原有速度、横移能力和航向阈值强行统一。
 def test_all_robot_profiles_include_recovery_without_losing_motion_limits():
     expected_motion = {
-        'A2': (0.35, 0.25, 0.08, 0.35),
+        'A2': (0.8, 0.25, 0.08, 0.35),
         'B2': (0.8, 0.25, 0.08, 0.35),
         'unitree_go2': (0.8, 0.3, 0.3, 0.5),
         'unitree_go2w': (0.35, 0.4, 0.0, 1.0),
@@ -235,8 +235,8 @@ def test_all_robot_profiles_include_recovery_without_losing_motion_limits():
         assert controller['trajectory_end_timeout'] > 0.0
         if profile == 'A2':
             assert planner['manager.avoidance_max_vel'] == 0.15
-            assert controller['time_forward'] == 0.4
-            assert controller['kp_pos'] == 1.2
+            assert controller['time_forward'] == 0.6
+            assert controller['kp_pos'] == 0.8
 
         split = load(profile, 'scan_planner.yaml')
         split_planner = split['scan_planner_node']['ros__parameters']
@@ -469,6 +469,19 @@ def test_soft_reset_clears_coordinator_route_and_is_idempotent():
     assert 'if (was_active && have_odom_)' in fsm
 
 
+def test_localization_loss_pauses_and_resumes_cached_route():
+    manager = (ROOT / 'scripts/nav_manager_node.py').read_text()
+    assert 'self._saved_waypoints' in manager
+    assert 'self._pause_for_localization()' in manager
+    assert 'self._resume_after_localization()' in manager
+    assert 'self._publish_pause_stop' in manager
+    assert 'pausing navigation and retaining route' in manager
+    loss_branch = manager.split(
+        "msg.state == LocalizationStatus.TRACKING_LOST", 1
+    )[1].split('self._last_localization_state = msg.state', 1)[0]
+    assert "self._soft_reset(reason='localization_lost')" not in loss_branch
+
+
 # 约束 FAST-LIO 退化保护：软退化保留有界运动且不写地图；
 # LOST 不能被坏扫描推回 DEGRADED，持续失锁后受控重建局部地图。
 def test_fastlio_degraded_state_preserves_bounded_motion_without_map_pollution():
@@ -495,9 +508,13 @@ def test_fastlio_degraded_state_preserves_bounded_motion_without_map_pollution()
     assert 'self._fastlio_valid_cb' not in manager
     assert "self._soft_reset(reason='fastlio_invalid')" not in manager
     assert '"/fastlio/localization_valid"' in open3d
-    assert 'ignore /Odometry_loc while FAST-LIO is invalid' in open3d
-    assert 'pause odom, TF and Open3D ICP' in open3d
-    assert 'if (!fastlio_valid_.load())' in open3d
+    assert 'next != LocalizationHealth::LOST' in mapping
+    assert 'localization_health_ != LocalizationHealth::LOST &&' in mapping
+    assert 'publish held trusted TF/odometry while localization recovery is pending' in open3d
+    assert 'hold trusted TF/odom and pause Open3D ICP' in open3d
+    assert 'hold_trusted_output' in open3d
+    assert 'recovery_prediction_odom2map_ = recovery_stationary_odom2map_' in open3d
+    assert 'recovery_final_fitness_threshold_ = std::clamp' in open3d
     assert 'fastlio_recovery_pending_icp_' in open3d
     assert 'critical_update_translation_' in mapping
     assert 'recovery_bootstrap_remaining_' in mapping
@@ -541,8 +558,12 @@ def test_fastlio_degraded_state_preserves_bounded_motion_without_map_pollution()
         assert open3d_params['recovery_max_translation'] == 2.0
         assert open3d_params['recovery_max_yaw_deg'] == 15.0
         assert open3d_params['recovery_max_inlier_rmse'] == 0.15
-        assert open3d_params['recovery_provisional_fitness_threshold'] == 0.65
-        assert open3d_params['recovery_final_fitness_threshold'] == 0.90
+        if profile == 'A2':
+            assert open3d_params['recovery_provisional_fitness_threshold'] == 0.55
+            assert open3d_params['recovery_final_fitness_threshold'] == 0.58
+        else:
+            assert open3d_params['recovery_provisional_fitness_threshold'] == 0.65
+            assert open3d_params['recovery_final_fitness_threshold'] == 0.90
         assert open3d_params['recovery_xy_search_range'] == 1.0
         assert open3d_params['recovery_z_search_range'] == 0.5
         assert open3d_params['recovery_yaw_search_deg'] == 15.0

@@ -482,8 +482,14 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
     this->get_parameter("min_target_points", min_target_points_);
     this->get_parameter("threshold_fitness_init", threshold_fitness_init_);
     this->get_parameter("threshold_fitness", threshold_fitness_);
-    recovery_final_fitness_threshold_ = std::max(
-        threshold_fitness_, recovery_final_fitness_threshold_);
+    // Recovery deliberately allows a lower per-frame fitness than normal
+    // tracking and relies on several spatially consistent confirmations.  Do
+    // not silently clamp the configured recovery threshold to threshold_fitness.
+    recovery_provisional_fitness_threshold_ = std::clamp(
+        recovery_provisional_fitness_threshold_, 0.0, 1.0);
+    recovery_final_fitness_threshold_ = std::clamp(
+        recovery_final_fitness_threshold_,
+        recovery_provisional_fitness_threshold_, 1.0);
     this->get_parameter("initialpose", initialpose_);
     this->get_parameter("dis_updatemap", dis_updatemap_);
     std::string path_imu_to_base = "";
@@ -765,13 +771,9 @@ Eigen::Matrix3d GloabalLocalization::Euler2Matrix3d(const Eigen::Vector3d euler)
 // （map 系里程计，含差分速度）与 /localization_3d 运动中心位姿。
 void GloabalLocalization::CallbackImulink2Odom(const nav_msgs::msg::Odometry::SharedPtr imulink2odom)
 {
-    if (!fastlio_valid_.load())
-    {
-        RCLCPP_WARN_THROTTLE(
-            this->get_logger(), *this->get_clock(), 2000,
-            "ignore /Odometry_loc while FAST-LIO is invalid");
+    const bool fastlio_valid = fastlio_valid_.load();
+    if (!fastlio_valid && !loc_initialized_.load())
         return;
-    }
     const rclcpp::Time output_stamp(imulink2odom->header.stamp);
     {
         std::lock_guard<std::mutex> timestamp_lock(lock_timestamp_);
@@ -805,9 +807,10 @@ void GloabalLocalization::CallbackImulink2Odom(const nav_msgs::msg::Odometry::Sh
             // The current FAST-LIO odom is multiplied below on every frame, so
             // real robot motion is preserved while ICP corrections remain
             // bounded around the predicted global pose.
-            recovery_prediction_odom2map_ = last_trusted_pose_valid_
-                ? last_trusted_baselink2map_ * last_trusted_baselink2odom_.inverse()
-                : recovery_relative_odom2map_;
+            // Anchor recovery around the last trusted global pose using the
+            // recovered odom frame.  The previous odom anchor may be invalid
+            // after FAST-LIO rebuilds its local map and can crop an empty map.
+            recovery_prediction_odom2map_ = recovery_stationary_odom2map_;
             recovery_confirm_valid_ = false;
             recovery_success_streak_.store(0);
             recovery_relative_snapshot = recovery_relative_odom2map_;
@@ -816,9 +819,15 @@ void GloabalLocalization::CallbackImulink2Odom(const nav_msgs::msg::Odometry::Sh
             recovery_seed_initialized = true;
         }
         mat_baselink2map_ = mat_odom2map_ * mat_baselink2odom_;
-        mat_odom2map_snapshot = mat_odom2map_;
+        const bool hold_trusted_output = loc_initialized_.load() &&
+            (!fastlio_valid || fastlio_recovery_pending_icp_.load()) &&
+            last_trusted_pose_valid_;
+        mat_odom2map_snapshot = hold_trusted_output
+            ? last_trusted_baselink2map_ * mat_baselink2odom_.inverse()
+            : mat_odom2map_;
         mat_baselink2odom_snapshot = mat_baselink2odom_;
-        mat_baselink2map_snapshot = mat_baselink2map_;
+        mat_baselink2map_snapshot = hold_trusted_output
+            ? last_trusted_baselink2map_ : mat_baselink2map_;
     }
 
     if (recovery_seed_initialized)
@@ -833,11 +842,12 @@ void GloabalLocalization::CallbackImulink2Odom(const nav_msgs::msg::Odometry::Sh
             recovery_trusted_snapshot ? 1 : 0);
     }
 
-    // After FAST-LIO recovery, retain the new local odom internally for ICP,
-    // but do not expose it through map TF or /Odometry_open3d until one
-    // tracking ICP has re-established map->odom.
-    if (loc_initialized_.load() && fastlio_recovery_pending_icp_.load())
-        return;
+    if (!fastlio_valid || fastlio_recovery_pending_icp_.load())
+    {
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(), *this->get_clock(), 2000,
+            "publish held trusted TF/odometry while localization recovery is pending");
+    }
 
     /// 发布tf关系
     geometry_msgs::msg::TransformStamped transform_odom2map;
@@ -965,7 +975,7 @@ void GloabalLocalization::CallbackFastlioValid(
             "fastlio_invalid");
         if (changed || !received_before)
             RCLCPP_WARN(this->get_logger(),
-                        "FAST-LIO invalid: pause odom, TF and Open3D ICP");
+                        "FAST-LIO invalid: hold trusted TF/odom and pause Open3D ICP");
         return;
     }
 
