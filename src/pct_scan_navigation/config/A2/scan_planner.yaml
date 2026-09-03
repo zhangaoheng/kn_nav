@@ -80,8 +80,6 @@ closed_loop_controller:
   ros__parameters:
     time_forward: 0.40
     heading_error_threshold: 0.35
-    tracking_error_threshold: 0.20
-    tracking_error_resume_threshold: 0.12
     turn_slowdown_angle: 0.10
     min_turn_speed_scale: 0.20
     trajectory_end_timeout: 0.50

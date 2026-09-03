@@ -207,7 +207,6 @@ def test_go2w_near_field_obstacle_safety_contract():
     assert 'travelled_distance / recovery_corridor_distance_' in planner_manager
     assert 'Trajectory %lld expired' in closed_loop
     assert 'min_turn_speed_scale_' in closed_loop
-    assert 'position_tracking_frozen_' in closed_loop
     assert 'avoidance_max_vel_' in planner_manager
 
 
@@ -236,8 +235,6 @@ def test_all_robot_profiles_include_recovery_without_losing_motion_limits():
         assert controller['trajectory_end_timeout'] > 0.0
         if profile == 'A2':
             assert planner['manager.avoidance_max_vel'] == 0.15
-            assert controller['tracking_error_threshold'] == 0.20
-            assert controller['tracking_error_resume_threshold'] == 0.12
             assert controller['time_forward'] == 0.4
             assert controller['kp_pos'] == 1.2
 
@@ -250,7 +247,6 @@ def test_all_robot_profiles_include_recovery_without_losing_motion_limits():
             assert key in split_controller
         if profile == 'A2':
             assert split_planner['manager.avoidance_max_vel'] == 0.15
-            assert split_controller['tracking_error_threshold'] == 0.20
 
     local = load('local', 'scan_planner.yaml')
     assert (local['scan_planner_node']['ros__parameters'][
