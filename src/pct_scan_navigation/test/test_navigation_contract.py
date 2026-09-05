@@ -531,6 +531,11 @@ def test_fastlio_degraded_state_preserves_bounded_motion_without_map_pollution()
     assert 'recovery_confirm_valid_' in open3d
     assert 'recovery_confirm_family_' in open3d
     assert 'confirmation_family_changed' in open3d
+    assert 'recovery_fullmap_settling_' in open3d
+    assert 'recovery_settle_min_seed_fitness_' in open3d
+    assert 'recovery_fullmap_confirmed' in open3d
+    assert 'RequestGlobalRelocalization()' in open3d
+    assert 'recovery_timeout_global_relocalization' in open3d
     assert '"/open3d/localization_valid"' in open3d
     assert 'localization_output_valid' in open3d
     assert 'last_trusted_baselink2map_ =\n                            reg_matrix * mat_baselink2odom_cur' in open3d
@@ -578,6 +583,14 @@ def test_fastlio_degraded_state_preserves_bounded_motion_without_map_pollution()
             assert open3d_params['recovery_max_xy_error'] == 0.8
             assert open3d_params['recovery_max_z_error'] == 0.35
             assert open3d_params['recovery_max_yaw_error_deg'] == 5.0
+            assert open3d_params['recovery_settle_min_seed_fitness'] == 0.70
+            assert open3d_params['recovery_settle_min_fitness'] == 0.95
+            assert open3d_params['recovery_settle_max_inlier_rmse'] == 0.13
+            assert open3d_params['recovery_settle_max_translation'] == 3.2
+            assert open3d_params['recovery_settle_max_yaw_deg'] == 3.0
+            assert open3d_params['recovery_settle_success_required'] == 3
+            assert open3d_params['recovery_timeout_sec'] == 8.0
+            assert open3d_params['auto_global_relocalization'] is True
         else:
             assert robust['max_degraded_duration'] == 3.0
             assert robust['max_recovery_duration'] == 5.0
@@ -600,6 +613,25 @@ def test_fastlio_degraded_state_preserves_bounded_motion_without_map_pollution()
         if profile != 'A2':
             assert open3d_params['recovery_candidate_count'] == 4
             assert open3d_params['recovery_success_required'] == 3
+
+
+def test_a2_fullmap_settling_separates_recorded_good_and_bad_recovery():
+    params = load('A2', 'navigation.yaml')['nodes']['global_localization_node']
+
+    def accepted(before, after, rmse, dpos, dyaw):
+        return (
+            before >= params['recovery_settle_min_seed_fitness'] and
+            after > params['recovery_settle_min_fitness'] and
+            rmse <= params['recovery_settle_max_inlier_rmse'] and
+            dpos <= params['recovery_settle_max_translation'] and
+            dyaw <= params['recovery_settle_max_yaw_deg']
+        )
+
+    # First recovery: full-map ICP repeatedly converged to this correction.
+    assert accepted(0.745110, 0.975548, 0.118579, 2.561, 0.864)
+    # Second recovery: low overlap must still be rejected even when motion
+    # correction happens to be inside the widened settling translation gate.
+    assert not accepted(0.198651, 0.202981, 0.141554, 1.733, 0.150)
 
 
 # 约束纯全局跟踪测试链路（coordinator 可执行 + pure_pursuit 启动）保留。

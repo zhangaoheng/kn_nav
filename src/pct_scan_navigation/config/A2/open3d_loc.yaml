@@ -58,6 +58,14 @@ global_localization_node:
     recovery_confirm_max_yaw_deg: 3.0
     recovery_candidate_count: 4
     recovery_success_required: 3
+    recovery_settle_min_seed_fitness: 0.70
+    recovery_settle_min_fitness: 0.95
+    recovery_settle_max_inlier_rmse: 0.13
+    recovery_settle_max_translation: 3.2
+    recovery_settle_max_yaw_deg: 3.0
+    recovery_settle_success_required: 3
+    recovery_timeout_sec: 8.0
+    auto_global_relocalization: true
     min_source_points: 500
     min_target_points: 500
 

@@ -29,6 +29,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <std_msgs/msg/float32.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <open3d_loc/srv/global_relocalize.hpp>
 #include <pct_scan_navigation/msg/localization_status.hpp>
 #include <pct_scan_navigation/srv/load_localization_map.hpp>
 #include <tf2_eigen/tf2_eigen.hpp>
@@ -78,11 +79,13 @@ public:
 
 private:
     using LoadLocalizationMap = pct_scan_navigation::srv::LoadLocalizationMap;
+    using GlobalRelocalize = open3d_loc::srv::GlobalRelocalize;
     using LocalizationStatus = pct_scan_navigation::msg::LocalizationStatus;
 
     bool LoadMapFromPath(const std::string &path_map, const std::string &map_name, std::string *message);
     void PublishLocalizationStatus();
     void SetLocalizationStatus(uint8_t state, const std::string &reason);
+    void RequestGlobalRelocalization();
     void HandleLoadMap(const std::shared_ptr<LoadLocalizationMap::Request> request,
                        std::shared_ptr<LoadLocalizationMap::Response> response);
 
@@ -158,6 +161,14 @@ private:
     double recovery_confirm_max_yaw_deg_ = 3.0;
     int recovery_candidate_count_ = 4;
     int recovery_success_required_ = 3;
+    double recovery_settle_min_seed_fitness_ = 0.70;
+    double recovery_settle_min_fitness_ = 0.95;
+    double recovery_settle_max_inlier_rmse_ = 0.13;
+    double recovery_settle_max_translation_ = 3.2;
+    double recovery_settle_max_yaw_deg_ = 3.0;
+    int recovery_settle_success_required_ = 3;
+    double recovery_timeout_sec_ = 8.0;
+    bool auto_global_relocalization_ = false;
     double scan_map_filter_radius_ = 0.0;
     std::vector<double> scan_map_self_filter_box_;
     int localization_lost_fail_count_ = 3;
@@ -178,6 +189,11 @@ private:
     std::atomic_bool fastlio_recovery_pending_icp_{true};
     std::atomic_bool recovery_seed_pending_{false};
     std::atomic<int> recovery_success_streak_{0};
+    /// @brief 局部候选确认后，使用完整地图完成最终收敛；此阶段仍禁止定位输出。
+    std::atomic_bool recovery_fullmap_settling_{false};
+    std::atomic<int> recovery_settle_success_streak_{0};
+    std::atomic<int64_t> recovery_start_steady_ns_{0};
+    std::atomic_bool global_relocalization_requested_{false};
     Eigen::Matrix4d last_trusted_baselink2map_ = Eigen::Matrix4d::Identity();
     Eigen::Matrix4d last_trusted_baselink2odom_ = Eigen::Matrix4d::Identity();
     Eigen::Matrix4d recovery_relative_odom2map_ = Eigen::Matrix4d::Identity();
@@ -207,6 +223,7 @@ private:
     rclcpp::Publisher<LocalizationStatus>::SharedPtr pub_localization_status_;
     rclcpp::TimerBase::SharedPtr localization_status_timer_;
     rclcpp::Service<LoadLocalizationMap>::SharedPtr load_map_srv_;
+    rclcpp::Client<GlobalRelocalize>::SharedPtr global_relocalization_client_;
 
     geometry_msgs::msg::PoseStamped localization_3d_;
     std_msgs::msg::Float32 localization_3d_confidence_;

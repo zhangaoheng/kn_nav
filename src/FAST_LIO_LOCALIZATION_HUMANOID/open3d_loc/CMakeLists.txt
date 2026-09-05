@@ -190,6 +190,7 @@ ament_target_dependencies(localization_service_node
 )
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(localization_service_node "${cpp_typesupport_target}")
+target_link_libraries(global_localization_node "${cpp_typesupport_target}")
 target_link_libraries(global_relocalization_node "${cpp_typesupport_target}")
 
 # Install targets
