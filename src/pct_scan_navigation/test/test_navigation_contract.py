@@ -529,6 +529,10 @@ def test_fastlio_degraded_state_preserves_bounded_motion_without_map_pollution()
     assert 'recovery_confirm_odom2map_' in open3d
     assert 'prediction_range' in open3d
     assert 'recovery_confirm_valid_' in open3d
+    assert 'recovery_confirm_family_' in open3d
+    assert 'confirmation_family_changed' in open3d
+    assert '"/open3d/localization_valid"' in open3d
+    assert 'localization_output_valid' in open3d
     assert 'last_trusted_baselink2map_ =\n                            reg_matrix * mat_baselink2odom_cur' in open3d
     assert 'recovery_refining' in open3d
     assert 'selected_in_family' in open3d
@@ -571,6 +575,9 @@ def test_fastlio_degraded_state_preserves_bounded_motion_without_map_pollution()
             assert open3d_params['recovery_final_fitness_threshold'] == 0.45
             assert open3d_params['recovery_candidate_count'] == 2
             assert open3d_params['recovery_success_required'] == 5
+            assert open3d_params['recovery_max_xy_error'] == 0.8
+            assert open3d_params['recovery_max_z_error'] == 0.35
+            assert open3d_params['recovery_max_yaw_error_deg'] == 5.0
         else:
             assert robust['max_degraded_duration'] == 3.0
             assert robust['max_recovery_duration'] == 5.0
@@ -580,9 +587,10 @@ def test_fastlio_degraded_state_preserves_bounded_motion_without_map_pollution()
         assert open3d_params['recovery_xy_search_range'] == 1.0
         assert open3d_params['recovery_z_search_range'] == 0.5
         assert open3d_params['recovery_yaw_search_deg'] == 15.0
-        assert open3d_params['recovery_max_xy_error'] == 2.0
-        assert open3d_params['recovery_max_z_error'] == 0.6
-        assert open3d_params['recovery_max_yaw_error_deg'] == 15.0
+        if profile != 'A2':
+            assert open3d_params['recovery_max_xy_error'] == 2.0
+            assert open3d_params['recovery_max_z_error'] == 0.6
+            assert open3d_params['recovery_max_yaw_error_deg'] == 15.0
         assert open3d_params['recovery_submap_xy_range'] == 10.0
         assert open3d_params['recovery_submap_z_below'] == 1.2
         assert open3d_params['recovery_submap_z_above'] == 1.2

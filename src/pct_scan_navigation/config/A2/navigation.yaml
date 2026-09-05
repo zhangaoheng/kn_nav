@@ -194,9 +194,11 @@ nodes:
     recovery_xy_search_range: 1.0
     recovery_z_search_range: 0.5
     recovery_yaw_search_deg: 15.0
-    recovery_max_xy_error: 2.0
-    recovery_max_z_error: 0.6
-    recovery_max_yaw_error_deg: 15.0
+    # 短时失锁恢复必须贴近丢失前运动预测。第一次成功恢复误差约
+    # 0.24m/0.29m/1.4deg；第二次错误候选约 11deg，必须在确认前拒绝。
+    recovery_max_xy_error: 0.8
+    recovery_max_z_error: 0.35
+    recovery_max_yaw_error_deg: 5.0
     recovery_submap_xy_range: 10.0
     recovery_submap_z_below: 1.2
     recovery_submap_z_above: 1.2

@@ -8,7 +8,7 @@
 // 结构：
 //   - 订阅 /Odometry_loc、/cloud_registered_body_1、/initialpose；
 //   - 发布 /map_3d、/scan_base_link、/scan_map、/localization_3d、
-//     /Odometry_open3d、/localization_status；
+//     /Odometry_open3d、/open3d/localization_valid、/localization_status；
 //   - 服务 ~/load_map；定位线程 thread_loc_ 运行 Localization() 主循环。
 //
 // 数据流：里程计+点云 -> 定位线程(初始化ICP/跟踪ICP) -> map 系定位与 tf。
@@ -186,6 +186,8 @@ private:
     Eigen::Matrix4d recovery_prediction_odom2map_ = Eigen::Matrix4d::Identity();
     /// @brief 第一次严格通过的固定确认基准；完成全部确认前不写入正式 map->odom。
     Eigen::Matrix4d recovery_confirm_odom2map_ = Eigen::Matrix4d::Identity();
+    /// @brief 当前连续确认所属的候选族；候选族切换时重新开始确认。
+    std::string recovery_confirm_family_;
     bool last_trusted_pose_valid_ = false;
     bool recovery_confirm_valid_ = false;
 
@@ -201,6 +203,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr pub_localization_3d_confidence_;
     rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr pub_localization_3d_delay_ms_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_open3d_odometry_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pub_open3d_localization_valid_;
     rclcpp::Publisher<LocalizationStatus>::SharedPtr pub_localization_status_;
     rclcpp::TimerBase::SharedPtr localization_status_timer_;
     rclcpp::Service<LoadLocalizationMap>::SharedPtr load_map_srv_;

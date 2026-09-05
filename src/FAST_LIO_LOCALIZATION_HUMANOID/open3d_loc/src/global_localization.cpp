@@ -225,6 +225,15 @@ void GloabalLocalization::PublishLocalizationStatus()
         msg.reason = localization_reason_;
     }
     pub_localization_status_->publish(msg);
+
+    // A held trusted pose keeps TF connected during recovery, but it is not a
+    // fresh localization measurement. Publish validity explicitly instead of
+    // asking consumers to infer it from an advancing timestamp.
+    std_msgs::msg::Bool valid_msg;
+    valid_msg.data = loc_initialized_.load() && fastlio_valid_.load() &&
+        !fastlio_recovery_pending_icp_.load() &&
+        msg.state == LocalizationStatus::TRACKING;
+    pub_open3d_localization_valid_->publish(valid_msg);
 }
 
 // 设置定位状态机（UNINITIALIZED/INITIALIZING/TRACKING/...）与原因，
@@ -322,6 +331,11 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node")
     pub_localization_3d_confidence_ = this->create_publisher<std_msgs::msg::Float32>("/localization_3d_confidence", 1);
     pub_localization_3d_delay_ms_ = this->create_publisher<std_msgs::msg::Float32>("/localization_3d_delay_ms", 1);
     pub_open3d_odometry_ = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry_open3d", 20);
+    rclcpp::QoS localization_valid_qos(rclcpp::KeepLast(1));
+    localization_valid_qos.reliable();
+    localization_valid_qos.transient_local();
+    pub_open3d_localization_valid_ = this->create_publisher<std_msgs::msg::Bool>(
+        "/open3d/localization_valid", localization_valid_qos);
     pub_localization_status_ = this->create_publisher<LocalizationStatus>("/localization_status", 10);
     localization_status_timer_ = this->create_wall_timer(
         std::chrono::milliseconds(250),
@@ -881,12 +895,18 @@ void GloabalLocalization::CallbackImulink2Odom(const nav_msgs::msg::Odometry::Sh
     br_odom2map_->sendTransform(transform_baselink2odom);
 
     const bool localization_ready = loc_initialized_.load();
-    if (!localization_ready)
+    const bool localization_output_valid = localization_ready &&
+        fastlio_valid_.load() && !fastlio_recovery_pending_icp_.load() &&
+        localization_state_.load() == LocalizationStatus::TRACKING;
+    if (!localization_output_valid)
     {
         last_open3d_odom_valid_ = false;
     }
 
-    if (localization_ready)
+    // Keep the held TF above for transform continuity, but do not refresh pose
+    // topics with a frozen position and a new timestamp while recovery is
+    // pending. Topic consumers will see a timeout and validity=false.
+    if (localization_output_valid)
     {
         Eigen::Quaterniond open3d_quat(mat_baselink2map_snapshot.block<3, 3>(0, 0));
         open3d_quat.normalize();
@@ -929,7 +949,7 @@ void GloabalLocalization::CallbackImulink2Odom(const nav_msgs::msg::Odometry::Sh
     }
 
     /// 定位初始化完成后发布运动中心定位结果
-    if (loc_initialized_.load())
+    if (localization_output_valid)
     {
         Eigen::Matrix4d mat_motionlink2map = mat_baselink2map_snapshot * mat_motionlink2baselink_;
         Eigen::Isometry3d Isometry3d_motionlink2map;
@@ -1699,6 +1719,7 @@ void GloabalLocalization::Localization()
             }
 
             std::string best_seed = "none";
+            std::string best_seed_family = "none";
             Eigen::Matrix4d best_matrix = reg_matrix;
             double best_fitness = -1.0;
             double best_rmse = std::numeric_limits<double>::infinity();
@@ -1773,6 +1794,7 @@ void GloabalLocalization::Localization()
                      eva_after.inlier_rmse_ < best_rmse)))
                 {
                     best_seed = seed.name;
+                    best_seed_family = seed.family;
                     best_matrix = candidate;
                     best_fitness = eva_after.fitness_;
                     best_rmse = eva_after.inlier_rmse_;
@@ -1813,11 +1835,17 @@ void GloabalLocalization::Localization()
                     double confirm_yaw_error = 0.0;
                     {
                         std::lock_guard<std::mutex> state_lock(lock_mat_odom2map_);
-                        if (!recovery_confirm_valid_)
+                        const bool confirmation_family_changed =
+                            recovery_confirm_valid_ &&
+                            recovery_confirm_family_ != best_seed_family;
+                        if (!recovery_confirm_valid_ ||
+                            confirmation_family_changed)
                         {
                             recovery_confirm_odom2map_ = reg_matrix;
+                            recovery_confirm_family_ = best_seed_family;
                             recovery_confirm_valid_ = true;
                             recovery_streak = 1;
+                            confirmation_reset = confirmation_family_changed;
                         }
                         else
                         {
@@ -1847,6 +1875,7 @@ void GloabalLocalization::Localization()
                             else
                             {
                                 recovery_confirm_odom2map_ = reg_matrix;
+                                recovery_confirm_family_ = best_seed_family;
                                 recovery_streak = 1;
                                 confirmation_reset = true;
                             }
@@ -1882,9 +1911,10 @@ void GloabalLocalization::Localization()
                     }
                     RCLCPP_INFO(
                         this->get_logger(),
-                        "[OPEN3D_RECOVERY] confirmation seed=%s reset=%d "
+                        "[OPEN3D_RECOVERY] confirmation seed=%s family=%s reset=%d "
                         "error=(translation=%.3f,z=%.3f,yaw=%.3f) streak=%d/%d",
-                        best_seed.c_str(), confirmation_reset ? 1 : 0,
+                        best_seed.c_str(), best_seed_family.c_str(),
+                        confirmation_reset ? 1 : 0,
                         confirm_translation_error, confirm_z_error,
                         confirm_yaw_error, recovery_streak,
                         recovery_success_required_);
