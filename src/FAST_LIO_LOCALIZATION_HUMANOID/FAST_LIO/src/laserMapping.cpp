@@ -120,6 +120,10 @@ struct FastlioInputDiagnostics
 {
     using Clock = std::chrono::steady_clock;
 
+    // Sensor callbacks run independently from the mapping callback. Protect
+    // aggregate diagnostics so reporting/reset cannot race with observations.
+    std::mutex data_mutex;
+
     bool enabled = true;
     double imu_gap_warn_s = 0.02;
     double arrival_gap_warn_s = 0.02;
@@ -211,6 +215,7 @@ struct FastlioInputDiagnostics
     {
         if (!enabled)
             return;
+        std::lock_guard<std::mutex> lock(data_mutex);
         ++imu_count;
         if (have_imu)
         {
@@ -276,6 +281,7 @@ struct FastlioInputDiagnostics
     {
         if (!enabled)
             return;
+        std::lock_guard<std::mutex> lock(data_mutex);
         ++lidar_count;
         if (have_lidar)
         {
@@ -301,6 +307,7 @@ struct FastlioInputDiagnostics
     {
         if (!enabled)
             return;
+        std::lock_guard<std::mutex> lock(data_mutex);
         ++sync_count;
         const size_t count = meas.imu.size();
         sync_imu_min = std::min(sync_imu_min, count);
@@ -326,6 +333,7 @@ struct FastlioInputDiagnostics
     {
         if (!enabled)
             return;
+        std::lock_guard<std::mutex> lock(data_mutex);
         ++timer_count;
         timer_total_s += duration_s;
         timer_max_s = std::max(timer_max_s, duration_s);
@@ -341,6 +349,7 @@ struct FastlioInputDiagnostics
     {
         if (!enabled)
             return;
+        std::lock_guard<std::mutex> lock(data_mutex);
         ++estimator_count;
         effective_min = std::min(effective_min, effective);
         effective_max = std::max(effective_max, effective);
@@ -779,6 +788,7 @@ int scan_num = 0;
 // MeasureGroup；当 IMU 时间戳尚未覆盖到帧尾时返回 false 等待更多数据。
 bool sync_packages(MeasureGroup &meas)
 {
+    std::lock_guard<std::mutex> buffer_lock(mtx_buffer);
     if (lidar_buffer.empty() || imu_buffer.empty())
     {
         return false;
@@ -1244,6 +1254,7 @@ public:
         this->declare_parameter<string>("map_file_path", "");
         this->declare_parameter<string>("common.lid_topic", "/livox/lidar");
         this->declare_parameter<string>("common.imu_topic", "/livox/imu");
+        this->declare_parameter<int>("common.imu_qos_depth", 400);
         this->declare_parameter<bool>("common.time_sync_en", false);
         this->declare_parameter<double>("common.time_offset_lidar_to_imu", 0.0);
         this->declare_parameter<double>("filter_size_corner", 0.5);
@@ -1320,6 +1331,8 @@ public:
         this->get_parameter_or<string>("map_file_path", map_file_path, "");
         this->get_parameter_or<string>("common.lid_topic", lid_topic, "/livox/lidar");
         this->get_parameter_or<string>("common.imu_topic", imu_topic, "/livox/imu");
+        this->get_parameter_or<int>("common.imu_qos_depth", imu_qos_depth_, 400);
+        imu_qos_depth_ = std::max(10, imu_qos_depth_);
         this->get_parameter_or<bool>("common.time_sync_en", time_sync_en, false);
         this->get_parameter_or<double>("common.time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
         this->get_parameter_or<double>("filter_size_corner", filter_size_corner_min, 0.5);
@@ -1454,16 +1467,27 @@ public:
             cout << "~~~~" << ROOT_DIR << " doesn't exist" << endl;
 
         /*** ROS subscribe initialization ***/
+        sensor_callback_group_ = this->create_callback_group(
+            rclcpp::CallbackGroupType::MutuallyExclusive);
+        processing_callback_group_ = this->create_callback_group(
+            rclcpp::CallbackGroupType::MutuallyExclusive);
+        rclcpp::SubscriptionOptions sensor_subscription_options;
+        sensor_subscription_options.callback_group = sensor_callback_group_;
         if (p_pre->lidar_type == AVIA)
         {
-            sub_pcl_livox_ = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(lid_topic, 20, livox_pcl_cbk);
+            sub_pcl_livox_ = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(
+                lid_topic, 20, livox_pcl_cbk, sensor_subscription_options);
             // sub_pcl_livox_ = this->create_subscription<livox_interfaces::msg::CustomMsg>(lid_topic, 20, livox_pcl_cbk);
         }
         else
         {
-            sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
+            sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+                lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk,
+                sensor_subscription_options);
         }
-        sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 10, imu_cbk);
+        const auto imu_qos = rclcpp::QoS(rclcpp::KeepLast(imu_qos_depth_));
+        sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(
+            imu_topic, imu_qos, imu_cbk, sensor_subscription_options);
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_1", 20);
         pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body_1", 20);
         pubLaserCloudEffect_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected_1", 20);
@@ -1479,16 +1503,23 @@ public:
 
         //------------------------------------------------------------------------------------------------------
         auto period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0 / 100.0));
-        timer_ = rclcpp::create_timer(this, this->get_clock(), period_ms, std::bind(&LaserMappingNode::timer_callback, this));
+        timer_ = rclcpp::create_timer(
+            this, this->get_clock(), period_ms,
+            std::bind(&LaserMappingNode::timer_callback, this),
+            processing_callback_group_);
 
         auto map_period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0));
-        map_pub_timer_ = rclcpp::create_timer(this, this->get_clock(), map_period_ms, std::bind(&LaserMappingNode::map_publish_callback, this));
+        map_pub_timer_ = rclcpp::create_timer(
+            this, this->get_clock(), map_period_ms,
+            std::bind(&LaserMappingNode::map_publish_callback, this),
+            processing_callback_group_);
 
         if (input_diagnostics.enabled)
         {
             diagnostics_timer_ = create_wall_timer(
                 std::chrono::duration<double>(diagnostics_report_period_s),
-                std::bind(&LaserMappingNode::diagnostics_report_callback, this));
+                std::bind(&LaserMappingNode::diagnostics_report_callback, this),
+                processing_callback_group_);
             RCLCPP_INFO(
                 this->get_logger(),
                 "FAST-LIO input diagnostics enabled: report=%.2fs imu_gap=%.3fs "
@@ -1498,7 +1529,11 @@ public:
                 input_diagnostics.slow_timer_warn_s);
         }
 
-        map_save_srv_ = this->create_service<std_srvs::srv::Trigger>("map_save", std::bind(&LaserMappingNode::map_save_callback, this, std::placeholders::_1, std::placeholders::_2));
+        map_save_srv_ = this->create_service<std_srvs::srv::Trigger>(
+            "map_save",
+            std::bind(&LaserMappingNode::map_save_callback, this,
+                      std::placeholders::_1, std::placeholders::_2),
+            rmw_qos_profile_services_default, processing_callback_group_);
 
         RCLCPP_INFO(this->get_logger(), "Node init finished.");
     }
@@ -2038,6 +2073,8 @@ private:
     // callback free of formatting, terminal output and disk flushes.
     void diagnostics_report_callback()
     {
+        std::lock_guard<std::mutex> diagnostics_lock(
+            input_diagnostics.data_mutex);
         const auto now = FastlioInputDiagnostics::Clock::now();
         const double elapsed = std::max(
             1e-9, FastlioInputDiagnostics::seconds(
@@ -2254,8 +2291,11 @@ private:
     rclcpp::TimerBase::SharedPtr map_pub_timer_;
     rclcpp::TimerBase::SharedPtr diagnostics_timer_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
+    rclcpp::CallbackGroup::SharedPtr sensor_callback_group_;
+    rclcpp::CallbackGroup::SharedPtr processing_callback_group_;
 
     bool effect_pub_en = false, map_pub_en = false;
+    int imu_qos_depth_ = 400;
     bool robustness_enable_ = true;
     double imu_accel_saturation_threshold_ = 3.9;
     double imu_saturation_noise_scale_ = 100.0;
@@ -2324,7 +2364,11 @@ int main(int argc, char **argv)
 
     signal(SIGINT, SigHandle);
 
-    rclcpp::spin(std::make_shared<LaserMappingNode>());
+    auto node = std::make_shared<LaserMappingNode>();
+    rclcpp::executors::MultiThreadedExecutor executor(
+        rclcpp::ExecutorOptions(), 2);
+    executor.add_node(node);
+    executor.spin();
 
     if (rclcpp::ok())
         rclcpp::shutdown();

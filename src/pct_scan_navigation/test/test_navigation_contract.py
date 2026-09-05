@@ -534,24 +534,26 @@ def test_fastlio_degraded_state_preserves_bounded_motion_without_map_pollution()
     assert 'selected_in_family' in open3d
     assert '[OPEN3D_RECOVERY]' in open3d
     assert 'publish_odom_imu_tf_en && localization_valid' in mapping
+    assert 'common.imu_qos_depth' in mapping
+    assert 'sensor_callback_group_' in mapping
+    assert 'processing_callback_group_' in mapping
+    assert 'MultiThreadedExecutor' in mapping
 
     for profile in ('A2', 'B2'):
         nodes = load(profile, 'navigation.yaml')['nodes']
         robust = nodes['fastlio_mapping']['robustness']
+        common = nodes['fastlio_mapping']['common']
         assert robust['min_effective_points'] == 50
-        assert robust['max_degraded_duration'] == 3.0
         assert robust['critical_update_translation'] == 0.35
         assert robust['critical_update_rotation_deg'] == 5.0
         assert robust['critical_update_velocity'] == 1.5
         assert robust['recovery_bad_lost_frames'] == 3
-        assert robust['max_recovery_duration'] == 5.0
         assert robust['zero_effective_lost_frames'] > 0
         assert robust['max_imu_dt'] == 0.02
         assert robust['max_propagation_translation'] == 0.20
         assert robust['max_propagation_velocity'] == 2.0
         assert robust['lost_reinit_enable'] is True
         assert robust['lost_reinit_frames'] == 20
-        assert robust['lost_reinit_cooldown'] == 5.0
         assert robust['recovery_bootstrap_frames'] == 3
         open3d_params = nodes['global_localization_node']
         assert open3d_params['recovery_icp_distance_threshold'] == 0.5
@@ -559,9 +561,20 @@ def test_fastlio_degraded_state_preserves_bounded_motion_without_map_pollution()
         assert open3d_params['recovery_max_yaw_deg'] == 15.0
         assert open3d_params['recovery_max_inlier_rmse'] == 0.15
         if profile == 'A2':
-            assert open3d_params['recovery_provisional_fitness_threshold'] == 0.55
-            assert open3d_params['recovery_final_fitness_threshold'] == 0.58
+            assert common['imu_qos_depth'] == 400
+            assert robust['min_effective_ratio'] == 0.22
+            assert robust['degraded_enter_frames'] == 8
+            assert robust['max_degraded_duration'] == 6.0
+            assert robust['max_recovery_duration'] == 8.0
+            assert robust['lost_reinit_cooldown'] == 8.0
+            assert open3d_params['recovery_provisional_fitness_threshold'] == 0.40
+            assert open3d_params['recovery_final_fitness_threshold'] == 0.45
+            assert open3d_params['recovery_candidate_count'] == 2
+            assert open3d_params['recovery_success_required'] == 5
         else:
+            assert robust['max_degraded_duration'] == 3.0
+            assert robust['max_recovery_duration'] == 5.0
+            assert robust['lost_reinit_cooldown'] == 5.0
             assert open3d_params['recovery_provisional_fitness_threshold'] == 0.65
             assert open3d_params['recovery_final_fitness_threshold'] == 0.90
         assert open3d_params['recovery_xy_search_range'] == 1.0
@@ -576,8 +589,9 @@ def test_fastlio_degraded_state_preserves_bounded_motion_without_map_pollution()
         assert open3d_params['recovery_confirm_max_translation'] == 0.30
         assert open3d_params['recovery_confirm_max_z'] == 0.20
         assert open3d_params['recovery_confirm_max_yaw_deg'] == 3.0
-        assert open3d_params['recovery_candidate_count'] == 4
-        assert open3d_params['recovery_success_required'] == 3
+        if profile != 'A2':
+            assert open3d_params['recovery_candidate_count'] == 4
+            assert open3d_params['recovery_success_required'] == 3
 
 
 # 约束纯全局跟踪测试链路（coordinator 可执行 + pure_pursuit 启动）保留。

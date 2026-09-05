@@ -65,6 +65,7 @@ TOPICS=(
 
   /scan_base_link
   /scan_map
+  /map_3d
   /localization_3d
   /localization_3d_confidence
   /localization_3d_delay_ms
@@ -190,6 +191,10 @@ printf '%s\n' \
 if [[ -f "${TOOLS_DIR}/rosbag_playback_qos.yaml" ]]; then
   cp -f "${TOOLS_DIR}/rosbag_playback_qos.yaml" \
     "${BAG_OUTPUT_PATH}/repro/rosbag_playback_qos.yaml"
+fi
+if [[ -f /home/nav_map/rosbag/rosbag_playback.rviz ]]; then
+  cp -f /home/nav_map/rosbag/rosbag_playback.rviz \
+    "${BAG_OUTPUT_PATH}/repro/rosbag_playback.rviz"
 fi
 snapshot_runtime start
 
